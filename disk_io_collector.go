@@ -10,13 +10,13 @@ import (
 // DiskIOCollector handles all disk I/O related events and metrics
 type DiskIOCollector struct {
 	diskActivityMutex sync.RWMutex
-	diskActivityMap   map[string]*ProcessDiskActivity // key: "pid:disknum"
+	diskActivityMap   map[DiskActivityKey]*ProcessDiskActivity // key: DiskActivityKey
 
 	processNameMutex sync.RWMutex
 	processNameMap   map[uint32]string // ProcessID -> ProcessName mapping
 
 	fileObjectMutex sync.RWMutex
-	fileObjectMap   map[string]uint32 // FileObject -> ProcessID mapping
+	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
 }
 
 // DiskInfo stores physical disk information
@@ -37,12 +37,18 @@ type ProcessDiskActivity struct {
 	IOCount      uint64
 }
 
+// DiskActivityKey is used as a key for diskActivityMap instead of a string.
+type DiskActivityKey struct {
+	PID     uint32
+	DiskNum uint32
+}
+
 // NewDiskIOCollector creates a new disk I/O collector instance
 func NewDiskIOCollector() *DiskIOCollector {
 	return &DiskIOCollector{
-		diskActivityMap: make(map[string]*ProcessDiskActivity),
+		diskActivityMap: make(map[DiskActivityKey]*ProcessDiskActivity),
 		processNameMap:  make(map[uint32]string),
-		fileObjectMap:   make(map[string]uint32),
+		fileObjectMap:   make(map[uint64]uint32),
 	}
 }
 
@@ -62,11 +68,6 @@ func NewDiskIOCollector() *DiskIOCollector {
 //	IORequestPacket (win:Pointer) - Pointer to the I/O request packet
 //	HighResResponseTime (win:UInt64) - High-resolution response time
 func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		return err
@@ -78,7 +79,7 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	}
 
 	// Get FileObject for process correlation
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect)
 		processID := helper.EventRec.EventHeader.ProcessId
@@ -118,11 +119,6 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 //	IORequestPacket (win:Pointer) - Pointer to the I/O request packet
 //	HighResResponseTime (win:UInt64) - High-resolution response time
 func (d *DiskIOCollector) HandleDiskWrite(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		return err
@@ -134,7 +130,7 @@ func (d *DiskIOCollector) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 	}
 
 	// Get FileObject for process correlation
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect)
 		processID := helper.EventRec.EventHeader.ProcessId
@@ -170,11 +166,6 @@ func (d *DiskIOCollector) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 //	HighResResponseTime (win:UInt64) - High-resolution response time
 //	IORequestPacket (win:Pointer) - Pointer to the I/O request packet
 func (d *DiskIOCollector) HandleDiskFlush(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		return err
@@ -203,12 +194,7 @@ func (d *DiskIOCollector) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 //	ShareAccess (win:UInt32) - Share access
 //	FileName (win:UnicodeString) - File name
 func (d *DiskIOCollector) HandleFileCreate(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
 	}
@@ -236,12 +222,7 @@ func (d *DiskIOCollector) HandleFileCreate(helper *etw.EventRecordHelper) error 
 //	FileKey (win:Pointer) - File key
 //	IssuingThreadId (win:UInt32) - Thread ID that issued the I/O (V1 template)
 func (d *DiskIOCollector) HandleFileClose(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
 	}
@@ -270,12 +251,7 @@ func (d *DiskIOCollector) HandleFileClose(helper *etw.EventRecordHelper) error {
 //	IOFlags (win:UInt32) - I/O flags
 //	ExtraFlags (win:UInt32) - Extra flags (V1 template)
 func (d *DiskIOCollector) HandleFileWrite(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
 	}
@@ -307,12 +283,7 @@ func (d *DiskIOCollector) HandleFileWrite(helper *etw.EventRecordHelper) error {
 //	IOFlags (win:UInt32) - I/O flags
 //	ExtraFlags (win:UInt32) - Extra flags (V1 template)
 func (d *DiskIOCollector) HandleFileRead(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
 	}
@@ -343,12 +314,7 @@ func (d *DiskIOCollector) HandleFileRead(helper *etw.EventRecordHelper) error {
 //	InfoClass (win:UInt32) - Information class
 //	FilePath (win:UnicodeString) - File path
 func (d *DiskIOCollector) HandleFileDelete(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
-	fileObject, err := helper.GetPropertyString("FileObject")
+	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
 	}
@@ -391,11 +357,6 @@ func (d *DiskIOCollector) HandleFileDelete(helper *etw.EventRecordHelper) error 
 // NOTE: Fields like DeviceName, Model, Size are NOT available in this MOF class.
 // Only the fields listed above are present in SystemConfig_PhyDisk events.
 func (d *DiskIOCollector) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	// Get required DiskNumber field
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
@@ -446,11 +407,6 @@ func (d *DiskIOCollector) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelpe
 //	  uint32 Pad3;                 // Not used
 //	};
 func (d *DiskIOCollector) HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	// Get required DiskNumber field
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
@@ -480,24 +436,24 @@ func (d *DiskIOCollector) HandleSystemConfigLogDisk(helper *etw.EventRecordHelpe
 	return nil
 }
 
-// HandleProcessStart processes process start events for name tracking
+// HandleProcessStart processes process start and rundown events for name tracking
 // Process Event: Microsoft-Windows-Kernel-Process
 // Provider GUID: {22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}
-// Event ID: 1 (ProcessStart)
+// Event ID: 1 (ProcessStart) - New process creation
+// Event ID: 15 (ProcessRundown/DCStart) - Existing processes when tracing starts
 //
-// Properties from manifest:
+// Properties from manifest (ProcessStartArgs template):
 //
 //	ProcessID (win:UInt32) - Process identifier
 //	CreateTime (win:FILETIME) - Process creation time
 //	ParentProcessID (win:UInt32) - Parent process identifier
 //	SessionID (win:UInt32) - Session identifier
 //	ImageName (win:UnicodeString) - Process image name
+//
+// Note: ProcessRundown events are crucial for capturing process names of processes
+// that were already running when ETW tracing started. Without these events,
+// processes that started before tracing would show as "unknown_*" in metrics.
 func (d *DiskIOCollector) HandleProcessStart(helper *etw.EventRecordHelper) error {
-	// Parse event properties first
-	if err := helper.ParseProperties(); err != nil {
-		return err
-	}
-
 	processID, err := helper.GetPropertyUint("ProcessID")
 	if err != nil {
 		// If we can't get ProcessID from properties, use EventHeader ProcessId
@@ -521,7 +477,7 @@ func (d *DiskIOCollector) HandleProcessStart(helper *etw.EventRecordHelper) erro
 // Provider GUID: {22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}
 // Event ID: 2 (ProcessStop)
 //
-// Properties from manifest:
+// Properties from manifest (ProcessStopArgs template):
 //
 //	ProcessID (win:UInt32) - Process identifier
 //	CreateTime (win:FILETIME) - Process creation time
@@ -569,8 +525,8 @@ func (d *DiskIOCollector) removeProcessName(pid uint32) {
 }
 
 // getDiskActivityKey creates a unique key for disk activity tracking
-func (d *DiskIOCollector) getDiskActivityKey(pid uint32, diskNum uint32) string {
-	return strconv.FormatUint(uint64(pid), 10) + ":" + strconv.FormatUint(uint64(diskNum), 10)
+func (d *DiskIOCollector) getDiskActivityKey(pid uint32, diskNum uint32) DiskActivityKey {
+	return DiskActivityKey{PID: pid, DiskNum: diskNum}
 }
 
 // updateDiskIOMetrics updates the Prometheus metrics for disk I/O operations
@@ -578,7 +534,7 @@ func (d *DiskIOCollector) updateDiskIOMetrics(diskNumber, processID, transferSiz
 	// Get process name for labels
 	processName := d.getProcessName(processID)
 
-	// Create activity key - avoid fmt.Sprintf for better performance
+	// Create activity key
 	activityKey := d.getDiskActivityKey(processID, diskNumber)
 
 	// Update activity tracking

@@ -51,6 +51,9 @@ func (s *SessionManager) Start() error {
 
 	// Get SystemConfig events first if using manifest providers
 	// SystemConfig events only arrive when kernel sessions are stopped
+	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
+	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
+	// So we use this workaround to capture SystemConfig events
 	if err := s.captureSystemConfigEvents(); err != nil {
 		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 	}
@@ -77,13 +80,6 @@ func (s *SessionManager) Start() error {
 // captureSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
 // These events are only emitted when a kernel session is stopped, so we need this special handling
 func (s *SessionManager) captureSystemConfigEvents() error {
-	// Only capture SystemConfig if we're using manifest providers
-	// (kernel sessions will get these events naturally when they stop)
-	manifestProviders := GetEnabledManifestProviders(s.config)
-	if len(manifestProviders) == 0 {
-		return nil // Using kernel providers, will get SystemConfig on session stop
-	}
-
 	// Create a temporary kernel session to get SystemConfig events
 	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
 
@@ -125,7 +121,7 @@ func (s *SessionManager) captureSystemConfigEvents() error {
 	}
 
 	// Wait a bit for events to be captured before stopping
-	time.Sleep(200 * time.Millisecond)
+	time.Sleep(100 * time.Millisecond)
 
 	// Stop the kernel session to trigger SystemConfig events
 	if err := tempKernelSession.Stop(); err != nil {
@@ -153,6 +149,9 @@ func (s *SessionManager) setupSessions() error {
 			if err := s.manifestSession.EnableProvider(provider); err != nil {
 				return fmt.Errorf("failed to enable provider %s: %w", provider.Name, err)
 			}
+			// force rundown events for manifest providers
+			// This ensures we get initial state for providers that support rundown
+			s.manifestSession.GetRundownEvents(&provider)
 		}
 		sessions = append(sessions, s.manifestSession)
 	}
@@ -165,6 +164,7 @@ func (s *SessionManager) setupSessions() error {
 		if err := s.kernelSession.Start(); err != nil {
 			return fmt.Errorf("failed to start kernel session: %w", err)
 		}
+		//s.kernelSession.GetRundownEvents(nil)
 		sessions = append(sessions, s.kernelSession)
 	}
 
