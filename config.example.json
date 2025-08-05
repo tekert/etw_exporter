@@ -1,0 +1,21 @@
+{
+    "server": {
+        "listen_address": ":9189",
+        "metrics_path": "/metrics"
+    },
+    "collectors": {
+        "disk_io": {
+            "enabled": true,
+            "track_disk_info": true,
+            "track_file_mapping": false
+        },
+        "context_switch": {
+            "enabled": false
+        }
+    },
+    "global": {
+        "log_level": "info",
+        "buffer_size": 64,
+        "flush_timeout": "5s"
+    }
+}

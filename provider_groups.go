@@ -11,62 +11,116 @@ type ProviderGroup struct {
 }
 
 // Pre-defined GUIDs for performance (no string comparisons)
+// https://learn.microsoft.com/en-us/windows/win32/etw/nt-kernel-logger-constants
 var (
-	// Kernel provider GUIDs - These are the actual providers we use
-	DiskIoKernelGUID  = etw.MustParseGUID("{3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}") // DiskIo
-	ProcessKernelGUID = etw.MustParseGUID("{3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c}") // Process
+	// SystemConfig GUID for hardware configuration events
+	SystemConfigGUID = etw.MustParseGUID("{01853a65-418f-4f36-aefc-dc0f1d2fd235}") // SystemConfig
 
-	// Manifest provider GUIDs - UNUSED: Kept for reference only
-	// We use NT Kernel Logger instead of manifest providers to avoid duplicated events
-	// and to ensure we get both disk events AND SystemConfig events in a single session.
-	// On Windows build 19045, manifest providers don't provide SystemConfig events needed
-	// for disk number to drive letter correlation, making NT Kernel Logger the better choice.
-	// MicrosoftWindowsKernelDiskGUID = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
+	// Manifest provider GUIDs - Modern providers with better event parsing
+	MicrosoftWindowsKernelDiskGUID    = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
+	MicrosoftWindowsKernelProcessGUID = etw.MustParseGUID("{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}") // Microsoft-Windows-Kernel-Process
+	MicrosoftWindowsKernelFileGUID    = etw.MustParseGUID("{edd08927-9cc4-4e65-b970-c2560fb5c289}") // Microsoft-Windows-Kernel-File
+
+	// Kernel provider GUIDs for context switches (these require kernel session)
+	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread
 )
 
 // Global provider groups configuration
 var (
-	// DiskIOGroup provides comprehensive disk I/O monitoring using NT Kernel Logger only
-	// We use ONLY the NT Kernel Logger to avoid duplicated events and ensure complete coverage.
-	// Rationale for NT Kernel Logger over manifest providers:
-	//   1. Single session gets both disk I/O events AND SystemConfig events
-	//   2. SystemConfig events are essential for correlating disk numbers to drive letters/models
-	//   3. Manifest providers (Microsoft-Windows-Kernel-Disk) don't provide SystemConfig events
-	//   4. Using both would result in duplicated disk I/O events
-	//   5. NT Kernel Logger works reliably on Windows build 19045 and earlier
+	// DiskIOGroup uses manifest providers for disk I/O events
+	// These are modern providers with better event parsing
 	DiskIOGroup = ProviderGroup{
 		Name:    "disk_io",
-		Enabled: true,
-		// Kernel flags for disk I/O events, process rundown for process names, and SystemConfig
-		KernelFlags: etw.EVENT_TRACE_FLAG_DISK_IO_INIT | etw.EVENT_TRACE_FLAG_DISK_IO | etw.EVENT_TRACE_FLAG_PROCESS,
-		// No manifest providers - we rely entirely on NT Kernel Logger
+		Enabled: false, // Will be enabled based on config
+		// No kernel flags - using manifest providers only
+		KernelFlags: 0,
+		// Manifest providers for disk I/O
+		ManifestProviders: []etw.Provider{
+			{
+				Name: "Microsoft-Windows-Kernel-Disk",
+				GUID: *MicrosoftWindowsKernelDiskGUID,
+				// Enable all disk I/O events: Read (10), Write (11), Flush (14)
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x0,  // All keywords
+				MatchAllKeyword: 0x0,
+			},
+			{
+				Name: "Microsoft-Windows-Kernel-Process",
+				GUID: *MicrosoftWindowsKernelProcessGUID,
+				// Enable process events: Start (1), Stop (2), Rundown (15)
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x10, // WINEVENT_KEYWORD_PROCESS
+				MatchAllKeyword: 0x0,
+			},
+		},
+	}
+
+	// ContextSwitchGroup uses kernel session for low-level thread events
+	// Context switches require kernel session for optimal performance
+	ContextSwitchGroup = ProviderGroup{
+		Name:    "context_switch",
+		Enabled: false, // Will be enabled based on config
+		// Kernel flags for context switches and thread events
+		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
+			etw.EVENT_TRACE_FLAG_THREAD |
+			etw.EVENT_TRACE_FLAG_DISPATCHER,
+		// No manifest providers - using kernel session only
 		ManifestProviders: []etw.Provider{},
+	}
+
+	// FileIOGroup uses manifest providers for detailed file I/O tracking
+	// Used when TrackFileMapping is enabled (heavy metrics)
+	FileIOGroup = ProviderGroup{
+		Name:    "file_io",
+		Enabled: false, // Will be enabled based on TrackFileMapping config
+		// No kernel flags - using manifest providers only
+		KernelFlags: 0,
+		// Manifest providers for file I/O
+		ManifestProviders: []etw.Provider{
+			{
+				Name: "Microsoft-Windows-Kernel-File",
+				GUID: *MicrosoftWindowsKernelFileGUID,
+				// Enable file I/O events: Read (15), Write (16), Create (12), etc.
+				EnableLevel:     0xFF,  // All levels
+				MatchAnyKeyword: 0x120, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
+				MatchAllKeyword: 0x0,
+			},
+		},
 	}
 
 	// All available provider groups
 	AllProviderGroups = []*ProviderGroup{
 		&DiskIOGroup,
+		&ContextSwitchGroup,
+		&FileIOGroup,
 	}
 )
 
 // GetEnabledKernelFlags returns combined kernel flags for all enabled groups
-func GetEnabledKernelFlags() uint32 {
+func GetEnabledKernelFlags(config *AppCollectorConfig) uint32 {
 	var flags uint32
-	for _, group := range AllProviderGroups {
-		if group.Enabled {
-			flags |= group.KernelFlags
-		}
+
+	// Enable ContextSwitch group based on config (requires kernel session)
+	if config.ContextSwitch.Enabled {
+		flags |= ContextSwitchGroup.KernelFlags
 	}
+
 	return flags
 }
 
 // GetEnabledManifestProviders returns all manifest providers for enabled groups
-func GetEnabledManifestProviders() []etw.Provider {
+func GetEnabledManifestProviders(config *AppCollectorConfig) []etw.Provider {
 	var providers []etw.Provider
-	for _, group := range AllProviderGroups {
-		if group.Enabled {
-			providers = append(providers, group.ManifestProviders...)
-		}
+
+	// Enable DiskIO group based on config (manifest providers)
+	if config.DiskIO.Enabled {
+		providers = append(providers, DiskIOGroup.ManifestProviders...)
 	}
+
+	// Enable FileIO group based on TrackFileMapping config (heavy metrics)
+	if config.DiskIO.Enabled && config.DiskIO.TrackFileMapping {
+		providers = append(providers, FileIOGroup.ManifestProviders...)
+	}
+
 	return providers
 }

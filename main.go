@@ -19,8 +19,30 @@ func main() {
 	var (
 		listenAddress = flag.String("web.listen-address", ":9189", "Address to listen on for web interface and telemetry.")
 		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+		configPath    = flag.String("config", "", "Path to configuration file (optional).")
 	)
 	flag.Parse()
+
+	// Load configuration
+	config, err := LoadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("Failed to load configuration: %v", err)
+	}
+
+	// Override with command line flags if provided
+	if flag.Lookup("web.listen-address").Value.String() != ":9189" {
+		config.Server.ListenAddress = *listenAddress
+	}
+	if flag.Lookup("web.telemetry-path").Value.String() != "/metrics" {
+		config.Server.MetricsPath = *metricsPath
+	}
+
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		log.Fatalf("Invalid configuration: %v", err)
+	}
+
+	log.Printf("Starting ETW Exporter v%s with config: DiskIO=%t", version, config.Collectors.DiskIO.Enabled)
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -37,11 +59,11 @@ func main() {
 	// Initialize metrics
 	InitMetrics()
 
-	// Initialize the global disk collector
-	diskCollector = NewDiskIOCollector()
+	// Create event handler with configuration
+	eventHandler := NewEventHandler(GetMetrics(), &config.Collectors)
 
 	// Set up ETW session
-	etwSession := NewSessionManager()
+	etwSession := NewSessionManager(eventHandler, &config.Collectors)
 	defer etwSession.Stop()
 
 	// Enable provider groups for our collectors
@@ -59,19 +81,19 @@ func main() {
 	}
 
 	// Set up HTTP server for Prometheus metrics
-	http.Handle(*metricsPath, promhttp.Handler())
+	http.Handle(config.Server.MetricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
             <head><title>ETW Exporter</title></head>
             <body>
             <h1>ETW Exporter v` + version + ` </h1>
-            <p><a href="` + *metricsPath + `">Metrics</a></p>
+            <p><a href="` + config.Server.MetricsPath + `">Metrics</a></p>
             </body>
             </html>`))
 	})
 
-	log.Printf("Starting server on %s", *listenAddress)
-	srv := &http.Server{Addr: *listenAddress}
+	log.Printf("Starting server on %s", config.Server.ListenAddress)
+	srv := &http.Server{Addr: config.Server.ListenAddress}
 	go func() {
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("Failed to start HTTP server: %v", err)
