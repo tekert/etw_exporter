@@ -2,10 +2,11 @@
 package main
 
 import (
-	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/phuslu/log"
@@ -13,346 +14,12 @@ import (
 )
 
 var (
-// Main application logger - uses log.DefaultLogger
-// This avoids the need for plog prefix throughout the codebase
-// Module-specific loggers with prefixes will be created from this
+	// Module-specific fast loggers for hot paths
+	// These use IOWriter (JSON) for maximum performance in event processing
+	diskIOLogger log.Logger
+	threadLogger log.Logger
+	eventLogger  log.Logger
 )
-
-// LogOutputType defines the type of log output
-type LogOutputType string
-
-const (
-	LogOutputIO       LogOutputType = "io"
-	LogOutputConsole  LogOutputType = "console"
-	LogOutputFile     LogOutputType = "file"
-	LogOutputSyslog   LogOutputType = "syslog"
-	LogOutputEventlog LogOutputType = "eventlog"
-	LogOutputMulti    LogOutputType = "multi"
-)
-
-// LogGlobalConfig contains global logger settings
-type LogGlobalConfig struct {
-	Level        string `json:"level"`        // Log level: trace, debug, info, warn, error, fatal
-	Caller       int    `json:"caller"`       // Caller information depth (0=disabled, 1=enabled, -1=full path)
-	TimeField    string `json:"timeField"`    // Time field name in output (default: "time")
-	TimeFormat   string `json:"timeFormat"`   // Time format (empty=RFC3339 with milliseconds)
-	TimeLocation string `json:"timeLocation"` // Time location (default: "Local")
-}
-
-// LogIOConfig contains IO writer configuration
-type LogIOConfig struct {
-	Writer string `json:"writer"` // "stdout", "stderr"
-	Async  bool   `json:"async"`  // Use async writer
-}
-
-// LogConsoleConfig contains console writer configuration
-// WARNING: Do not use ConsoleWriter on critical path of high concurrency applications!
-// ConsoleWriter should NOT be used in event processing hot paths due to performance impact.
-type LogConsoleConfig struct {
-	ColorOutput    bool   `json:"colorOutput"`    // Enable colorized output
-	QuoteString    bool   `json:"quoteString"`    // Quote string values
-	EndWithMessage bool   `json:"endWithMessage"` // Output message at end of line
-	Format         string `json:"format"`         // "json" or custom format
-	Writer         string `json:"writer"`         // "stdout", "stderr"
-	Async          bool   `json:"async"`          // Use async writer
-}
-
-// LogFileConfig contains file writer configuration
-type LogFileConfig struct {
-	Filename     string `json:"filename"`     // Log file path
-	FileMode     int    `json:"fileMode"`     // File permissions (e.g., 0644)
-	MaxSize      int64  `json:"maxSize"`      // Maximum file size in bytes
-	MaxBackups   int    `json:"maxBackups"`   // Maximum number of backup files
-	TimeFormat   string `json:"timeFormat"`   // Time format for rotation
-	LocalTime    bool   `json:"localTime"`    // Use local time for timestamps
-	HostName     bool   `json:"hostName"`     // Include hostname in filename
-	ProcessID    bool   `json:"processID"`    // Include process ID in filename
-	EnsureFolder bool   `json:"ensureFolder"` // Create directory if needed
-	Async        bool   `json:"async"`        // Use async writer
-}
-
-// LogSyslogConfig contains syslog writer configuration
-type LogSyslogConfig struct {
-	Network  string `json:"network"`  // "tcp", "udp", "unixgram"
-	Address  string `json:"address"`  // Address (e.g., "localhost:514")
-	Hostname string `json:"hostname"` // Hostname for syslog
-	Tag      string `json:"tag"`      // Syslog tag
-	Marker   string `json:"marker"`   // Marker prefix
-	Async    bool   `json:"async"`    // Use async writer
-}
-
-// LogEventlogConfig contains Windows event log configuration
-type LogEventlogConfig struct {
-	Source string `json:"source"` // Event source name
-	ID     int    `json:"id"`     // Event ID
-	Host   string `json:"host"`   // Host name
-	Async  bool   `json:"async"`  // Use async writer
-}
-
-// LogMultiConfig contains multi-level writer configuration
-type LogMultiConfig struct {
-	InfoWriter    string `json:"infoWriter"`    // Writer type for info level
-	WarnWriter    string `json:"warnWriter"`    // Writer type for warn level
-	ErrorWriter   string `json:"errorWriter"`   // Writer type for error level
-	ConsoleWriter string `json:"consoleWriter"` // Console writer type
-	ConsoleLevel  string `json:"consoleLevel"`  // Minimum level for console
-}
-
-// LogOutputConfig represents a single output configuration
-type LogOutputConfig struct {
-	Type    LogOutputType   `json:"type"`    // Output type
-	Enabled bool            `json:"enabled"` // Whether this output is enabled
-	Config  json.RawMessage `json:"config"`  // Configuration specific to the output type
-}
-
-// LogConfig holds the complete logging configuration
-type LogConfig struct {
-	Global  LogGlobalConfig   `json:"global"`  // Global logger settings
-	Outputs []LogOutputConfig `json:"outputs"` // Output configurations
-}
-
-// DefaultLogConfig returns the default logging configuration
-func DefaultLogConfig() LogConfig {
-	return LogConfig{
-		Global: LogGlobalConfig{
-			Level:        "info",
-			Caller:       0,
-			TimeField:    "",
-			TimeFormat:   "",
-			TimeLocation: "Local",
-		},
-		Outputs: []LogOutputConfig{
-			{
-				Type:    LogOutputIO,
-				Enabled: true,
-				Config:  json.RawMessage(`{"writer": "stderr", "async": false}`),
-			},
-		},
-	}
-}
-
-// parseOutputConfig parses the configuration for a specific output type
-func parseOutputConfig(outputType LogOutputType, config json.RawMessage) (interface{}, error) {
-	switch outputType {
-	case LogOutputIO:
-		var cfg LogIOConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	case LogOutputConsole:
-		var cfg LogConsoleConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	case LogOutputFile:
-		var cfg LogFileConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	case LogOutputSyslog:
-		var cfg LogSyslogConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	case LogOutputEventlog:
-		var cfg LogEventlogConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	case LogOutputMulti:
-		var cfg LogMultiConfig
-		if err := json.Unmarshal(config, &cfg); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	default:
-		return nil, nil
-	}
-}
-
-// createWriter creates a log.Writer based on the output configuration
-func createWriter(outputConfig LogOutputConfig) (log.Writer, error) {
-	if !outputConfig.Enabled {
-		return nil, nil
-	}
-
-	parsedConfig, err := parseOutputConfig(outputConfig.Type, outputConfig.Config)
-	if err != nil {
-		return nil, err
-	}
-
-	switch outputConfig.Type {
-	case LogOutputIO:
-		cfg := parsedConfig.(LogIOConfig)
-		var writer io.Writer
-		switch cfg.Writer {
-		case "stdout":
-			writer = os.Stdout
-		case "stderr":
-			writer = os.Stderr
-		default:
-			writer = os.Stderr
-		}
-
-		baseWriter := &log.IOWriter{Writer: writer}
-		if cfg.Async {
-			return &log.AsyncWriter{
-				ChannelSize: 4096,
-				Writer:      baseWriter,
-			}, nil
-		}
-		return baseWriter, nil
-
-	case LogOutputConsole:
-		// WARNING: ConsoleWriter should not be used in high-performance hot paths!
-		cfg := parsedConfig.(LogConsoleConfig)
-		var writer io.Writer
-		switch cfg.Writer {
-		case "stdout":
-			writer = os.Stdout
-		case "stderr":
-			writer = os.Stderr
-		default:
-			writer = os.Stderr
-		}
-
-		baseWriter := &log.ConsoleWriter{
-			ColorOutput:    cfg.ColorOutput,
-			QuoteString:    cfg.QuoteString,
-			EndWithMessage: cfg.EndWithMessage,
-			Writer:         writer,
-		}
-
-		if cfg.Async {
-			return &log.AsyncWriter{
-				ChannelSize: 4096,
-				Writer:      baseWriter,
-			}, nil
-		}
-		return baseWriter, nil
-
-	case LogOutputFile:
-		cfg := parsedConfig.(LogFileConfig)
-
-		// Ensure directory exists if requested
-		if cfg.EnsureFolder {
-			dir := filepath.Dir(cfg.Filename)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return nil, err
-			}
-		}
-
-		baseWriter := &log.FileWriter{
-			Filename:     cfg.Filename,
-			FileMode:     os.FileMode(cfg.FileMode),
-			MaxSize:      cfg.MaxSize,
-			MaxBackups:   cfg.MaxBackups,
-			TimeFormat:   cfg.TimeFormat,
-			LocalTime:    cfg.LocalTime,
-			HostName:     cfg.HostName,
-			ProcessID:    cfg.ProcessID,
-			EnsureFolder: cfg.EnsureFolder,
-		}
-
-		if cfg.Async {
-			return &log.AsyncWriter{
-				ChannelSize: 4096,
-				Writer:      baseWriter,
-			}, nil
-		}
-		return baseWriter, nil
-
-	case LogOutputSyslog:
-		cfg := parsedConfig.(LogSyslogConfig)
-		baseWriter := &log.SyslogWriter{
-			Network:  cfg.Network,
-			Address:  cfg.Address,
-			Hostname: cfg.Hostname,
-			Tag:      cfg.Tag,
-			Marker:   cfg.Marker,
-		}
-
-		if cfg.Async {
-			return &log.AsyncWriter{
-				ChannelSize: 4096,
-				Writer:      baseWriter,
-			}, nil
-		}
-		return baseWriter, nil
-
-	case LogOutputEventlog:
-		cfg := parsedConfig.(LogEventlogConfig)
-		baseWriter := &log.EventlogWriter{
-			Source: cfg.Source,
-			ID:     uintptr(cfg.ID),
-			Host:   cfg.Host,
-		}
-
-		if cfg.Async {
-			return &log.AsyncWriter{
-				ChannelSize: 4096,
-				Writer:      baseWriter,
-			}, nil
-		}
-		return baseWriter, nil
-
-	case LogOutputMulti:
-		// TODO(tekert): Implement multi-level writer or not
-		// {
-		// 	"type": "multi",
-		// 	"enabled": false,
-		// 	"config": {
-		// 		"infoWriter": "io",
-		// 		"warnWriter": "file",
-		// 		"errorWriter": "file",
-		// 		"consoleWriter": "console",
-		// 		"consoleLevel": "warn"
-		// }
-		// Multi-level writer requires reference to other outputs
-		// This is more complex and would need additional implementation
-		return nil, nil
-
-	default:
-		return nil, nil
-	}
-}
-
-// createMultiWriter creates a multi-writer that outputs to multiple destinations
-func createMultiWriter(outputs []LogOutputConfig) (log.Writer, error) {
-	var writers []log.Writer
-
-	for _, output := range outputs {
-		if !output.Enabled {
-			continue
-		}
-
-		writer, err := createWriter(output)
-		if err != nil {
-			return nil, err
-		}
-		if writer != nil {
-			writers = append(writers, writer)
-		}
-	}
-
-	if len(writers) == 0 {
-		// Fallback to stderr if no writers are configured
-		return &log.IOWriter{Writer: os.Stderr}, nil
-	}
-
-	if len(writers) == 1 {
-		return writers[0], nil
-	}
-
-	// Use MultiEntryWriter for multiple outputs
-	multiWriter := log.MultiEntryWriter(writers)
-	return &multiWriter, nil
-}
 
 // parseLogLevel converts string log level to log.Level
 func parseLogLevel(levelStr string) log.Level {
@@ -389,8 +56,257 @@ func parseTimeLocation(location string) *time.Location {
 	}
 }
 
+// createConsoleWriter creates a console writer based on configuration
+func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
+	var baseWriter io.Writer
+	switch config.Writer {
+	case "stdout":
+		baseWriter = os.Stdout
+	case "stderr":
+		baseWriter = os.Stderr
+	default:
+		baseWriter = os.Stderr
+	}
+
+	var writer log.Writer
+
+	if config.FastIO {
+		// Use fast IOWriter for JSON output
+		writer = &log.IOWriter{Writer: baseWriter}
+	} else {
+		// Use ConsoleWriter for formatted output
+		consoleWriter := &log.ConsoleWriter{
+			ColorOutput:    config.ColorOutput,
+			QuoteString:    config.QuoteString,
+			EndWithMessage: true,
+			Writer:         baseWriter,
+		}
+
+		// Set formatter based on format
+		switch config.Format {
+		case "json":
+			// JSON format using ConsoleWriter for proper formatting
+			consoleWriter.Formatter = func(w io.Writer, a *log.FormatterArgs) (int, error) {
+				return fmt.Fprintf(w, `{"time":%q,"level":%q,"caller":%q,"goid":%q,"message":%q}`+"\n",
+					a.Time, a.Level, a.Caller, a.Goid, a.Message)
+			}
+			writer = consoleWriter
+		case "logfmt":
+			// Logfmt format
+			consoleWriter.Formatter = log.LogfmtFormatter{TimeField: "time"}.Formatter
+			writer = consoleWriter
+		case "glog":
+			// Glog format
+			consoleWriter.Formatter = func(w io.Writer, a *log.FormatterArgs) (int, error) {
+				level := 'I'
+				if len(a.Level) > 0 {
+					level = rune(a.Level[0] - 32) // Convert to uppercase
+				}
+				return fmt.Fprintf(w, "%c%s %s %s] %s\n", level, a.Time, a.Goid, a.Caller, a.Message)
+			}
+			writer = consoleWriter
+		case "auto":
+			fallthrough
+		default:
+			// Default colorized console format
+			writer = consoleWriter
+		}
+	}
+
+	if config.Async {
+		return &log.AsyncWriter{
+			ChannelSize: 4096,
+			Writer:      writer,
+		}, nil
+	}
+	return writer, nil
+}
+
+// createFileWriter creates a file writer based on configuration
+func createFileWriter(config *FileConfig) (log.Writer, error) {
+	// Ensure directory exists if requested
+	if config.EnsureFolder {
+		dir := filepath.Dir(config.Filename)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return nil, err
+		}
+	}
+
+	baseWriter := &log.FileWriter{
+		Filename:     config.Filename,
+		FileMode:     0644, // Fixed mode for Windows
+		MaxSize:      config.MaxSize,
+		MaxBackups:   config.MaxBackups,
+		TimeFormat:   config.TimeFormat,
+		LocalTime:    config.LocalTime,
+		HostName:     config.HostName,
+		ProcessID:    config.ProcessID,
+		EnsureFolder: config.EnsureFolder,
+	}
+
+	if config.Async {
+		return &log.AsyncWriter{
+			ChannelSize: 4096,
+			Writer:      baseWriter,
+		}, nil
+	}
+	return baseWriter, nil
+}
+
+// createSyslogWriter creates a syslog writer based on configuration
+func createSyslogWriter(config *SyslogConfig) (log.Writer, error) {
+	baseWriter := &log.SyslogWriter{
+		Network:  config.Network,
+		Address:  config.Address,
+		Hostname: config.Hostname,
+		Tag:      config.Tag,
+		Marker:   config.Marker,
+	}
+
+	if config.Async {
+		return &log.AsyncWriter{
+			ChannelSize: 4096,
+			Writer:      baseWriter,
+		}, nil
+	}
+	return baseWriter, nil
+}
+
+// createEventlogWriter creates an eventlog writer based on configuration
+func createEventlogWriter(config *EventlogConfig) (log.Writer, error) {
+	baseWriter := &log.EventlogWriter{
+		Source: config.Source,
+		ID:     uintptr(config.ID),
+		Host:   config.Host,
+	}
+
+	if config.Async {
+		return &log.AsyncWriter{
+			ChannelSize: 4096,
+			Writer:      baseWriter,
+		}, nil
+	}
+	return baseWriter, nil
+}
+
+// createWriter creates a log.Writer based on the output configuration
+func createWriter(output LogOutput) (log.Writer, error) {
+	if !output.Enabled {
+		return nil, nil
+	}
+
+	switch output.Type {
+	case "console":
+		if output.Console == nil {
+			return nil, fmt.Errorf("console output missing console configuration")
+		}
+		return createConsoleWriter(output.Console)
+
+	case "file":
+		if output.File == nil {
+			return nil, fmt.Errorf("file output missing file configuration")
+		}
+		return createFileWriter(output.File)
+
+	case "syslog":
+		if output.Syslog == nil {
+			return nil, fmt.Errorf("syslog output missing syslog configuration")
+		}
+		return createSyslogWriter(output.Syslog)
+
+	case "eventlog":
+		if output.Eventlog == nil {
+			return nil, fmt.Errorf("eventlog output missing eventlog configuration")
+		}
+		return createEventlogWriter(output.Eventlog)
+
+	default:
+		return nil, fmt.Errorf("unknown output type: %s", output.Type)
+	}
+}
+
+// createMultiWriter creates a multi-writer that outputs to multiple destinations
+func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
+	var writers []log.Writer
+
+	for _, output := range outputs {
+		if !output.Enabled {
+			continue
+		}
+
+		if output.Type == "console" {
+			// Always use the shared synchronized console writer to prevent race conditions
+			if sharedConsoleWriter != nil {
+				writers = append(writers, sharedConsoleWriter)
+			}
+		} else {
+			// Non-console writers don't need synchronization
+			writer, err := createWriter(output)
+			if err != nil {
+				return nil, err
+			}
+			if writer != nil {
+				writers = append(writers, writer)
+			}
+		}
+	}
+
+	if len(writers) == 0 {
+		// Fallback to shared console writer if no writers are configured
+		if sharedConsoleWriter != nil {
+			return sharedConsoleWriter, nil
+		}
+		// If shared writer not available yet, create a default one
+		return &SyncConsoleWriter{
+			writer: &log.IOWriter{Writer: os.Stderr},
+		}, nil
+	}
+
+	if len(writers) == 1 {
+		// Single writer - no need for multi-writer wrapper
+		return writers[0], nil
+	}
+
+	// Multiple writers - use phuslu/log's MultiEntryWriter
+	multiWriter := log.MultiEntryWriter(writers)
+	return &multiWriter, nil
+}
+
+// SyncConsoleWriter is a thread-safe console writer implementation
+// This ensures all console output is properly synchronized to prevent race conditions
+// The phuslu/log ConsoleWriter is NOT thread-safe, so we must serialize access
+type SyncConsoleWriter struct {
+	writer log.Writer
+	mu     sync.Mutex
+}
+
+func (w *SyncConsoleWriter) WriteEntry(e *log.Entry) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.writer.WriteEntry(e)
+}
+
+// Shared synchronized console writer to prevent race conditions across all loggers
+var sharedConsoleWriter *SyncConsoleWriter
+
 // ConfigureLogging configures the global logger and module-specific loggers
-func ConfigureLogging(config LogConfig) error {
+func ConfigureLogging(config LoggingConfig) error {
+	// Create a single shared synchronized console writer to prevent race conditions
+	// This ensures ALL console output goes through the same synchronized writer
+	var consoleWriter log.Writer = &log.IOWriter{Writer: os.Stderr} // Default fallback
+	for _, output := range config.Outputs {
+		if output.Enabled && output.Type == "console" && output.Console != nil {
+			if cw, err := createConsoleWriter(output.Console); err == nil {
+				consoleWriter = cw
+				break
+			}
+		}
+	}
+
+	sharedConsoleWriter = &SyncConsoleWriter{
+		writer: consoleWriter,
+	}
+
 	// Create the main writer from all enabled outputs
 	writer, err := createMultiWriter(config.Outputs)
 	if err != nil {
@@ -399,43 +315,89 @@ func ConfigureLogging(config LogConfig) error {
 
 	// Configure the default logger
 	log.DefaultLogger = log.Logger{
-		Level:        parseLogLevel(config.Global.Level),
-		Caller:       config.Global.Caller,
-		TimeField:    config.Global.TimeField,
-		TimeFormat:   config.Global.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Global.TimeLocation),
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       config.Defaults.Caller,
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
 		Writer:       writer,
+	}
+
+	// Create fast writers for module loggers (hot path optimization)
+	// These always use fast JSON output for performance, but still need console synchronization
+	fastConsoleWriter := &SyncConsoleWriter{
+		writer: &log.IOWriter{Writer: os.Stderr},
+	}
+
+	// Find file writers for fast loggers
+	var fastWriters []log.Writer
+	fastWriters = append(fastWriters, fastConsoleWriter)
+
+	for _, output := range config.Outputs {
+		if output.Enabled && output.Type == "file" && output.File != nil {
+			if fw, err := createFileWriter(output.File); err == nil {
+				fastWriters = append(fastWriters, fw)
+			}
+		}
+	}
+
+	var fastWriter log.Writer
+	if len(fastWriters) == 1 {
+		fastWriter = fastWriters[0]
+	} else {
+		multiWriter := log.MultiEntryWriter(fastWriters)
+		fastWriter = &multiWriter
+	}
+
+	// Configure module-specific fast loggers
+	diskIOLogger = log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       fastWriter,
+		Context:      log.NewContext(nil).Str("module", "disk-io").Value(),
+	}
+
+	threadLogger = log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       fastWriter,
+		Context:      log.NewContext(nil).Str("module", "thread").Value(),
+	}
+
+	eventLogger = log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       fastWriter,
+		Context:      log.NewContext(nil).Str("module", "events").Value(),
+	}
+
+	// Configure ETW library logging
+	if err := ConfigureETWLibraryLogger(config.LibLevel, config.Outputs); err != nil {
+		return fmt.Errorf("failed to configure ETW library logging: %w", err)
 	}
 
 	return nil
 }
 
-// GetDiskIOLogger returns a logger with disk-io module context
-// WARNING: If ConsoleWriter is configured, do NOT use this logger in the ETW event processing hot path!
+// GetDiskIOLogger returns a high-performance logger for disk-io module
+// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetDiskIOLogger() log.Logger {
-	return log.Logger{
-		Level:        log.DefaultLogger.Level,
-		Caller:       log.DefaultLogger.Caller,
-		TimeField:    log.DefaultLogger.TimeField,
-		TimeFormat:   log.DefaultLogger.TimeFormat,
-		TimeLocation: log.DefaultLogger.TimeLocation,
-		Writer:       log.DefaultLogger.Writer,
-		Context:      log.NewContext(nil).Str("module", "disk-io").Value(),
-	}
+	return diskIOLogger
 }
 
-// GetThreadLogger returns a logger with thread module context
-// WARNING: If ConsoleWriter is configured, do NOT use this logger in the ETW event processing hot path!
+// GetThreadLogger returns a high-performance logger for thread module
+// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetThreadLogger() log.Logger {
-	return log.Logger{
-		Level:        log.DefaultLogger.Level,
-		Caller:       log.DefaultLogger.Caller,
-		TimeField:    log.DefaultLogger.TimeField,
-		TimeFormat:   log.DefaultLogger.TimeFormat,
-		TimeLocation: log.DefaultLogger.TimeLocation,
-		Writer:       log.DefaultLogger.Writer,
-		Context:      log.NewContext(nil).Str("module", "thread").Value(),
-	}
+	return threadLogger
 }
 
 // GetProcessLogger returns a logger with process module context
@@ -464,23 +426,14 @@ func GetSessionLogger() log.Logger {
 	}
 }
 
-// GetEventLogger returns a logger with events module context
-// WARNING: If ConsoleWriter is configured, do NOT use this logger in the ETW event processing hot path!
-// The event processing pipeline handles thousands of events and requires maximum performance.
+// GetEventLogger returns a high-performance logger for events module
+// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetEventLogger() log.Logger {
-	return log.Logger{
-		Level:        log.DefaultLogger.Level,
-		Caller:       log.DefaultLogger.Caller,
-		TimeField:    log.DefaultLogger.TimeField,
-		TimeFormat:   log.DefaultLogger.TimeFormat,
-		TimeLocation: log.DefaultLogger.TimeLocation,
-		Writer:       log.DefaultLogger.Writer,
-		Context:      log.NewContext(nil).Str("module", "events").Value(),
-	}
+	return eventLogger
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration
-func ConfigureETWLibraryLogger(level string, outputs []LogOutputConfig) error {
+func ConfigureETWLibraryLogger(level string, outputs []LogOutput) error {
 	writer, err := createMultiWriter(outputs)
 	if err != nil {
 		return err

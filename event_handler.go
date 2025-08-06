@@ -48,7 +48,7 @@ type EventHandler struct {
 
 	// Shared state and caches for callbacks
 	metrics *ETWMetrics
-	config  *AppCollectorConfig
+	config  *CollectorConfig
 	logger  log.Logger // Event handler logger
 
 	// Routing tables for different event types - hot path optimized
@@ -59,7 +59,7 @@ type EventHandler struct {
 }
 
 // NewEventHandler creates a new handler with dependencies injected
-func NewEventHandler(metrics *ETWMetrics, config *AppCollectorConfig) *EventHandler {
+func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler {
 	handler := &EventHandler{
 		metrics:              metrics,
 		config:               config,

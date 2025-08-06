@@ -21,14 +21,14 @@ type SessionManager struct {
 	manifestSession *etw.RealTimeSession
 	kernelSession   *etw.RealTimeSession
 	eventHandler    *EventHandler
-	config          *AppCollectorConfig
+	config          *CollectorConfig
 	logger          log.Logger // Session manager logger
 
 	running bool
 }
 
 // NewSessionManager creates a new ETW session manager
-func NewSessionManager(eventHandler *EventHandler, config *AppCollectorConfig) *SessionManager {
+func NewSessionManager(eventHandler *EventHandler, config *CollectorConfig) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &SessionManager{

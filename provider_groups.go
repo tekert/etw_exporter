@@ -84,7 +84,7 @@ var (
 )
 
 // GetEnabledKernelFlags returns combined kernel flags for all enabled groups
-func GetEnabledKernelFlags(config *AppCollectorConfig) uint32 {
+func GetEnabledKernelFlags(config *CollectorConfig) uint32 {
 	var flags uint32
 
 	// Enable Thread group based on config (requires kernel session)
@@ -96,7 +96,7 @@ func GetEnabledKernelFlags(config *AppCollectorConfig) uint32 {
 }
 
 // GetEnabledManifestProviders returns all manifest providers for enabled groups
-func GetEnabledManifestProviders(config *AppCollectorConfig) []etw.Provider {
+func GetEnabledManifestProviders(config *CollectorConfig) []etw.Provider {
 	var providers []etw.Provider
 
 	// Enable DiskIO group based on config (manifest providers)

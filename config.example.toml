@@ -1,0 +1,224 @@
+# ETW Exporter Configuration File
+# This file configures the ETW (Event Tracing for Windows) Exporter
+# Format: TOML (Tom's Obvious, Minimal Language)
+
+[server]
+# HTTP server configuration for metrics endpoint
+# Listen address for the metrics server (default: ":9189")
+# Examples: ":9189", "localhost:9189", "127.0.0.1:9189", "0.0.0.0:9189"
+listen_address = ":9189"
+
+# Path where Prometheus metrics are served (default: "/metrics")
+# This is the endpoint Prometheus will scrape for metrics
+metrics_path = "/metrics"
+
+[collectors]
+# Configuration for different event collectors
+# Each collector can be enabled/disabled independently
+
+[collectors.disk_io]
+# Disk I/O event collector - tracks disk read/write operations
+# Enable disk I/O event collection (default: true)
+enabled = true
+
+# Track additional disk information from SystemConfig events (default: true)
+# Provides disk model, size, partition info, and other metadata
+# Useful for understanding disk topology and characteristics
+track_disk_info = true
+
+[collectors.thread]
+# Thread event collector - tracks thread lifecycle and context switches
+# Enable thread event collection (default: true)
+enabled = true
+
+# Track context switch events (default: true)
+# Context switches show when threads are scheduled/descheduled by the OS
+# High frequency events - may impact performance under heavy load
+context_switches = true
+
+[logging]
+# Logging configuration - controls how and where logs are written
+# The logging system uses structured logging with multiple output destinations
+
+[logging.defaults]
+# Default settings applied to all loggers
+# Log level for application loggers (default: "info")
+# Available levels: "trace", "debug", "info", "warn", "error", "fatal"
+# Higher levels include lower levels (error includes fatal, warn includes error, etc.)
+level = "info"
+
+# Include caller information in logs (default: 1)
+# 0 = disabled (no caller info)
+# 1 = file:line format (e.g., "main.go:42")
+# -1 = full path format (e.g., "/path/to/main.go:42")
+caller = 1
+
+# Time field name in log output (default: "time")
+# This is the JSON field name for timestamps
+time_field = "time"
+
+# Time format for log timestamps (default: "" = RFC3339 with milliseconds)
+# Examples:
+# "" = RFC3339 with milliseconds (recommended for performance)
+# "2006-01-02T15:04:05" = custom format
+# "Unix" = Unix timestamp
+# "UnixMs" = Unix timestamp with milliseconds
+time_format = ""
+
+# Time zone for timestamps (default: "Local")
+# Examples: "Local", "UTC", "America/New_York", "Europe/London"
+time_location = "Local"
+
+# ETW library log level (default: "warn")
+# Controls logging from the underlying ETW library
+# Usually should be "warn" or higher to avoid noise
+lib_level = "warn"
+
+# Output configurations - you can have multiple outputs simultaneously
+# Each output can be enabled/disabled and configured independently
+
+[[logging.outputs]]
+# Console output - for terminal/stderr display
+type = "console"
+enabled = true
+
+[logging.outputs.console]
+# Use fast JSON output instead of formatted console output (default: false)
+# When true: High-performance JSON logging suitable for production/parsing
+# When false: Human-readable formatted output with colors
+# NOTE: Hot path modules (disk-io, thread, events) always use fast JSON regardless
+fast_io = false
+
+# Output format when fast_io=false (default: "auto")
+# Available formats:
+# "auto" = colorized console format with key=value pairs (human-friendly)
+# "json" = structured JSON output (same as fast_io=true)
+# "logfmt" = logfmt format (key=value key=value)
+# "glog" = Google glog format (traditional log format)
+format = "auto"
+
+# Enable colored output when fast_io=false (default: true)
+# Only applies to "auto" format, ignored for JSON/logfmt/glog
+# Automatically disabled if output is not a terminal
+color_output = true
+
+# Quote string values in console output (default: true)
+# Only applies to formatted output, not JSON
+quote_string = true
+
+# Output destination (default: "stderr")
+# "stdout" = standard output
+# "stderr" = standard error (recommended for logs)
+writer = "stderr"
+
+# Use asynchronous writing (default: false)
+# Improves performance but may lose recent logs on unexpected shutdown
+# Generally not needed for console output
+async = false
+
+[[logging.outputs]]
+# File output - for persistent log storage
+type = "file"
+enabled = true
+
+[logging.outputs.file]
+# Log file path (required for file output)
+# Directory will be created automatically if ensure_folder=true
+filename = "logs/app.log"
+
+# File permissions in octal notation (default: 644)
+# 644 = owner read/write, group/others read-only
+# 600 = owner read/write only
+# 666 = all read/write (not recommended)
+# file_mode = 644               # Default: 644
+
+# Maximum file size in bytes before rotation (default: 104857600 = 100MB)
+# When file reaches this size, it will be rotated
+# Supports standard units: 1KB=1024, 1MB=1024*1024, etc.
+max_size = 104857600
+
+# Maximum number of old log files to keep (default: 7)
+# Older files beyond this number will be deleted
+# 0 = keep all files (not recommended)
+max_backups = 7
+
+# Time format for rotated filenames (default: "2006-01-02T15-04-05")
+# Used to timestamp rotated files for easy identification
+# Special values: "Unix", "UnixMs" for numeric timestamps
+time_format = "2006-01-02T15-04-05"
+
+# Use local time for rotation timestamps (default: true)
+# false = use UTC time for timestamps
+local_time = true
+
+# Include hostname in filename (default: true)
+# Useful when aggregating logs from multiple servers
+host_name = true
+
+# Include process ID in filename (default: true)
+# Helps distinguish between multiple instances
+process_id = true
+
+# Create directory if it doesn't exist (default: true)
+# Automatically creates the directory structure for the log file
+ensure_folder = true
+
+# Use asynchronous writing (default: true)
+# Significantly improves performance for file logging
+# Recommended for high-throughput applications
+async = true
+
+# Example of additional outputs (disabled by default)
+
+[[logging.outputs]]
+# Syslog output - for centralized logging systems
+type = "syslog"
+enabled = false
+
+[logging.outputs.syslog]
+# Network protocol (default: "udp")
+# "tcp" = reliable but slower, "udp" = fast but may lose messages
+# "unixgram" = Unix domain socket (Linux/Unix only)
+network = "udp"
+
+# Syslog server address (default: "localhost:514")
+# Examples: "localhost:514", "syslog.example.com:514", "/dev/log"
+address = "localhost:514"
+
+# Hostname for syslog messages (default: system hostname)
+# Override to use custom hostname in syslog messages
+hostname = ""
+
+# Syslog tag/program name (default: "etw_exporter")
+# Identifies the source application in syslog
+tag = "etw_exporter"
+
+# Message prefix marker (default: "@cee:")
+# CEE (Common Event Expression) marker for structured logging
+# "" = no marker, "@cee:" = CEE format marker
+marker = "@cee:"
+
+# Use asynchronous writing (default: true)
+async = true
+
+[[logging.outputs]]
+# Windows Event Log output - for Windows Event Viewer
+type = "eventlog"
+enabled = false
+
+[logging.outputs.eventlog]
+# Event source name (default: "ETW_Exporter")
+# Must be registered in Windows Registry before use
+source = "ETW_Exporter"
+
+# Event ID for log entries (default: 1000)
+# Used to categorize events in Event Viewer
+id = 1000
+
+# Target host (default: local machine)
+# Can specify remote machine for centralized event logging
+host = ""
+
+# Use asynchronous writing (default: false)
+# Event log operations are typically synchronous for reliability
+async = false
