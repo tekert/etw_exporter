@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/phuslu/log"
 	"github.com/tekert/golang-etw/etw"
 )
 
@@ -18,8 +19,9 @@ type ProcessEventHandler interface {
 	HandleProcessEnd(helper *etw.EventRecordHelper) error
 }
 
-type ContextSwitchEventHandler interface {
+type ThreadEventHandler interface {
 	HandleContextSwitch(helper *etw.EventRecordHelper) error
+	HandleReadyThread(helper *etw.EventRecordHelper) error
 	HandleThreadStart(helper *etw.EventRecordHelper) error
 	HandleThreadEnd(helper *etw.EventRecordHelper) error
 }
@@ -37,8 +39,8 @@ type FileEventHandler interface {
 // for better code organization and future extensibility
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskCollector          *DiskIOCollector
-	contextSwitchCollector *ContextSwitchCollector
+	diskCollector   *DiskIOCollector
+	threadCollector *ThreadCollector
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
 	// memoryCollector  *MemoryCollector
@@ -47,43 +49,56 @@ type EventHandler struct {
 	// Shared state and caches for callbacks
 	metrics *ETWMetrics
 	config  *AppCollectorConfig
+	logger  log.Logger // Event handler logger
 
 	// Routing tables for different event types - hot path optimized
-	diskEventHandlers     []DiskEventHandler
-	processEventHandlers  []ProcessEventHandler
-	contextSwitchHandlers []ContextSwitchEventHandler
-	fileEventHandlers     []FileEventHandler
+	diskEventHandlers    []DiskEventHandler
+	processEventHandlers []ProcessEventHandler
+	threadHandlers       []ThreadEventHandler
+	fileEventHandlers    []FileEventHandler
 }
 
 // NewEventHandler creates a new handler with dependencies injected
 func NewEventHandler(metrics *ETWMetrics, config *AppCollectorConfig) *EventHandler {
 	handler := &EventHandler{
-		metrics:               metrics,
-		config:                config,
-		diskEventHandlers:     make([]DiskEventHandler, 0),
-		processEventHandlers:  make([]ProcessEventHandler, 0),
-		contextSwitchHandlers: make([]ContextSwitchEventHandler, 0),
-		fileEventHandlers:     make([]FileEventHandler, 0),
+		metrics:              metrics,
+		config:               config,
+		logger:               GetEventLogger(),
+		diskEventHandlers:    make([]DiskEventHandler, 0),
+		processEventHandlers: make([]ProcessEventHandler, 0),
+		threadHandlers:       make([]ThreadEventHandler, 0),
+		fileEventHandlers:    make([]FileEventHandler, 0),
 	}
+
+	// Always register the global process tracker for process events
+	// This ensures we have process name mappings available for all collectors
+	processTracker := GetGlobalProcessTracker()
+	handler.RegisterProcessEventHandler(processTracker)
+	handler.logger.Debug().Msg("Registered global process tracker")
 
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
 		handler.diskCollector = NewDiskIOCollector()
 		// Register the disk collector with the handler
 		handler.RegisterDiskEventHandler(handler.diskCollector)
-		handler.RegisterProcessEventHandler(handler.diskCollector)
-
-		// Register for file events if FileObject mapping is enabled
-		if config.DiskIO.TrackFileMapping {
-			handler.RegisterFileEventHandler(handler.diskCollector)
-		}
+		// Register for file events for process correlation
+		handler.RegisterFileEventHandler(handler.diskCollector)
+		handler.logger.Info().Msg("✅ Disk I/O collector enabled")
 	}
 
-	if config.ContextSwitch.Enabled {
-		handler.contextSwitchCollector = NewContextSwitchCollector(metrics)
-		// Register the context switch collector with the handler
-		handler.RegisterContextSwitchEventHandler(handler.contextSwitchCollector)
+	if config.Thread.Enabled && config.Thread.ContextSwitches {
+		handler.threadCollector = NewThreadCollector()
+		// Register the thread collector with the handler
+		handler.RegisterThreadEventHandler(handler.threadCollector)
+		handler.logger.Info().Msg("✅ Thread context switch collector enabled")
 	}
+
+	handler.logger.Info().
+		Int("disk_handlers", len(handler.diskEventHandlers)).
+		Int("process_handlers", len(handler.processEventHandlers)).
+		Int("thread_handlers", len(handler.threadHandlers)).
+		Int("file_handlers", len(handler.fileEventHandlers)).
+		Msg("Event handlers initialized")
 
 	return handler
 }
@@ -91,18 +106,22 @@ func NewEventHandler(metrics *ETWMetrics, config *AppCollectorConfig) *EventHand
 // Register methods for event handlers
 func (h *EventHandler) RegisterDiskEventHandler(handler DiskEventHandler) {
 	h.diskEventHandlers = append(h.diskEventHandlers, handler)
+	h.logger.Debug().Int("total_disk_handlers", len(h.diskEventHandlers)).Msg("Disk event handler registered")
 }
 
 func (h *EventHandler) RegisterProcessEventHandler(handler ProcessEventHandler) {
 	h.processEventHandlers = append(h.processEventHandlers, handler)
+	h.logger.Debug().Int("total_process_handlers", len(h.processEventHandlers)).Msg("Process event handler registered")
 }
 
-func (h *EventHandler) RegisterContextSwitchEventHandler(handler ContextSwitchEventHandler) {
-	h.contextSwitchHandlers = append(h.contextSwitchHandlers, handler)
+func (h *EventHandler) RegisterThreadEventHandler(handler ThreadEventHandler) {
+	h.threadHandlers = append(h.threadHandlers, handler)
+	h.logger.Debug().Int("total_thread_handlers", len(h.threadHandlers)).Msg("Thread event handler registered")
 }
 
 func (h *EventHandler) RegisterFileEventHandler(handler FileEventHandler) {
 	h.fileEventHandlers = append(h.fileEventHandlers, handler)
+	h.logger.Debug().Int("total_file_handlers", len(h.fileEventHandlers)).Msg("File event handler registered")
 }
 
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
@@ -154,18 +173,19 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 	}
 
 	// Route process events from Microsoft-Windows-Kernel-Process
-	if providerGUID.Equals(MicrosoftWindowsKernelProcessGUID) && h.config.DiskIO.Enabled {
+	// Always route process events if we have handlers (needed for process name tracking)
+	if providerGUID.Equals(MicrosoftWindowsKernelProcessGUID) && len(h.processEventHandlers) > 0 {
 		return h.routeProcessEvents(helper, eventID)
 	}
 
 	// Route file events from Microsoft-Windows-Kernel-File
-	if providerGUID.Equals(MicrosoftWindowsKernelFileGUID) && h.config.DiskIO.TrackFileMapping {
+	if providerGUID.Equals(MicrosoftWindowsKernelFileGUID) && h.config.DiskIO.Enabled {
 		return h.routeFileEvents(helper, eventID)
 	}
 
-	// Route context switch events from Thread kernel provider
-	if providerGUID.Equals(ThreadKernelGUID) && h.config.ContextSwitch.Enabled {
-		return h.routeContextSwitchEvents(helper, eventID)
+	// Route thread events from Thread kernel provider
+	if providerGUID.Equals(ThreadKernelGUID) && h.config.Thread.Enabled && h.config.Thread.ContextSwitches {
+		return h.routeThreadEvents(helper, eventID)
 	}
 
 	return nil
@@ -205,18 +225,21 @@ func (h *EventHandler) routeDiskEvents(helper *etw.EventRecordHelper, eventID ui
 	case 10: // DiskIo Read completion
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskRead(helper); err != nil {
+				h.logger.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk read event")
 				return err
 			}
 		}
 	case 11: // DiskIo Write completion
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskWrite(helper); err != nil {
+				h.logger.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk write event")
 				return err
 			}
 		}
 	case 14: // DiskIo Flush
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskFlush(helper); err != nil {
+				h.logger.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk flush event")
 				return err
 			}
 		}
@@ -291,27 +314,33 @@ func (h *EventHandler) routeFileEvents(helper *etw.EventRecordHelper, eventID ui
 	return nil
 }
 
-// routeContextSwitchEvents routes context switch events to all registered handlers
-func (h *EventHandler) routeContextSwitchEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.contextSwitchHandlers) == 0 {
+// routeThreadEvents routes thread events to all registered handlers
+func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID uint16) error {
+	if len(h.threadHandlers) == 0 {
 		return nil
 	}
 
 	switch eventID {
 	case 36: // Context Switch
-		for _, handler := range h.contextSwitchHandlers {
+		for _, handler := range h.threadHandlers {
 			if err := handler.HandleContextSwitch(helper); err != nil {
 				return err
 			}
 		}
+	case 50: // ReadyThread
+		for _, handler := range h.threadHandlers {
+			if err := handler.HandleReadyThread(helper); err != nil {
+				return err
+			}
+		}
 	case 1, 3: // Thread Start, DCStart
-		for _, handler := range h.contextSwitchHandlers {
+		for _, handler := range h.threadHandlers {
 			if err := handler.HandleThreadStart(helper); err != nil {
 				return err
 			}
 		}
 	case 2, 4: // Thread End, DCEnd
-		for _, handler := range h.contextSwitchHandlers {
+		for _, handler := range h.threadHandlers {
 			if err := handler.HandleThreadEnd(helper); err != nil {
 				return err
 			}

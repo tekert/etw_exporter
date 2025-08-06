@@ -4,6 +4,7 @@ import (
 	"strconv"
 	"sync"
 
+	"github.com/phuslu/log"
 	"github.com/tekert/golang-etw/etw"
 )
 
@@ -12,11 +13,12 @@ type DiskIOCollector struct {
 	diskActivityMutex sync.RWMutex
 	diskActivityMap   map[DiskActivityKey]*ProcessDiskActivity // key: DiskActivityKey
 
-	processNameMutex sync.RWMutex
-	processNameMap   map[uint32]string // ProcessID -> ProcessName mapping
+	processTracker *ProcessTracker // Reference to the global process tracker
 
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
+
+	logger log.Logger // Disk I/O collector logger
 }
 
 // DiskInfo stores physical disk information
@@ -47,8 +49,9 @@ type DiskActivityKey struct {
 func NewDiskIOCollector() *DiskIOCollector {
 	return &DiskIOCollector{
 		diskActivityMap: make(map[DiskActivityKey]*ProcessDiskActivity),
-		processNameMap:  make(map[uint32]string),
+		processTracker:  GetGlobalProcessTracker(),
 		fileObjectMap:   make(map[uint64]uint32),
+		logger:          GetDiskIOLogger(),
 	}
 }
 
@@ -70,11 +73,13 @@ func NewDiskIOCollector() *DiskIOCollector {
 func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
+		d.logger.Error().Err(err).Msg("Failed to get DiskNumber property for disk read")
 		return err
 	}
 
 	transferSize, err := helper.GetPropertyUint("TransferSize")
 	if err != nil {
+		d.logger.Error().Err(err).Msg("Failed to get TransferSize property for disk read")
 		return err
 	}
 
@@ -83,6 +88,11 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect)
 		processID := helper.EventRec.EventHeader.ProcessId
+		d.logger.Trace().
+			Uint32("disk_number", uint32(diskNumber)).
+			Uint32("transfer_size", uint32(transferSize)).
+			Uint32("process_id", processID).
+			Msg("Disk read - no FileObject, using EventHeader ProcessId")
 		d.updateDiskIOMetrics(uint32(diskNumber), processID, uint32(transferSize), false)
 		return nil
 	}
@@ -95,6 +105,19 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	if !exists {
 		// If no mapping exists, fall back to EventHeader ProcessId (may be incorrect)
 		processID = helper.EventRec.EventHeader.ProcessId
+		d.logger.Trace().
+			Uint32("disk_number", uint32(diskNumber)).
+			Uint32("transfer_size", uint32(transferSize)).
+			Uint64("file_object", fileObject).
+			Uint32("fallback_process_id", processID).
+			Msg("Disk read - no FileObject mapping, using fallback ProcessId")
+	} else {
+		d.logger.Trace().
+			Uint32("disk_number", uint32(diskNumber)).
+			Uint32("transfer_size", uint32(transferSize)).
+			Uint64("file_object", fileObject).
+			Uint32("process_id", processID).
+			Msg("Disk read - using mapped ProcessId from FileObject")
 	}
 
 	// Update metrics for read operation
@@ -436,92 +459,11 @@ func (d *DiskIOCollector) HandleSystemConfigLogDisk(helper *etw.EventRecordHelpe
 	return nil
 }
 
-// HandleProcessStart processes process start and rundown events for name tracking
-// Process Event: Microsoft-Windows-Kernel-Process
-// Provider GUID: {22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}
-// Event ID: 1 (ProcessStart) - New process creation
-// Event ID: 15 (ProcessRundown/DCStart) - Existing processes when tracing starts
-//
-// Properties from manifest (ProcessStartArgs template):
-//
-//	ProcessID (win:UInt32) - Process identifier
-//	CreateTime (win:FILETIME) - Process creation time
-//	ParentProcessID (win:UInt32) - Parent process identifier
-//	SessionID (win:UInt32) - Session identifier
-//	ImageName (win:UnicodeString) - Process image name
-//
-// Note: ProcessRundown events are crucial for capturing process names of processes
-// that were already running when ETW tracing started. Without these events,
-// processes that started before tracing would show as "unknown_*" in metrics.
-func (d *DiskIOCollector) HandleProcessStart(helper *etw.EventRecordHelper) error {
-	processID, err := helper.GetPropertyUint("ProcessID")
-	if err != nil {
-		// If we can't get ProcessID from properties, use EventHeader ProcessId
-		processID = uint64(helper.EventRec.EventHeader.ProcessId)
-	}
-
-	imageName, err := helper.GetPropertyString("ImageName")
-	if err != nil {
-		// If we can't get ImageName, use ProcessID as string
-		imageName = "PID_" + strconv.FormatUint(processID, 10)
-	}
-
-	// Store process name mapping
-	d.setProcessName(uint32(processID), imageName)
-
-	return nil
-}
-
-// HandleProcessEnd processes process end events
-// Process Event: Microsoft-Windows-Kernel-Process
-// Provider GUID: {22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}
-// Event ID: 2 (ProcessStop)
-//
-// Properties from manifest (ProcessStopArgs template):
-//
-//	ProcessID (win:UInt32) - Process identifier
-//	CreateTime (win:FILETIME) - Process creation time
-//	ExitTime (win:FILETIME) - Process exit time
-//	ExitCode (win:UInt32) - Process exit code
-//	ImageName (win:AnsiString) - Process image name
-func (d *DiskIOCollector) HandleProcessEnd(helper *etw.EventRecordHelper) error {
-	processID, err := helper.GetPropertyUint("ProcessID")
-	if err != nil {
-		// If we can't get ProcessID from properties, use EventHeader ProcessId
-		processID = uint64(helper.EventRec.EventHeader.ProcessId)
-	}
-
-	// Remove process from mapping
-	d.removeProcessName(uint32(processID))
-
-	return nil
-}
-
 // Helper methods for internal state management
 
 // getProcessName retrieves the process name for a given PID
 func (d *DiskIOCollector) getProcessName(pid uint32) string {
-	d.processNameMutex.RLock()
-	defer d.processNameMutex.RUnlock()
-
-	if name, exists := d.processNameMap[pid]; exists {
-		return name
-	}
-	return "unknown_" + strconv.FormatUint(uint64(pid), 10)
-}
-
-// setProcessName stores a process name mapping
-func (d *DiskIOCollector) setProcessName(pid uint32, name string) {
-	d.processNameMutex.Lock()
-	defer d.processNameMutex.Unlock()
-	d.processNameMap[pid] = name
-}
-
-// removeProcessName removes a process name mapping
-func (d *DiskIOCollector) removeProcessName(pid uint32) {
-	d.processNameMutex.Lock()
-	defer d.processNameMutex.Unlock()
-	delete(d.processNameMap, pid)
+	return d.processTracker.GetProcessName(pid)
 }
 
 // getDiskActivityKey creates a unique key for disk activity tracking

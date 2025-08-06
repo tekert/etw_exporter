@@ -27,14 +27,14 @@ var (
 
 // Global provider groups configuration
 var (
-	// DiskIOGroup uses manifest providers for disk I/O events
+	// DiskIOGroup uses manifest providers for disk I/O events and file I/O events
 	// These are modern providers with better event parsing
 	DiskIOGroup = ProviderGroup{
 		Name:    "disk_io",
 		Enabled: false, // Will be enabled based on config
 		// No kernel flags - using manifest providers only
 		KernelFlags: 0,
-		// Manifest providers for disk I/O
+		// Manifest providers for disk I/O and file I/O
 		ManifestProviders: []etw.Provider{
 			{
 				Name: "Microsoft-Windows-Kernel-Disk",
@@ -52,13 +52,21 @@ var (
 				MatchAnyKeyword: 0x10, // WINEVENT_KEYWORD_PROCESS
 				MatchAllKeyword: 0x0,
 			},
+			{
+				Name: "Microsoft-Windows-Kernel-File",
+				GUID: *MicrosoftWindowsKernelFileGUID,
+				// Enable file I/O events for process correlation
+				EnableLevel:     0xFF,  // All levels
+				MatchAnyKeyword: 0x120, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
+				MatchAllKeyword: 0x0,
+			},
 		},
 	}
 
-	// ContextSwitchGroup uses kernel session for low-level thread events
+	// ThreadGroup uses kernel session for low-level thread events
 	// Context switches require kernel session for optimal performance
-	ContextSwitchGroup = ProviderGroup{
-		Name:    "context_switch",
+	ThreadGroup = ProviderGroup{
+		Name:    "thread",
 		Enabled: false, // Will be enabled based on config
 		// Kernel flags for context switches and thread events
 		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
@@ -68,31 +76,10 @@ var (
 		ManifestProviders: []etw.Provider{},
 	}
 
-	// FileIOGroup uses manifest providers for detailed file I/O tracking
-	// Used when TrackFileMapping is enabled (heavy metrics)
-	FileIOGroup = ProviderGroup{
-		Name:    "file_io",
-		Enabled: false, // Will be enabled based on TrackFileMapping config
-		// No kernel flags - using manifest providers only
-		KernelFlags: 0,
-		// Manifest providers for file I/O
-		ManifestProviders: []etw.Provider{
-			{
-				Name: "Microsoft-Windows-Kernel-File",
-				GUID: *MicrosoftWindowsKernelFileGUID,
-				// Enable file I/O events: Read (15), Write (16), Create (12), etc.
-				EnableLevel:     0xFF,  // All levels
-				MatchAnyKeyword: 0x120, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
-				MatchAllKeyword: 0x0,
-			},
-		},
-	}
-
 	// All available provider groups
 	AllProviderGroups = []*ProviderGroup{
 		&DiskIOGroup,
-		&ContextSwitchGroup,
-		&FileIOGroup,
+		&ThreadGroup,
 	}
 )
 
@@ -100,9 +87,9 @@ var (
 func GetEnabledKernelFlags(config *AppCollectorConfig) uint32 {
 	var flags uint32
 
-	// Enable ContextSwitch group based on config (requires kernel session)
-	if config.ContextSwitch.Enabled {
-		flags |= ContextSwitchGroup.KernelFlags
+	// Enable Thread group based on config (requires kernel session)
+	if config.Thread.Enabled && config.Thread.ContextSwitches {
+		flags |= ThreadGroup.KernelFlags
 	}
 
 	return flags
@@ -115,11 +102,6 @@ func GetEnabledManifestProviders(config *AppCollectorConfig) []etw.Provider {
 	// Enable DiskIO group based on config (manifest providers)
 	if config.DiskIO.Enabled {
 		providers = append(providers, DiskIOGroup.ManifestProviders...)
-	}
-
-	// Enable FileIO group based on TrackFileMapping config (heavy metrics)
-	if config.DiskIO.Enabled && config.DiskIO.TrackFileMapping {
-		providers = append(providers, FileIOGroup.ManifestProviders...)
 	}
 
 	return providers

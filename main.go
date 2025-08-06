@@ -4,16 +4,20 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
-var version = "0.1.0"
+var (
+	version = "0.1.0"
+)
 
 func main() {
 	var (
@@ -26,7 +30,13 @@ func main() {
 	// Load configuration
 	config, err := LoadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load configuration: %v", err)
+		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
+	}
+
+	// Configure loggers based on configuration
+	if err := configureLoggers(config); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to configure loggers: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Override with command line flags if provided
@@ -39,10 +49,18 @@ func main() {
 
 	// Validate configuration
 	if err := config.Validate(); err != nil {
-		log.Fatalf("Invalid configuration: %v", err)
+		log.Fatal().Err(err).Msg("❌ Invalid configuration")
 	}
 
-	log.Printf("Starting ETW Exporter v%s with config: DiskIO=%t", version, config.Collectors.DiskIO.Enabled)
+	log.Info().
+		Str("version", version).
+		Bool("disk_io_enabled", config.Collectors.DiskIO.Enabled).
+		Bool("disk_io_track_info", config.Collectors.DiskIO.TrackDiskInfo).
+		Bool("thread_enabled", config.Collectors.Thread.Enabled).
+		Bool("thread_context_switches", config.Collectors.Thread.ContextSwitches).
+		Str("listen_address", config.Server.ListenAddress).
+		Str("metrics_path", config.Server.MetricsPath).
+		Msg("🚀 Starting ETW Exporter")
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -58,29 +76,38 @@ func main() {
 
 	// Initialize metrics
 	InitMetrics()
+	log.Debug().Msg("- Metrics initialized")
 
 	// Create event handler with configuration
 	eventHandler := NewEventHandler(GetMetrics(), &config.Collectors)
+	log.Debug().Msg("- Event handler created")
 
 	// Set up ETW session
 	etwSession := NewSessionManager(eventHandler, &config.Collectors)
 	defer etwSession.Stop()
+	log.Debug().Msg("- ETW session manager created")
 
 	// Enable provider groups for our collectors
 	// For now, we only have the disk_io collector
 	if err := etwSession.EnableProviderGroup("disk_io"); err != nil {
-		log.Fatalf("Failed to enable disk_io provider group: %v", err)
+		log.Fatal().Err(err).Msg("❌ Failed to enable disk_io provider group")
 	}
+	log.Debug().Msg("💾 Disk I/O provider group enabled")
 
 	// Log enabled providers
-	log.Printf("Enabled provider groups: %v", etwSession.GetEnabledProviderGroups())
+	enabledGroups := etwSession.GetEnabledProviderGroups()
+	log.Info().Strs("provider_groups", enabledGroups).Msg("✅ Enabled provider groups")
+	log.Debug().Int("provider_count", len(enabledGroups)).Msg("📈 Provider group count")
 
 	// Start the ETW session
+	log.Info().Msg("🔄 Starting ETW trace session...")
 	if err := etwSession.Start(); err != nil {
-		log.Fatalf("Failed to start ETW session: %v", err)
+		log.Fatal().Err(err).Msg("❌ Failed to start ETW session")
 	}
+	log.Info().Msg("ETW session started successfully")
 
 	// Set up HTTP server for Prometheus metrics
+	log.Debug().Str("metrics_path", config.Server.MetricsPath).Msg("🌐 Setting up HTTP handlers")
 	http.Handle(config.Server.MetricsPath, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -92,18 +119,31 @@ func main() {
             </html>`))
 	})
 
-	log.Printf("Starting server on %s", config.Server.ListenAddress)
+	log.Info().Str("address", config.Server.ListenAddress).Msg("🌐 Starting HTTP server")
 	srv := &http.Server{Addr: config.Server.ListenAddress}
 	go func() {
+		log.Trace().Msg("- HTTP server goroutine started")
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start HTTP server: %v", err)
+			log.Fatal().Err(err).Msg("❌ Failed to start HTTP server")
 		}
 	}()
 
+	log.Info().Msg("ETW Exporter is ready and collecting events...")
+
 	// Wait for context cancellation
 	<-ctx.Done()
-	if err := srv.Shutdown(context.Background()); err != nil {
-		log.Printf("Error shutting down HTTP server: %v", err)
+	log.Info().Msg("🛑 Received shutdown signal, shutting down gracefully...")
+
+	// Start graceful shutdown
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
+
+	log.Debug().Msg("🔌 Shutting down HTTP server...")
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Error().Err(err).Msg("❌ Error shutting down HTTP server")
+	} else {
+		log.Debug().Msg("✅ HTTP server shut down cleanly")
 	}
-	log.Println("ETW Exporter stopped gracefully")
+
+	log.Info().Msg("👋 ETW Exporter stopped gracefully")
 }

@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/phuslu/log"
 	"github.com/tekert/golang-etw/etw"
 )
 
@@ -21,6 +22,7 @@ type SessionManager struct {
 	kernelSession   *etw.RealTimeSession
 	eventHandler    *EventHandler
 	config          *AppCollectorConfig
+	logger          log.Logger // Session manager logger
 
 	running bool
 }
@@ -29,15 +31,16 @@ type SessionManager struct {
 func NewSessionManager(eventHandler *EventHandler, config *AppCollectorConfig) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// Set debug level for ETW tracing
-	etw.SetTraceLevel()
-
-	return &SessionManager{
+	manager := &SessionManager{
 		ctx:          ctx,
 		cancel:       cancel,
 		eventHandler: eventHandler,
 		config:       config,
+		logger:       GetSessionLogger(),
 	}
+
+	manager.logger.Debug().Msg("SessionManager created")
+	return manager
 }
 
 // Start initializes and starts the ETW sessions
@@ -46,49 +49,70 @@ func (s *SessionManager) Start() error {
 	defer s.mu.Unlock()
 
 	if s.running {
+		s.logger.Warn().Msg("Session manager already running")
 		return fmt.Errorf("session manager already running")
 	}
+
+	s.logger.Info().Msg("Starting ETW session manager...")
 
 	// Get SystemConfig events first if using manifest providers
 	// SystemConfig events only arrive when kernel sessions are stopped
 	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
 	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
 	// So we use this workaround to capture SystemConfig events
+	s.logger.Debug().Msg("Capturing SystemConfig events...")
 	if err := s.captureSystemConfigEvents(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to capture SystemConfig events")
 		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 	}
+	s.logger.Debug().Msg("✅ SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
+	s.logger.Debug().Msg("Setting up ETW sessions...")
 	if err := s.setupSessions(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to setup sessions")
 		return fmt.Errorf("failed to setup sessions: %w", err)
 	}
+	s.logger.Debug().Msg("✅ ETW sessions setup complete")
 
 	// Setup consumer with callbacks
+	s.logger.Debug().Msg("Setting up ETW consumer...")
 	if err := s.setupConsumer(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to setup consumer")
 		return fmt.Errorf("failed to setup consumer: %w", err)
 	}
+	s.logger.Debug().Msg("✅ ETW consumer setup complete")
 
 	// Start the consumer
+	s.logger.Debug().Msg("Starting ETW consumer...")
 	if err := s.consumer.Start(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to start consumer")
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
+	s.logger.Debug().Msg("✅ ETW consumer started")
 
 	s.running = true
+	s.logger.Info().Msg("✅ ETW session manager started successfully")
 	return nil
 }
 
 // captureSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
 // These events are only emitted when a kernel session is stopped, so we need this special handling
 func (s *SessionManager) captureSystemConfigEvents() error {
+	s.logger.Trace().Msg("Creating temporary kernel session for SystemConfig events")
+
 	// Create a temporary kernel session to get SystemConfig events
 	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
 
 	if err := tempKernelSession.Start(); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to start temporary kernel session")
 		return fmt.Errorf("failed to start temporary kernel session for SystemConfig: %w", err)
 	}
+	s.logger.Trace().Msg("Temporary kernel session started")
 
 	// Create a temporary consumer to capture SystemConfig events
 	tempConsumer := etw.NewConsumer(s.ctx).FromSessions(tempKernelSession)
+	s.logger.Trace().Msg("Temporary consumer created")
 
 	// Set up callback to capture SystemConfig events
 	tempConsumer.EventPreparedCallback = func(helper *etw.EventRecordHelper) error {
@@ -243,8 +267,8 @@ func (s *SessionManager) EnableProviderGroup(groupName string) error {
 	case "disk_io":
 		s.config.DiskIO.Enabled = true
 		return nil
-	case "context_switch":
-		s.config.ContextSwitch.Enabled = true
+	case "thread":
+		s.config.Thread.Enabled = true
 		return nil
 	default:
 		return fmt.Errorf("provider group '%s' not found", groupName)
@@ -257,8 +281,8 @@ func (s *SessionManager) GetEnabledProviderGroups() []string {
 	if s.config.DiskIO.Enabled {
 		enabled = append(enabled, "disk_io")
 	}
-	if s.config.ContextSwitch.Enabled {
-		enabled = append(enabled, "context_switch")
+	if s.config.Thread.Enabled {
+		enabled = append(enabled, "thread")
 	}
 	return enabled
 }

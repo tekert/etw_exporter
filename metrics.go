@@ -24,14 +24,11 @@ type ETWMetrics struct {
 	PhyDiskInfo *prometheus.GaugeVec // SystemConfig_PhyDisk events (EventType 11)
 	LogDiskInfo *prometheus.GaugeVec // SystemConfig_LogDisk events (EventType 12)
 
-	// File mapping metrics (heavy metrics - controlled by TrackFileMapping)
-	ProcessFileBytesRead    *prometheus.CounterVec
-	ProcessFileBytesWritten *prometheus.CounterVec
-	ProcessFileIOCount      *prometheus.CounterVec
-
-	// Context switch metrics
-	ContextSwitches      *prometheus.CounterVec
-	ContextSwitchLatency *prometheus.HistogramVec
+	// Thread and context switch metrics (aggregated for low cardinality)
+	ContextSwitchesPerCPU     *prometheus.CounterVec
+	ContextSwitchesPerProcess *prometheus.CounterVec
+	ContextSwitchInterval     *prometheus.HistogramVec
+	ThreadStatesTotal         *prometheus.CounterVec
 }
 
 var (
@@ -107,43 +104,34 @@ func InitMetrics() {
 				},
 				[]string{"disk_number", "drive_letter", "file_system"},
 			),
-			// File mapping metrics (heavy metrics - controlled by TrackFileMapping)
-			ProcessFileBytesRead: promauto.NewCounterVec(
+			ContextSwitchesPerCPU: promauto.NewCounterVec(
 				prometheus.CounterOpts{
-					Name: "etw_process_file_bytes_read_total",
-					Help: "Total bytes read from files by process",
-				},
-				[]string{"process", "file_path"},
-			),
-			ProcessFileBytesWritten: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "etw_process_file_bytes_written_total",
-					Help: "Total bytes written to files by process",
-				},
-				[]string{"process", "file_path"},
-			),
-			ProcessFileIOCount: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "etw_process_file_io_operations_total",
-					Help: "Total number of file I/O operations by process",
-				},
-				[]string{"process", "file_path", "type"},
-			),
-			// Context switch metrics
-			ContextSwitches: promauto.NewCounterVec(
-				prometheus.CounterOpts{
-					Name: "etw_context_switches_total",
-					Help: "Total number of context switches",
-				},
-				[]string{"old_thread_id", "new_thread_id", "cpu"},
-			),
-			ContextSwitchLatency: promauto.NewHistogramVec(
-				prometheus.HistogramOpts{
-					Name:    "etw_context_switch_latency_seconds",
-					Help:    "Context switch latency",
-					Buckets: prometheus.ExponentialBuckets(0.000001, 2, 20), // From 1μs to ~1s
+					Name: "etw_context_switches_per_cpu_total",
+					Help: "Total number of context switches per CPU",
 				},
 				[]string{"cpu"},
+			),
+			ContextSwitchesPerProcess: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "etw_context_switches_per_process_total",
+					Help: "Total number of context switches per process",
+				},
+				[]string{"process_id", "process_name"},
+			),
+			ContextSwitchInterval: promauto.NewHistogramVec(
+				prometheus.HistogramOpts{
+					Name:    "etw_context_switch_interval_seconds",
+					Help:    "Time between consecutive context switches on a CPU",
+					Buckets: prometheus.ExponentialBuckets(0.000001, 2, 15), // 1us to ~16ms
+				},
+				[]string{"cpu"},
+			),
+			ThreadStatesTotal: promauto.NewCounterVec(
+				prometheus.CounterOpts{
+					Name: "etw_thread_states_total",
+					Help: "Total count of thread state transitions",
+				},
+				[]string{"state", "wait_reason"},
 			),
 		}
 	})
