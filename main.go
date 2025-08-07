@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,6 +33,13 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to load configuration: %v\n", err)
 	}
+
+	// TODO: config
+	// Start pprof HTTP server on a separate goroutine
+	go func() {
+		log.Info().Msg("Starting pprof HTTP server on :6060")
+		http.ListenAndServe("localhost:6060", nil)
+	}()
 
 	// Configure loggers based on configuration
 	if err := configureLoggers(config); err != nil {
@@ -87,14 +95,7 @@ func main() {
 	defer etwSession.Stop()
 	log.Debug().Msg("- ETW session manager created")
 
-	// Enable provider groups for our collectors
-	// For now, we only have the disk_io collector
-	if err := etwSession.EnableProviderGroup("disk_io"); err != nil {
-		log.Fatal().Err(err).Msg("❌ Failed to enable disk_io provider group")
-	}
-	log.Debug().Msg("💾 Disk I/O provider group enabled")
-
-	// Log enabled providers
+	// Log enabled providers in the config
 	enabledGroups := etwSession.GetEnabledProviderGroups()
 	log.Info().Strs("provider_groups", enabledGroups).Msg("✅ Enabled provider groups")
 	log.Debug().Int("provider_count", len(enabledGroups)).Msg("📈 Provider group count")
@@ -145,5 +146,5 @@ func main() {
 		log.Debug().Msg("✅ HTTP server shut down cleanly")
 	}
 
-	log.Info().Msg("👋 ETW Exporter stopped gracefully")
+	log.Info().Msg("ETW Exporter stopped gracefully")
 }

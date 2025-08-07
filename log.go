@@ -6,7 +6,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/phuslu/log"
@@ -14,11 +13,12 @@ import (
 )
 
 var (
-	// Module-specific fast loggers for hot paths
-	// These use IOWriter (JSON) for maximum performance in event processing
-	diskIOLogger log.Logger
-	threadLogger log.Logger
-	eventLogger  log.Logger
+	// Module-specific loggers
+	diskIOLogger  log.Logger
+	threadLogger  log.Logger
+	eventLogger   log.Logger
+	processLogger log.Logger
+	sessionLogger log.Logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -234,32 +234,18 @@ func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
 			continue
 		}
 
-		if output.Type == "console" {
-			// Always use the shared synchronized console writer to prevent race conditions
-			if sharedConsoleWriter != nil {
-				writers = append(writers, sharedConsoleWriter)
-			}
-		} else {
-			// Non-console writers don't need synchronization
-			writer, err := createWriter(output)
-			if err != nil {
-				return nil, err
-			}
-			if writer != nil {
-				writers = append(writers, writer)
-			}
+		writer, err := createWriter(output)
+		if err != nil {
+			return nil, err
+		}
+		if writer != nil {
+			writers = append(writers, writer)
 		}
 	}
 
 	if len(writers) == 0 {
-		// Fallback to shared console writer if no writers are configured
-		if sharedConsoleWriter != nil {
-			return sharedConsoleWriter, nil
-		}
-		// If shared writer not available yet, create a default one
-		return &SyncConsoleWriter{
-			writer: &log.IOWriter{Writer: os.Stderr},
-		}, nil
+		// Fallback to stderr if no writers are configured
+		return &log.IOWriter{Writer: os.Stderr}, nil
 	}
 
 	if len(writers) == 1 {
@@ -272,91 +258,33 @@ func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
 	return &multiWriter, nil
 }
 
-// SyncConsoleWriter is a thread-safe console writer implementation
-// This ensures all console output is properly synchronized to prevent race conditions
-// The phuslu/log ConsoleWriter is NOT thread-safe, so we must serialize access
-type SyncConsoleWriter struct {
-	writer log.Writer
-	mu     sync.Mutex
-}
-
-func (w *SyncConsoleWriter) WriteEntry(e *log.Entry) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.writer.WriteEntry(e)
-}
-
-// Shared synchronized console writer to prevent race conditions across all loggers
-var sharedConsoleWriter *SyncConsoleWriter
-
 // ConfigureLogging configures the global logger and module-specific loggers
 func ConfigureLogging(config LoggingConfig) error {
-	// Create a single shared synchronized console writer to prevent race conditions
-	// This ensures ALL console output goes through the same synchronized writer
-	var consoleWriter log.Writer = &log.IOWriter{Writer: os.Stderr} // Default fallback
-	for _, output := range config.Outputs {
-		if output.Enabled && output.Type == "console" && output.Console != nil {
-			if cw, err := createConsoleWriter(output.Console); err == nil {
-				consoleWriter = cw
-				break
-			}
-		}
-	}
-
-	sharedConsoleWriter = &SyncConsoleWriter{
-		writer: consoleWriter,
-	}
-
-	// Create the main writer from all enabled outputs
-	writer, err := createMultiWriter(config.Outputs)
+	// Create a multi-writer that handles all configured outputs
+	multiWriter, err := createMultiWriter(config.Outputs)
 	if err != nil {
 		return err
 	}
 
-	// Configure the default logger
+	// Configure the default logger (used by main application)
 	log.DefaultLogger = log.Logger{
 		Level:        parseLogLevel(config.Defaults.Level),
 		Caller:       config.Defaults.Caller,
 		TimeField:    config.Defaults.TimeField,
 		TimeFormat:   config.Defaults.TimeFormat,
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       writer,
+		Writer:       multiWriter,
 	}
 
-	// Create fast writers for module loggers (hot path optimization)
-	// These always use fast JSON output for performance, but still need console synchronization
-	fastConsoleWriter := &SyncConsoleWriter{
-		writer: &log.IOWriter{Writer: os.Stderr},
-	}
-
-	// Find file writers for fast loggers
-	var fastWriters []log.Writer
-	fastWriters = append(fastWriters, fastConsoleWriter)
-
-	for _, output := range config.Outputs {
-		if output.Enabled && output.Type == "file" && output.File != nil {
-			if fw, err := createFileWriter(output.File); err == nil {
-				fastWriters = append(fastWriters, fw)
-			}
-		}
-	}
-
-	var fastWriter log.Writer
-	if len(fastWriters) == 1 {
-		fastWriter = fastWriters[0]
-	} else {
-		multiWriter := log.MultiEntryWriter(fastWriters)
-		fastWriter = &multiWriter
-	}
-
-	// Configure module-specific fast loggers
+	// Configure module-specific loggers using the same multi-writer
+	// This allows all modules to use configured console/file outputs
 	diskIOLogger = log.Logger{
 		Level:        parseLogLevel(config.Defaults.Level),
 		Caller:       0, // Disable caller for performance
 		TimeField:    config.Defaults.TimeField,
 		TimeFormat:   config.Defaults.TimeFormat,
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       fastWriter,
+		Writer:       multiWriter,
 		Context:      log.NewContext(nil).Str("module", "disk-io").Value(),
 	}
 
@@ -366,7 +294,7 @@ func ConfigureLogging(config LoggingConfig) error {
 		TimeField:    config.Defaults.TimeField,
 		TimeFormat:   config.Defaults.TimeFormat,
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       fastWriter,
+		Writer:       multiWriter,
 		Context:      log.NewContext(nil).Str("module", "thread").Value(),
 	}
 
@@ -376,12 +304,32 @@ func ConfigureLogging(config LoggingConfig) error {
 		TimeField:    config.Defaults.TimeField,
 		TimeFormat:   config.Defaults.TimeFormat,
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       fastWriter,
+		Writer:       multiWriter,
 		Context:      log.NewContext(nil).Str("module", "events").Value(),
 	}
 
+	processLogger = log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       multiWriter,
+		Context:      log.NewContext(nil).Str("module", "process").Value(),
+	}
+
+	sessionLogger = log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       multiWriter,
+		Context:      log.NewContext(nil).Str("module", "session").Value(),
+	}
+
 	// Configure ETW library logging
-	if err := ConfigureETWLibraryLogger(config.LibLevel, config.Outputs); err != nil {
+	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
 		return fmt.Errorf("failed to configure ETW library logging: %w", err)
 	}
 
@@ -402,28 +350,12 @@ func GetThreadLogger() log.Logger {
 
 // GetProcessLogger returns a logger with process module context
 func GetProcessLogger() log.Logger {
-	return log.Logger{
-		Level:        log.DefaultLogger.Level,
-		Caller:       log.DefaultLogger.Caller,
-		TimeField:    log.DefaultLogger.TimeField,
-		TimeFormat:   log.DefaultLogger.TimeFormat,
-		TimeLocation: log.DefaultLogger.TimeLocation,
-		Writer:       log.DefaultLogger.Writer,
-		Context:      log.NewContext(nil).Str("module", "process").Value(),
-	}
+	return processLogger
 }
 
 // GetSessionLogger returns a logger with session module context
 func GetSessionLogger() log.Logger {
-	return log.Logger{
-		Level:        log.DefaultLogger.Level,
-		Caller:       log.DefaultLogger.Caller,
-		TimeField:    log.DefaultLogger.TimeField,
-		TimeFormat:   log.DefaultLogger.TimeFormat,
-		TimeLocation: log.DefaultLogger.TimeLocation,
-		Writer:       log.DefaultLogger.Writer,
-		Context:      log.NewContext(nil).Str("module", "session").Value(),
-	}
+	return sessionLogger
 }
 
 // GetEventLogger returns a high-performance logger for events module
@@ -433,16 +365,11 @@ func GetEventLogger() log.Logger {
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration
-func ConfigureETWLibraryLogger(level string, outputs []LogOutput) error {
-	writer, err := createMultiWriter(outputs)
-	if err != nil {
-		return err
-	}
-
+func ConfigureETWLibraryLogger(level string, sharedMultiWriter log.Writer) error {
 	etwLogger := log.Logger{
 		Level:   parseLogLevel(level),
 		Caller:  0, // ETW library manages its own caller info
-		Writer:  writer,
+		Writer:  sharedMultiWriter,
 		Context: log.NewContext(nil).Str("source", "etw-lib").Value(),
 	}
 

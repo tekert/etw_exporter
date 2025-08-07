@@ -65,7 +65,7 @@ func (s *SessionManager) Start() error {
 		s.logger.Error().Err(err).Msg("Failed to capture SystemConfig events")
 		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 	}
-	s.logger.Debug().Msg("✅ SystemConfig events captured")
+	s.logger.Debug().Msg("SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
 	s.logger.Debug().Msg("Setting up ETW sessions...")
@@ -73,7 +73,7 @@ func (s *SessionManager) Start() error {
 		s.logger.Error().Err(err).Msg("Failed to setup sessions")
 		return fmt.Errorf("failed to setup sessions: %w", err)
 	}
-	s.logger.Debug().Msg("✅ ETW sessions setup complete")
+	s.logger.Debug().Msg("ETW sessions setup complete")
 
 	// Setup consumer with callbacks
 	s.logger.Debug().Msg("Setting up ETW consumer...")
@@ -81,7 +81,7 @@ func (s *SessionManager) Start() error {
 		s.logger.Error().Err(err).Msg("Failed to setup consumer")
 		return fmt.Errorf("failed to setup consumer: %w", err)
 	}
-	s.logger.Debug().Msg("✅ ETW consumer setup complete")
+	s.logger.Debug().Msg("ETW consumer setup complete")
 
 	// Start the consumer
 	s.logger.Debug().Msg("Starting ETW consumer...")
@@ -89,7 +89,7 @@ func (s *SessionManager) Start() error {
 		s.logger.Error().Err(err).Msg("Failed to start consumer")
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
-	s.logger.Debug().Msg("✅ ETW consumer started")
+	s.logger.Debug().Msg("ETW consumer started")
 
 	s.running = true
 	s.logger.Info().Msg("✅ ETW session manager started successfully")

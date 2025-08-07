@@ -5,6 +5,7 @@ go 1.24
 replace github.com/tekert/golang-etw => ../../repos/golang-etw
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	github.com/phuslu/log v1.0.119
 	github.com/prometheus/client_golang v1.23.0
 	github.com/tekert/golang-etw v0.6.0-beta1
@@ -12,7 +13,6 @@ require (
 
 require (
 	github.com/0xrawsec/golang-utils v1.3.2 // indirect
-	github.com/BurntSushi/toml v1.5.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
