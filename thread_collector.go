@@ -11,8 +11,8 @@ import (
 	"github.com/tekert/golang-etw/etw"
 )
 
-// ThreadCollector handles thread events and metrics with low cardinality
-type ThreadCollector struct {
+// ThreadCSCollector handles thread events and metrics with low cardinality
+type ThreadCSCollector struct {
 	lastCpuSwitch   sync.Map        // key: cpu (uint16), value: time.Time
 	threadToProcess sync.Map        // key: threadID (uint32), value: processID (uint32)
 	processTracker  *ProcessTracker // Reference to the global process tracker
@@ -20,9 +20,9 @@ type ThreadCollector struct {
 	logger          log.Logger // Thread collector logger
 }
 
-// NewThreadCollector creates a new thread collector instance
-func NewThreadCollector() *ThreadCollector {
-	return &ThreadCollector{
+// NewThreadCSCollector creates a new thread collector instance
+func NewThreadCSCollector() *ThreadCSCollector {
+	return &ThreadCSCollector{
 		processTracker: GetGlobalProcessTracker(),
 		metrics:        GetMetrics(),
 		logger:         GetThreadLogger(),
@@ -30,7 +30,7 @@ func NewThreadCollector() *ThreadCollector {
 }
 
 // HandleContextSwitch processes context switch events (CSwitch)
-func (c *ThreadCollector) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+func (c *ThreadCSCollector) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	// Parse context switch event data according to CSwitch class documentation
 	oldThreadID, _ := helper.GetPropertyUint("OldThreadId")
 	newThreadID, _ := helper.GetPropertyUint("NewThreadId")
@@ -121,7 +121,7 @@ func (c *ThreadCollector) HandleContextSwitch(helper *etw.EventRecordHelper) err
 }
 
 // HandleReadyThread processes thread ready events
-func (c *ThreadCollector) HandleReadyThread(helper *etw.EventRecordHelper) error {
+func (c *ThreadCSCollector) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("ThreadId")
 	threadPriority, _ := helper.GetPropertyInt("ThreadPriority")
 	adjustReason, _ := helper.GetPropertyInt("AdjustReason")
@@ -150,7 +150,7 @@ func (c *ThreadCollector) HandleReadyThread(helper *etw.EventRecordHelper) error
 }
 
 // HandleThreadStart processes thread start events
-func (c *ThreadCollector) HandleThreadStart(helper *etw.EventRecordHelper) error {
+func (c *ThreadCSCollector) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 	processID, _ := helper.GetPropertyUint("ProcessId")
 
@@ -172,7 +172,7 @@ func (c *ThreadCollector) HandleThreadStart(helper *etw.EventRecordHelper) error
 }
 
 // HandleThreadEnd processes thread end events
-func (c *ThreadCollector) HandleThreadEnd(helper *etw.EventRecordHelper) error {
+func (c *ThreadCSCollector) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 
 	// Clean up thread to process mapping
