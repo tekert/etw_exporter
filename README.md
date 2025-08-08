@@ -32,6 +32,16 @@ enabled = true
 
 See `config.example.toml` for a complete configuration example with detailed comments.
 
+**Note**: The `config.example.toml` file is auto-generated from `CONFIG.md`. To regenerate it:
+
+```bash
+# Option 1: Use go generate (recommended)
+go generate
+
+# Option 2: Use the main executable directly
+go run . -generate-config config.example.toml
+```
+
 ### Configuration Features
 - **Work in progress**
 

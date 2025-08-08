@@ -1,6 +1,8 @@
 // main.go
 package main
 
+//go:generate go run . -generate-config config.example.toml
+
 import (
 	"context"
 	"flag"
@@ -22,11 +24,22 @@ var (
 
 func main() {
 	var (
-		listenAddress = flag.String("web.listen-address", ":9189", "Address to listen on for web interface and telemetry.")
-		metricsPath   = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
-		configPath    = flag.String("config", "", "Path to configuration file (optional).")
+		listenAddress  = flag.String("web.listen-address", ":9189", "Address to listen on for web interface and telemetry.")
+		metricsPath    = flag.String("web.telemetry-path", "/metrics", "Path under which to expose metrics.")
+		configPath     = flag.String("config", "", "Path to configuration file (optional).")
+		generateConfig = flag.String("generate-config", "", "Generate example config file to specified path and exit.")
 	)
 	flag.Parse()
+
+	// Handle config generation
+	if *generateConfig != "" {
+		if err := GenerateExampleConfig(*generateConfig); err != nil {
+			fmt.Fprintf(os.Stderr, "Error generating example config: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated %s successfully\n", *generateConfig)
+		return
+	}
 
 	// Load configuration
 	config, err := LoadConfig(*configPath)

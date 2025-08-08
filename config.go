@@ -11,6 +11,11 @@ import (
 	"github.com/phuslu/log"
 )
 
+// Configuration system:
+// - CONFIG.md contains detailed documentation
+// - config.example.toml is auto-generated using go generate
+// - Use brief comments here for reference only
+
 // AppConfig represents the complete application configuration
 type AppConfig struct {
 	// Server configuration
@@ -25,12 +30,10 @@ type AppConfig struct {
 
 // ServerConfig contains HTTP server settings
 type ServerConfig struct {
-	// Listen address for the HTTP server (default: ":9189")
-	// Examples: ":9189", "localhost:9189", "127.0.0.1:9189"
+	// Listen address (default: ":9189")
 	ListenAddress string `toml:"listen_address"`
 
 	// Metrics endpoint path (default: "/metrics")
-	// This is where Prometheus can scrape metrics
 	MetricsPath string `toml:"metrics_path"`
 }
 
@@ -53,14 +56,11 @@ type DiskIOConfig struct {
 	// Enable disk I/O event collection (default: true)
 	Enabled bool `toml:"enabled"`
 
-	// Track additional disk information from SystemConfig events (default: true)
-	// This provides disk model, size, and other metadata
+	// Track additional disk information (default: true)
 	TrackDiskInfo bool `toml:"track_disk_info"`
 }
 
 // ThreadCSConfig contains thread context switch collector settings
-// Only enabled state is configurable
-// No context_switches option anymore
 type ThreadCSConfig struct {
 	// Enable thread context switch event collection (default: true)
 	Enabled bool `toml:"enabled"`
@@ -75,29 +75,24 @@ type LoggingConfig struct {
 	Outputs []LogOutput `toml:"outputs"`
 
 	// ETW library log level (default: "warn")
-	// Levels: "trace", "debug", "info", "warn", "error", "fatal"
 	LibLevel string `toml:"lib_level"`
 }
 
 // LogDefaults contains default logger settings
 type LogDefaults struct {
-	// Log level for application loggers (default: "info")
-	// Levels: "trace", "debug", "info", "warn", "error", "fatal"
+	// Log level (default: "info")
 	Level string `toml:"level"`
 
-	// Include caller information in logs (default: 1)
-	// 0 = disabled, 1 = file:line, -1 = full path
+	// Include caller information (default: 0)
 	Caller int `toml:"caller"`
 
-	// Time field name in log output (default: "time")
+	// Time field name (default: "time")
 	TimeField string `toml:"time_field"`
 
-	// Time format for log timestamps (default: "" = RFC3339 with milliseconds)
-	// Examples: "", "2006-01-02T15:04:05", "Unix", "UnixMs"
+	// Time format (default: "" = RFC3339 with milliseconds)
 	TimeFormat string `toml:"time_format"`
 
-	// Time zone for timestamps (default: "Local")
-	// Examples: "Local", "UTC", "America/New_York"
+	// Time zone (default: "Local")
 	TimeLocation string `toml:"time_location"`
 }
 
@@ -118,54 +113,43 @@ type LogOutput struct {
 
 // ConsoleConfig contains console/terminal output settings
 type ConsoleConfig struct {
-	// Use fast JSON output via IOWriter instead of formatted console output (default: false)
-	// When true: Uses high-performance JSON logging suitable for hot paths
-	// When false: Uses formatted, colorized output for human readability
-	// NOTE: Hot path modules (disk-io, thread, events) always use fast_io regardless of this setting
+	// Use fast JSON output (default: false)
 	FastIO bool `toml:"fast_io"`
 
 	// Output format when fast_io=false (default: "auto")
-	// Formats: "auto", "json", "logfmt", "glog"
-	// "auto" = colorized console format with key=value pairs
 	Format string `toml:"format"`
 
-	// Enable colored output when fast_io=false (default: true)
-	// Only applies to console format, ignored for JSON/logfmt
+	// Enable colored output (default: true)
 	ColorOutput bool `toml:"color_output"`
 
-	// Quote string values when fast_io=false (default: true)
+	// Quote string values (default: true)
 	QuoteString bool `toml:"quote_string"`
 
 	// Output destination (default: "stderr")
-	// Options: "stdout", "stderr"
 	Writer string `toml:"writer"`
 
 	// Use asynchronous writing (default: false)
-	// Improves performance but may lose recent logs on crash
 	Async bool `toml:"async"`
 }
 
 // FileConfig contains file output settings
 type FileConfig struct {
 	// Log file path (required)
-	// Example: "logs/app.log"
 	Filename string `toml:"filename"`
 
-	// Maximum file size in megabytes before rotation (default: 10)
-	// Set to the number of megabytes (e.g., 10 = 10MB)
+	// Maximum file size in megabytes (default: 10)
 	MaxSize int64 `toml:"max_size"`
 
 	// Maximum number of old log files to keep (default: 7)
 	MaxBackups int `toml:"max_backups"`
 
 	// Time format for rotated filenames (default: "2006-01-02T15-04-05")
-	// Special values: "Unix", "UnixMs" for timestamps
 	TimeFormat string `toml:"time_format"`
 
 	// Use local time for rotation timestamps (default: true)
 	LocalTime bool `toml:"local_time"`
 
-	// Include hostname in filename (default: false)
+	// Include hostname in filename (default: true)
 	HostName bool `toml:"host_name"`
 
 	// Include process ID in filename (default: true)
@@ -174,19 +158,16 @@ type FileConfig struct {
 	// Create directory if it doesn't exist (default: true)
 	EnsureFolder bool `toml:"ensure_folder"`
 
-	// Use asynchronous writing (default: true for files)
-	// Significantly improves performance for file logging
+	// Use asynchronous writing (default: true)
 	Async bool `toml:"async"`
 }
 
 // SyslogConfig contains syslog output settings
 type SyslogConfig struct {
 	// Network protocol (default: "udp")
-	// Options: "tcp", "udp", "unixgram"
 	Network string `toml:"network"`
 
 	// Syslog server address (default: "localhost:514")
-	// Examples: "localhost:514", "syslog.example.com:514"
 	Address string `toml:"address"`
 
 	// Hostname for syslog messages (default: system hostname)
@@ -196,7 +177,6 @@ type SyslogConfig struct {
 	Tag string `toml:"tag"`
 
 	// Message prefix marker (default: "@cee:")
-	// Common values: "@cee:", ""
 	Marker string `toml:"marker"`
 
 	// Use asynchronous writing (default: true)
@@ -205,7 +185,7 @@ type SyslogConfig struct {
 
 // EventlogConfig contains Windows Event Log settings
 type EventlogConfig struct {
-	// Event source name (default: "ETW_Exporter")
+	// Event source name (default: "ETW Exporter")
 	Source string `toml:"source"`
 
 	// Event ID for log entries (default: 1000)
@@ -215,7 +195,6 @@ type EventlogConfig struct {
 	Host string `toml:"host"`
 
 	// Use asynchronous writing (default: false)
-	// Event log operations are typically synchronous
 	Async bool `toml:"async"`
 }
 
@@ -337,6 +316,37 @@ func SaveConfig(configPath string, config *AppConfig) error {
 
 	// Encode to TOML
 	if err := toml.NewEncoder(file).Encode(config); err != nil {
+		return fmt.Errorf("failed to encode config to TOML: %w", err)
+	}
+
+	return nil
+}
+
+// GenerateExampleConfig generates a TOML configuration file with minimal comments and default values
+func GenerateExampleConfig(outputPath string) error {
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return fmt.Errorf("failed to create output file: %w", err)
+	}
+	defer file.Close()
+
+	// Write header comments
+	header := `# ETW Exporter Example Configuration
+# This file is auto-generated and serves as an example configuration.
+# For detailed documentation of all configuration options, see CONFIG.md
+# Copy this file to create your own configuration and modify as needed.
+#
+# Format: TOML (Tom's Obvious, Minimal Language)
+
+`
+	if _, err := file.WriteString(header); err != nil {
+		return fmt.Errorf("failed to write header: %w", err)
+	}
+
+	// Create default config and encode to TOML
+	config := DefaultConfig()
+	encoder := toml.NewEncoder(file)
+	if err := encoder.Encode(config); err != nil {
 		return fmt.Errorf("failed to encode config to TOML: %w", err)
 	}
 
