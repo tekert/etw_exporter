@@ -43,11 +43,11 @@ enabled = false
 # Higher levels include lower levels (error includes fatal, warn includes error, etc.)
 level = "info"
 
-# Include caller information in logs (default: 1)
+# Include caller information in logs (default: 0)
 # 0 = disabled (no caller info)
 # 1 = file:line format (e.g., "main.go:42")
 # -1 = full path format (e.g., "/path/to/main.go:42")
-caller = 1
+caller = 0
 
 # Time field name in log output (default: "time")
 # This is the JSON field name for timestamps
@@ -128,10 +128,9 @@ filename = "logs/app.log"
 # 666 = all read/write (not recommended)
 # file_mode = 644               # Default: 644
 
-# Maximum file size in bytes before rotation (default: 104857600 = 100MB)
-# When file reaches this size, it will be rotated
-# Supports standard units: 1KB=1024, 1MB=1024*1024, etc.
-max_size = 104857600
+# Maximum file size in megabytes before rotation (default: 10)
+# When file reaches this size (in MB), it will be rotated
+max_size = 10
 
 # Maximum number of old log files to keep (default: 7)
 # Older files beyond this number will be deleted

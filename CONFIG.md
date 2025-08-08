@@ -93,7 +93,7 @@ The `[logging]` section provides comprehensive control over logging behavior.
 ```toml
 [logging.defaults]
 level = "info"           # Default: "info"
-caller = 1               # Default: 1
+caller = 0               # Default: 0
 time_field = "time"      # Default: "time"
 time_format = ""         # Default: "" (RFC3339 with milliseconds)
 time_location = "Local"  # Default: "Local"
@@ -127,6 +127,7 @@ time_location = "Local"  # Default: "Local"
 #### Library Logging
 
 ```toml
+[logging]
 lib_level = "warn"  # Default: "warn"
 ```
 
@@ -194,11 +195,11 @@ enabled = true
 [logging.outputs.file]
 filename = "logs/app.log"     # Required
 # File permissions are fixed to 0644 on Windows
-max_size = 104857600          # Default: 104857600 (100MB)
+max_size = 10                 # Default: 10 (megabytes)
 max_backups = 7               # Default: 7
 time_format = "2006-01-02T15-04-05"  # Default: "2006-01-02T15-04-05"
 local_time = true             # Default: true
-host_name = true              # Default: false
+host_name = true              # Default: true
 process_id = true             # Default: true
 ensure_folder = true          # Default: true
 async = true                  # Default: true
@@ -208,10 +209,10 @@ async = true                  # Default: true
 - Can be relative or absolute path
 - Directory structure will be created if `ensure_folder = true`
 
-**file permissions**: On Windows, file permissions are always set to `0644` (owner read/write, group/others read-only) and cannot be changed via config.
+**file permissions**: On Windows, file permissions are always set to (TODO)
 
 **max_size**: Maximum file size before rotation.
-- Size in bytes (104857600 = 100MB)
+- Size in megabytes (e.g., 10 = 10MB)
 - When exceeded, file is rotated and new file started
 
 **max_backups**: Number of old log files to keep.
@@ -219,8 +220,8 @@ async = true                  # Default: true
 - Older files beyond this limit are automatically deleted
 
 **time_format**: Format for rotated file timestamps.
-- Uses Go time layout format
-- `"2006-01-02T15-04-05"` = ISO date format
+- Can use Go time layout format (see [Go time layouts](https://pkg.go.dev/time#pkg-constants)) for values.
+- `"2006-01-02T15-04-05"` = ISO date format by default.
 - `"Unix"` / `"UnixMs"` = numeric timestamps
 
 **local_time**: Use local time for file rotation.
@@ -321,7 +322,6 @@ The ETW Exporter automatically optimizes logging for high-frequency event proces
 ### CPU Impact
 
 - **Console Formatting**: Colorized console output has higher CPU overhead
-- **Context Switches**: Disable if experiencing performance issues under heavy load
 - **Caller Information**: Adds overhead for stack trace collection
 
 ## Examples
@@ -367,12 +367,12 @@ enabled = true
 
 [logging.outputs.file]
 filename = "/var/log/etw_exporter/app.log"
-max_size = 536870912  # 512MB
+max_size = 512  # 512MB
 max_backups = 30
 async = true
 ```
 
-### Centralized Logging
+### Syslog Logging
 
 For centralized logging with syslog:
 
@@ -395,10 +395,11 @@ marker = "@cee:"
 To troubleshoot configuration issues:
 
 ```toml
+[logging]
+lib_level = "debug"
+
 [logging.defaults]
 level = "debug"
-
-lib_level = "debug"
 ```
 
 This will provide detailed information about the ETW library and application behavior.

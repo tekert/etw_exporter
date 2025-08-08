@@ -151,7 +151,8 @@ type FileConfig struct {
 	// Example: "logs/app.log"
 	Filename string `toml:"filename"`
 
-	// Maximum file size in bytes before rotation (default: 100MB)
+	// Maximum file size in megabytes before rotation (default: 10)
+	// Set to the number of megabytes (e.g., 10 = 10MB)
 	MaxSize int64 `toml:"max_size"`
 
 	// Maximum number of old log files to keep (default: 7)
@@ -260,7 +261,7 @@ func DefaultConfig() *AppConfig {
 					Enabled: false,
 					File: &FileConfig{
 						Filename:     "logs/app.log",
-						MaxSize:      104857600, // 100MB
+						MaxSize:      10, // 10MB
 						MaxBackups:   7,
 						TimeFormat:   "2006-01-02T15-04-05",
 						LocalTime:    true,
@@ -268,6 +269,28 @@ func DefaultConfig() *AppConfig {
 						ProcessID:    true,
 						EnsureFolder: true,
 						Async:        true,
+					},
+				},
+				{
+					Type:    "syslog",
+					Enabled: false,
+					Syslog: &SyslogConfig{
+						Network:  "udp",
+						Address:  "localhost:514",
+						Tag:      "etw_exporter",
+						Hostname: "", // Uses system hostname by default
+						Marker:   "@cee:",
+						Async:    true, // Syslog is typically asynchronous
+					},
+				},
+				{
+					Type:    "eventlog",
+					Enabled: false,
+					Eventlog: &EventlogConfig{
+						Source: "ETW Exporter",
+						ID:     1000,
+						Host:   "localhost",
+						Async:  false, // Event log is typically synchronous
 					},
 				},
 			},
