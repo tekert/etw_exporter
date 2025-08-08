@@ -74,7 +74,7 @@ func main() {
 		Bool("threadcs_enabled", config.Collectors.ThreadCS.Enabled).
 		Str("listen_address", config.Server.ListenAddress).
 		Str("metrics_path", config.Server.MetricsPath).
-		Msg("🚀 Starting ETW Exporter")
+		Msg("Starting ETW Exporter")
 
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,15 +103,15 @@ func main() {
 
 	// Log enabled providers in the config
 	enabledGroups := etwSession.GetEnabledProviderGroups()
-	log.Info().Strs("provider_groups", enabledGroups).Msg("✅ Enabled provider groups")
-	log.Debug().Int("provider_count", len(enabledGroups)).Msg("📈 Provider group count")
+	log.Info().Strs("provider_groups", enabledGroups).Msg("Enabled provider groups")
+	log.Debug().Int("provider_count", len(enabledGroups)).Msg("Provider group count")
 
 	// Start the ETW session
 	log.Info().Msg("🔄 Starting ETW trace session...")
 	if err := etwSession.Start(); err != nil {
 		log.Fatal().Err(err).Msg("❌ Failed to start ETW session")
 	}
-	log.Info().Msg("ETW session started successfully")
+	log.Debug().Msg("ETW session started successfully")
 
 	// Set up HTTP server for Prometheus metrics
 	log.Debug().Str("metrics_path", config.Server.MetricsPath).Msg("🌐 Setting up HTTP handlers")
@@ -149,7 +149,7 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("❌ Error shutting down HTTP server")
 	} else {
-		log.Debug().Msg("✅ HTTP server shut down cleanly")
+		log.Debug().Msg("HTTP server shut down cleanly")
 	}
 
 	log.Info().Msg("ETW Exporter stopped gracefully")

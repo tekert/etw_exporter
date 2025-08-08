@@ -14,11 +14,11 @@ import (
 
 var (
 	// Module-specific loggers
-	modDiskIOLogger       log.Logger // Disk I/O collector logger
-	modThreadLogger       log.Logger // ThreadCS collector logger
+	modDiskIOLogger  log.Logger // Disk I/O collector logger
+	modThreadLogger  log.Logger // ThreadCS collector logger
 	modHandlerLogger log.Logger // Event handler logger
 	modProcessLogger log.Logger // Process tracker logger
-	modSessionLogger   log.Logger // ETW session manager logger
+	modSessionLogger log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -54,6 +54,18 @@ func parseTimeLocation(location string) *time.Location {
 		}
 		return time.Local
 	}
+}
+
+// mapTimeFormat maps string time format to log.TimeFormat
+func mapTimeFormat(format string) string {
+    switch format {
+    case "Unix":
+        return log.TimeFormatUnix
+    case "UnixMs":
+        return log.TimeFormatUnixMs
+    default:
+        return format
+    }
 }
 
 // createConsoleWriter creates a console writer based on configuration
@@ -134,10 +146,10 @@ func createFileWriter(config *FileConfig) (log.Writer, error) {
 
 	baseWriter := &log.FileWriter{
 		Filename:     config.Filename,
-		FileMode:     0644, // Fixed mode for Windows
-		MaxSize:      config.MaxSize,
+		FileMode:     0644,                         // Fixed mode for Windows
+		MaxSize:      config.MaxSize * 1024 * 1024, // Convert MB to bytes
 		MaxBackups:   config.MaxBackups,
-		TimeFormat:   config.TimeFormat,
+		TimeFormat:   mapTimeFormat(config.TimeFormat),
 		LocalTime:    config.LocalTime,
 		HostName:     config.HostName,
 		ProcessID:    config.ProcessID,
@@ -263,7 +275,7 @@ func createLogger(config LoggingConfig, writer log.Writer, contextStr string) lo
 		Level:        parseLogLevel(config.Defaults.Level),
 		Caller:       0, // Disable caller for performance
 		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
+		TimeFormat:   mapTimeFormat(config.Defaults.TimeFormat),
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
 		Writer:       writer,
 		Context:      log.NewContext(nil).Str("module", contextStr).Value(),
@@ -283,7 +295,7 @@ func ConfigureLogging(config LoggingConfig) error {
 		Level:        parseLogLevel(config.Defaults.Level),
 		Caller:       config.Defaults.Caller,
 		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
+		TimeFormat:   mapTimeFormat(config.Defaults.TimeFormat),
 		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
 		Writer:       multiWriter,
 	}

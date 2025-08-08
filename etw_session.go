@@ -87,7 +87,7 @@ func (s *SessionManager) Start() error {
 	s.log.Debug().Msg("ETW consumer started")
 
 	s.running = true
-	s.log.Info().Msg("✅ ETW session manager started successfully")
+	s.log.Info().Msg("✅ ETW session/s started successfully")
 	return nil
 }
 

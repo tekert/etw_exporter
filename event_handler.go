@@ -86,7 +86,7 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		// Register for file events for process correlation
 		handler.RegisterFileEventHandler(handler.diskCollector)
 
-		handler.log.Info().Msg("✅ Disk I/O collector enabled")
+		handler.log.Info().Msg("Disk I/O collector enabled")
 	}
 
 	if config.ThreadCS.Enabled {
@@ -95,7 +95,7 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		handler.RegisterThreadEventHandler(handler.threadCSHandler)
 		// Register the custom collector with Prometheus for high-performance metrics
 		prometheus.MustRegister(handler.threadCSHandler.GetCustomCollector())
-		handler.log.Info().Msg("✅ ThreadCS collector enabled and registered with Prometheus")
+		handler.log.Info().Msg("ThreadCS collector enabled and registered with Prometheus")
 	}
 
 	handler.log.Info().
