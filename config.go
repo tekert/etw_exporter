@@ -322,7 +322,7 @@ func SaveConfig(configPath string, config *AppConfig) error {
 	return nil
 }
 
-// GenerateExampleConfig generates a TOML configuration file with minimal comments and default values
+// GenerateExampleConfig generates a TOML configuration file with default values
 func GenerateExampleConfig(outputPath string) error {
 	file, err := os.Create(outputPath)
 	if err != nil {

@@ -260,6 +260,8 @@ marker = "@cee:"              # Default: "@cee:"
 async = true                  # Default: true
 ```
 
+RFC 3164
+
 **network**: Network protocol for syslog.
 - `"udp"` = fast but may lose messages
 - `"tcp"` = reliable but slower

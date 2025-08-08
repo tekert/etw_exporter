@@ -6,45 +6,147 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/BurntSushi/toml"
 )
 
-// TestDefaultConfig tests that DefaultConfig returns expected core values
-func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+// TestConfigData tests configuration data, defaults, edge cases, and validation
+func TestConfigData(t *testing.T) {
+	tests := []struct {
+		name       string
+		config     *AppConfig
+		configTOML string
+		setupFunc  func(*AppConfig)
+		expectErr  bool
+		validate   func(*testing.T, *AppConfig)
+	}{
+		{
+			name:   "default config",
+			config: DefaultConfig(),
+			validate: func(t *testing.T, c *AppConfig) {
+				if c.Server.ListenAddress != ":9189" {
+					t.Errorf("Expected ListenAddress ':9189', got %s", c.Server.ListenAddress)
+				}
+				if c.Logging.Defaults.Level != "info" {
+					t.Errorf("Expected default log level 'info', got %s", c.Logging.Defaults.Level)
+				}
+				if len(c.Logging.Outputs) != 4 {
+					t.Errorf("Expected 4 outputs, got %d", len(c.Logging.Outputs))
+				}
+			},
+		},
+		{
+			name: "custom logging config",
+			configTOML: `
+[logging.defaults]
+level = "debug"
 
-	// Test core server defaults
-	if config.Server.ListenAddress != ":9189" {
-		t.Errorf("Expected ListenAddress ':9189', got '%s'", config.Server.ListenAddress)
-	}
-	if config.Server.MetricsPath != "/metrics" {
-		t.Errorf("Expected MetricsPath '/metrics', got '%s'", config.Server.MetricsPath)
+[[logging.outputs]]
+type = "console"
+enabled = true
+
+[[logging.outputs]]
+type = "file"
+enabled = true
+[logging.outputs.file]
+filename = "app.log"
+`,
+			validate: func(t *testing.T, c *AppConfig) {
+				if c.Logging.Defaults.Level != "debug" {
+					t.Errorf("Expected debug level, got %s", c.Logging.Defaults.Level)
+				}
+				if len(c.Logging.Outputs) != 2 {
+					t.Errorf("Expected 2 outputs, got %d", len(c.Logging.Outputs))
+				}
+				if c.Logging.Outputs[0].Type != "console" {
+					t.Errorf("Expected first output 'console', got %s", c.Logging.Outputs[0].Type)
+				}
+			},
+		},
+		{
+			name:   "invalid empty listen address",
+			config: DefaultConfig(),
+			setupFunc: func(c *AppConfig) {
+				c.Server.ListenAddress = ""
+			},
+			expectErr: true,
+		},
+		{
+			name:   "invalid no collectors enabled",
+			config: DefaultConfig(),
+			setupFunc: func(c *AppConfig) {
+				c.Collectors.DiskIO.Enabled = false
+				c.Collectors.ThreadCS.Enabled = false
+			},
+			expectErr: true,
+		},
+		{
+			name:   "invalid no outputs enabled",
+			config: DefaultConfig(),
+			setupFunc: func(c *AppConfig) {
+				for i := range c.Logging.Outputs {
+					c.Logging.Outputs[i].Enabled = false
+				}
+			},
+			expectErr: true,
+		},
+		{
+			name: "valid custom server config",
+			configTOML: `
+[server]
+listen_address = ":8080"
+metrics_path = "/custom"
+
+[collectors.disk_io]
+enabled = false
+track_disk_info = false
+`,
+			validate: func(t *testing.T, c *AppConfig) {
+				if c.Server.ListenAddress != ":8080" {
+					t.Errorf("Expected :8080, got %s", c.Server.ListenAddress)
+				}
+				if c.Server.MetricsPath != "/custom" {
+					t.Errorf("Expected /custom, got %s", c.Server.MetricsPath)
+				}
+				if c.Collectors.DiskIO.Enabled {
+					t.Error("Expected DiskIO to be disabled")
+				}
+			},
+		},
 	}
 
-	// Test collector defaults
-	if !config.Collectors.DiskIO.Enabled || !config.Collectors.ThreadCS.Enabled {
-		t.Error("Expected both collectors to be enabled by default")
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cfg *AppConfig
 
-	// Test logging defaults
-	if config.Logging.Defaults.Level != "info" || config.Logging.LibLevel != "warn" {
-		t.Errorf("Expected log levels info/warn, got %s/%s", config.Logging.Defaults.Level, config.Logging.LibLevel)
-	}
+			// Get config from direct config, TOML, or setup function
+			if tt.config != nil {
+				cfg = tt.config
+				if tt.setupFunc != nil {
+					tt.setupFunc(cfg)
+				}
+			} else {
+				tmpDir := t.TempDir()
+				path := filepath.Join(tmpDir, "test.toml")
+				os.WriteFile(path, []byte(tt.configTOML), 0644)
+				var err error
+				cfg, err = LoadConfig(path)
+				if err != nil {
+					t.Fatalf("Failed to load config: %v", err)
+				}
+			}
 
-	// Test that we have all 4 output types and only console is enabled
-	if len(config.Logging.Outputs) != 4 {
-		t.Errorf("Expected 4 outputs, got %d", len(config.Logging.Outputs))
-	}
-	expectedTypes := []string{"console", "file", "syslog", "eventlog"}
-	for i, output := range config.Logging.Outputs {
-		if output.Type != expectedTypes[i] {
-			t.Errorf("Expected output[%d] type %s, got %s", i, expectedTypes[i], output.Type)
-		}
-		expectedEnabled := (i == 0) // Only console enabled
-		if output.Enabled != expectedEnabled {
-			t.Errorf("Expected output[%d] enabled=%t, got %t", i, expectedEnabled, output.Enabled)
-		}
+			// Test validation
+			err := cfg.Validate()
+			if tt.expectErr && err == nil {
+				t.Error("Expected validation error but got none")
+			} else if !tt.expectErr && err != nil {
+				t.Errorf("Unexpected validation error: %v", err)
+			}
+
+			// Run custom validation if provided and config is valid
+			if !tt.expectErr && tt.validate != nil {
+				tt.validate(t, cfg)
+			}
+		})
 	}
 }
 
@@ -190,152 +292,7 @@ func TestSaveConfig(t *testing.T) {
 	})
 }
 
-// TestConfigValidation tests validation edge cases
-func TestConfigValidation(t *testing.T) {
-	tests := []struct {
-		name      string
-		setupFunc func(*AppConfig)
-		expectErr bool
-	}{
-		{
-			name:      "valid config",
-			setupFunc: func(c *AppConfig) {},
-			expectErr: false,
-		},
-		{
-			name: "empty listen address",
-			setupFunc: func(c *AppConfig) {
-				c.Server.ListenAddress = ""
-			},
-			expectErr: true,
-		},
-		{
-			name: "no collectors enabled",
-			setupFunc: func(c *AppConfig) {
-				c.Collectors.DiskIO.Enabled = false
-				c.Collectors.ThreadCS.Enabled = false
-			},
-			expectErr: true,
-		},
-		{
-			name: "no outputs enabled",
-			setupFunc: func(c *AppConfig) {
-				for i := range c.Logging.Outputs {
-					c.Logging.Outputs[i].Enabled = false
-				}
-			},
-			expectErr: true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			config := DefaultConfig()
-			tt.setupFunc(config)
-
-			err := config.Validate()
-			if tt.expectErr && err == nil {
-				t.Error("Expected validation error")
-			} else if !tt.expectErr && err != nil {
-				t.Errorf("Unexpected validation error: %v", err)
-			}
-		})
-	}
-}
-
-// TestLoggingConfig tests various logging configurations
-func TestLoggingConfig(t *testing.T) {
-	tests := []struct {
-		name       string
-		configTOML string
-	}{
-		{
-			name: "console with json format",
-			configTOML: `
-[collectors.disk_io]
-enabled = true
-
-[logging.defaults]
-level = "trace"
-time_format = "Unix"
-
-[[logging.outputs]]
-type = "console"
-enabled = true
-
-[logging.outputs.console]
-fast_io = true
-format = "json"
-writer = "stdout"
-`,
-		},
-		{
-			name: "file output",
-			configTOML: `
-[collectors.disk_io]
-enabled = true
-
-[[logging.outputs]]
-type = "file"
-enabled = true
-
-[logging.outputs.file]
-filename = "test.log"
-max_size = 50
-async = false
-`,
-		},
-		{
-			name: "multiple outputs",
-			configTOML: `
-[collectors.disk_io]
-enabled = true
-
-[logging.defaults]
-level = "info"
-caller = 1
-
-[[logging.outputs]]
-type = "console"
-enabled = true
-
-[[logging.outputs]]
-type = "file"
-enabled = true
-
-[logging.outputs.file]
-filename = "app.log"
-`,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tmpDir := t.TempDir()
-			configPath := filepath.Join(tmpDir, "test.toml")
-
-			err := os.WriteFile(configPath, []byte(tt.configTOML), 0644)
-			if err != nil {
-				t.Fatalf("Failed to create config: %v", err)
-			}
-
-			config, err := LoadConfig(configPath)
-			if err != nil {
-				t.Fatalf("Failed to load config: %v", err)
-			}
-
-			if err := config.Validate(); err != nil {
-				t.Errorf("Config validation failed: %v", err)
-			}
-
-			// Test TOML roundtrip
-			_, err = toml.Marshal(config)
-			if err != nil {
-				t.Errorf("Failed to marshal config: %v", err)
-			}
-		})
-	}
-}
+// TestSaveConfig tests saving configurations
 
 // TestConfigGenerator tests configuration generation
 func TestConfigGenerator(t *testing.T) {

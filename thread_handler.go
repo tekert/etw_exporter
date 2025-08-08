@@ -25,10 +25,10 @@ import (
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
 type ThreadHandler struct {
-	lastCpuSwitch   sync.Map             // key: cpu (uint16), value: time.Time
-	threadToProcess sync.Map             // key: threadID (uint32), value: processID (uint32)
-	customCollector *ThreadCSCollector_T // High-performance custom collector
-	log             log.Logger           // Thread collector logger
+	lastCpuSwitch   sync.Map           // key: cpu (uint16), value: time.Time
+	threadToProcess sync.Map           // key: threadID (uint32), value: processID (uint32)
+	customCollector *ThreadCSCollector // High-performance custom collector
+	log             log.Logger         // Thread collector logger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
@@ -310,6 +310,6 @@ func GetWaitReasonString(waitReason uint8) string {
 // - Uses atomic operations for high-frequency updates
 // - Provides thread-safe metric aggregation
 // - Maintains low cardinality for performance
-func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector_T {
+func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector {
 	return c.customCollector
 }
