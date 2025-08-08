@@ -26,15 +26,11 @@ enabled = true
 # Useful for understanding disk topology and characteristics
 track_disk_info = true
 
-[collectors.thread]
-# Thread event collector - tracks thread lifecycle and context switches
-# Enable thread event collection (default: true)
-enabled = true
-
-# Track context switch events (default: true)
-# Context switches show when threads are scheduled/descheduled by the OS
-# High frequency events - may impact performance under heavy load
-context_switches = true
+[collectors.threadcs]
+# ThreadCS event collector - tracks thread context switches only
+# Enable thread context switch event collection (default: true)
+# Heavy thread context switch activity can impact performance
+enabled = false
 
 [logging]
 # Logging configuration - controls how and where logs are written

@@ -22,7 +22,7 @@ type SessionManager struct {
 	kernelSession   *etw.RealTimeSession
 	eventHandler    *EventHandler
 	config          *CollectorConfig
-	logger          log.Logger // Session manager logger
+	log             log.Logger // Session manager logger
 
 	running bool
 }
@@ -36,10 +36,10 @@ func NewSessionManager(eventHandler *EventHandler, config *CollectorConfig) *Ses
 		cancel:       cancel,
 		eventHandler: eventHandler,
 		config:       config,
-		logger:       GetSessionLogger(),
+		log:          GetSessionLogger(),
 	}
 
-	manager.logger.Debug().Msg("SessionManager created")
+	manager.log.Debug().Msg("SessionManager created")
 	return manager
 }
 
@@ -49,70 +49,64 @@ func (s *SessionManager) Start() error {
 	defer s.mu.Unlock()
 
 	if s.running {
-		s.logger.Warn().Msg("Session manager already running")
 		return fmt.Errorf("session manager already running")
 	}
 
-	s.logger.Info().Msg("Starting ETW session manager...")
+	s.log.Info().Msg("Starting ETW session manager...")
 
 	// Get SystemConfig events first if using manifest providers
 	// SystemConfig events only arrive when kernel sessions are stopped
 	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
 	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
 	// So we use this workaround to capture SystemConfig events
-	s.logger.Debug().Msg("Capturing SystemConfig events...")
+	s.log.Debug().Msg("Capturing SystemConfig events...")
 	if err := s.captureSystemConfigEvents(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to capture SystemConfig events")
 		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 	}
-	s.logger.Debug().Msg("SystemConfig events captured")
+	s.log.Debug().Msg("SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
-	s.logger.Debug().Msg("Setting up ETW sessions...")
+	s.log.Debug().Msg("Setting up ETW sessions...")
 	if err := s.setupSessions(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to setup sessions")
 		return fmt.Errorf("failed to setup sessions: %w", err)
 	}
-	s.logger.Debug().Msg("ETW sessions setup complete")
+	s.log.Debug().Msg("ETW sessions setup complete")
 
 	// Setup consumer with callbacks
-	s.logger.Debug().Msg("Setting up ETW consumer...")
+	s.log.Debug().Msg("Setting up ETW consumer...")
 	if err := s.setupConsumer(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to setup consumer")
 		return fmt.Errorf("failed to setup consumer: %w", err)
 	}
-	s.logger.Debug().Msg("ETW consumer setup complete")
+	s.log.Debug().Msg("ETW consumer setup complete")
 
 	// Start the consumer
-	s.logger.Debug().Msg("Starting ETW consumer...")
+	s.log.Debug().Msg("Starting ETW consumer...")
 	if err := s.consumer.Start(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to start consumer")
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
-	s.logger.Debug().Msg("ETW consumer started")
+	s.log.Debug().Msg("ETW consumer started")
 
 	s.running = true
-	s.logger.Info().Msg("✅ ETW session manager started successfully")
+	s.log.Info().Msg("✅ ETW session manager started successfully")
 	return nil
 }
 
 // captureSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
 // These events are only emitted when a kernel session is stopped, so we need this special handling
 func (s *SessionManager) captureSystemConfigEvents() error {
-	s.logger.Trace().Msg("Creating temporary kernel session for SystemConfig events")
+	s.log.Trace().Msg("Creating temporary kernel session for SystemConfig events")
 
 	// Create a temporary kernel session to get SystemConfig events
 	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
 
 	if err := tempKernelSession.Start(); err != nil {
-		s.logger.Error().Err(err).Msg("Failed to start temporary kernel session")
 		return fmt.Errorf("failed to start temporary kernel session for SystemConfig: %w", err)
 	}
-	s.logger.Trace().Msg("Temporary kernel session started")
+	s.log.Trace().Msg("Temporary kernel session started")
 
 	// Create a temporary consumer to capture SystemConfig events
 	tempConsumer := etw.NewConsumer(s.ctx).FromSessions(tempKernelSession)
-	s.logger.Trace().Msg("Temporary consumer created")
+	s.log.Trace().Msg("Temporary consumer created")
 
 	// Set up callback to capture SystemConfig events
 	tempConsumer.EventPreparedCallback = func(helper *etw.EventRecordHelper) error {
@@ -260,29 +254,13 @@ func (s *SessionManager) IsRunning() bool {
 	return s.running
 }
 
-// EnableProviderGroup enables a specific provider group
-func (s *SessionManager) EnableProviderGroup(groupName string) error {
-	// Update configuration to enable the group
-	switch groupName {
-	case "disk_io":
-		s.config.DiskIO.Enabled = true
-		return nil
-	case "thread":
-		s.config.Thread.Enabled = true
-		return nil
-	default:
-		return fmt.Errorf("provider group '%s' not found", groupName)
-	}
-}
-
 // GetEnabledProviderGroups returns the names of enabled provider groups
 func (s *SessionManager) GetEnabledProviderGroups() []string {
 	var enabled []string
-	if s.config.DiskIO.Enabled {
-		enabled = append(enabled, "disk_io")
-	}
-	if s.config.Thread.Enabled {
-		enabled = append(enabled, "thread")
+	for _, group := range AllProviderGroups {
+		if group.IsEnabled(s.config) {
+			enabled = append(enabled, group.Name)
+		}
 	}
 	return enabled
 }

@@ -18,7 +18,7 @@ type DiskIOCollector struct {
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
 
-	logger log.Logger // Disk I/O collector logger
+	log log.Logger // Disk I/O collector logger
 }
 
 // DiskInfo stores physical disk information
@@ -51,7 +51,7 @@ func NewDiskIOCollector() *DiskIOCollector {
 		diskActivityMap: make(map[DiskActivityKey]*ProcessDiskActivity),
 		processTracker:  GetGlobalProcessTracker(),
 		fileObjectMap:   make(map[uint64]uint32),
-		logger:          GetDiskIOLogger(),
+		log:          GetDiskIOLogger(),
 	}
 }
 
@@ -73,13 +73,13 @@ func NewDiskIOCollector() *DiskIOCollector {
 func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
-		d.logger.Error().Err(err).Msg("Failed to get DiskNumber property for disk read")
+		d.log.Error().Err(err).Msg("Failed to get DiskNumber property for disk read")
 		return err
 	}
 
 	transferSize, err := helper.GetPropertyUint("TransferSize")
 	if err != nil {
-		d.logger.Error().Err(err).Msg("Failed to get TransferSize property for disk read")
+		d.log.Error().Err(err).Msg("Failed to get TransferSize property for disk read")
 		return err
 	}
 
@@ -88,7 +88,7 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect)
 		processID := helper.EventRec.EventHeader.ProcessId
-		d.logger.Trace().
+		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
 			Uint32("process_id", processID).
@@ -105,14 +105,14 @@ func (d *DiskIOCollector) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	if !exists {
 		// If no mapping exists, fall back to EventHeader ProcessId (may be incorrect)
 		processID = helper.EventRec.EventHeader.ProcessId
-		d.logger.Trace().
+		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
 			Uint64("file_object", fileObject).
 			Uint32("fallback_process_id", processID).
 			Msg("Disk read - no FileObject mapping, using fallback ProcessId")
 	} else {
-		d.logger.Trace().
+		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
 			Uint64("file_object", fileObject).

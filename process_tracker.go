@@ -22,7 +22,7 @@ type ProcessInfo struct {
 // This is shared across all collectors that need process information
 type ProcessTracker struct {
 	processes sync.Map   // key: uint32 (PID), value: *ProcessInfo
-	logger    log.Logger // Process tracker logger
+	log    log.Logger // Process tracker logger
 }
 
 // Global process tracker instance
@@ -32,7 +32,7 @@ var globalProcessTracker *ProcessTracker
 func GetGlobalProcessTracker() *ProcessTracker {
 	if globalProcessTracker == nil {
 		globalProcessTracker = &ProcessTracker{
-			logger: GetProcessLogger(),
+			log: GetProcessLogger(),
 		}
 	}
 	return globalProcessTracker
@@ -41,7 +41,7 @@ func GetGlobalProcessTracker() *ProcessTracker {
 // NewProcessTracker creates a new process tracker instance (for testing or specialized use)
 func NewProcessTracker() *ProcessTracker {
 	return &ProcessTracker{
-		logger: GetProcessLogger(),
+		log: GetProcessLogger(),
 	}
 }
 
@@ -58,13 +58,13 @@ func (pt *ProcessTracker) AddProcess(pid uint32, name string, parentPID uint32, 
 	// Check if we're updating an existing process
 	if existingInfo, existed := pt.processes.Load(pid); existed {
 		existing := existingInfo.(*ProcessInfo)
-		pt.logger.Debug().
+		pt.log.Debug().
 			Uint32("pid", pid).
 			Str("old_name", existing.Name).
 			Str("new_name", name).
 			Msg("Process updated in tracker")
 	} else {
-		pt.logger.Debug().
+		pt.log.Debug().
 			Uint32("pid", pid).
 			Str("name", name).
 			Uint32("parent_pid", parentPID).
@@ -79,7 +79,7 @@ func (pt *ProcessTracker) AddProcess(pid uint32, name string, parentPID uint32, 
 func (pt *ProcessTracker) RemoveProcess(pid uint32) {
 	if info, exists := pt.processes.LoadAndDelete(pid); exists {
 		processInfo := info.(*ProcessInfo)
-		pt.logger.Debug().
+		pt.log.Debug().
 			Uint32("pid", pid).
 			Str("name", processInfo.Name).
 			Msg("Process removed from tracker")
@@ -136,14 +136,14 @@ func (pt *ProcessTracker) HandleProcessStart(helper *etw.EventRecordHelper) erro
 	var processName string
 	if name, err := helper.GetPropertyString("ImageName"); err == nil {
 		processName = name
-		pt.logger.Trace().
+		pt.log.Trace().
 			Uint32("pid", uint32(processID)).
 			Str("property", "ImageName").
 			Str("name", processName).
 			Msg("Retrieved process name from ImageName")
 	} else {
 		processName = "unknown"
-		pt.logger.Warn().
+		pt.log.Warn().
 			Uint32("pid", uint32(processID)).
 			Err(err).
 			Msg("Failed to get process name from ImageName property")
@@ -158,7 +158,7 @@ func (pt *ProcessTracker) HandleProcessStart(helper *etw.EventRecordHelper) erro
 		imagePath = path
 	} else {
 		imagePath = ""
-		pt.logger.Trace().
+		pt.log.Trace().
 			Uint32("pid", uint32(processID)).
 			Msg("No image path available for process")
 	}
@@ -182,7 +182,7 @@ func (pt *ProcessTracker) HandleProcessStart(helper *etw.EventRecordHelper) erro
 func (pt *ProcessTracker) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 
-	pt.logger.Trace().
+	pt.log.Trace().
 		Uint32("pid", uint32(processID)).
 		Msg("Process end event received")
 
@@ -227,7 +227,7 @@ func (pt *ProcessTracker) CleanupStaleProcesses(maxAge time.Duration) int {
 		return true
 	})
 
-	pt.logger.Debug().
+	pt.log.Debug().
 		Int("stale_count", len(staleProcesses)).
 		Dur("max_age", maxAge).
 		Msg("Cleaning up stale processes")
@@ -237,7 +237,7 @@ func (pt *ProcessTracker) CleanupStaleProcesses(maxAge time.Duration) int {
 	}
 
 	if len(staleProcesses) > 0 {
-		pt.logger.Info().
+		pt.log.Info().
 			Int("cleaned_count", len(staleProcesses)).
 			Msg("Stale processes cleaned up")
 	}

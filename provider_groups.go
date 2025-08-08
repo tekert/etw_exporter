@@ -1,13 +1,16 @@
 package main
 
-import "github.com/tekert/golang-etw/etw"
+import (
+	"github.com/tekert/golang-etw/etw"
+)
 
 // ProviderGroup defines a group of related ETW providers for a specific metric category
 type ProviderGroup struct {
-	Name              string
-	Enabled           bool
-	KernelFlags       uint32
+	Name              string // descriptive name
+	KernelFlags       uint32 // if set, this provider will be used in a kernel session
 	ManifestProviders []etw.Provider
+	// Function to check if this provider group is enabled based on config
+	IsEnabled func(config *CollectorConfig) bool
 }
 
 // Pre-defined GUIDs for performance (no string comparisons)
@@ -25,16 +28,12 @@ var (
 	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread
 )
 
-// Global provider groups configuration
-var (
+// AllProviderGroups contains all available provider groups in a simple slice
+var AllProviderGroups = []*ProviderGroup{
 	// DiskIOGroup uses manifest providers for disk I/O events and file I/O events
-	// These are modern providers with better event parsing
-	DiskIOGroup = ProviderGroup{
-		Name:    "disk_io",
-		Enabled: false, // Will be enabled based on config
-		// No kernel flags - using manifest providers only
-		KernelFlags: 0,
-		// Manifest providers for disk I/O and file I/O
+	{
+		Name:        "disk_io",
+		KernelFlags: 0, // No kernel flags - using manifest providers only
 		ManifestProviders: []etw.Provider{
 			{
 				Name: "Microsoft-Windows-Kernel-Disk",
@@ -61,47 +60,81 @@ var (
 				MatchAllKeyword: 0x0,
 			},
 		},
-	}
+		IsEnabled: func(config *CollectorConfig) bool {
+			return config.DiskIO.Enabled
+		},
+	},
 
-	// ThreadGroup uses kernel session for low-level thread events
-	// Context switches require kernel session for optimal performance
-	ThreadGroup = ProviderGroup{
-		Name:    "thread",
-		Enabled: false, // Will be enabled based on config
-		// Kernel flags for context switches and thread events
+	// ThreadCSGroup uses kernel session for low-level thread context switch events
+	{
+		Name: "threadcs",
 		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
 			etw.EVENT_TRACE_FLAG_THREAD |
 			etw.EVENT_TRACE_FLAG_DISPATCHER,
-		// No manifest providers - using kernel session only
-		ManifestProviders: []etw.Provider{},
+		ManifestProviders: []etw.Provider{}, // No manifest providers - using kernel session only
+		IsEnabled: func(config *CollectorConfig) bool {
+			return config.ThreadCS.Enabled
+		},
+	},
+}
+
+// GetEnabledProviders returns all enabled provider groups
+func GetEnabledProviders(config *CollectorConfig) []*ProviderGroup {
+	var enabled []*ProviderGroup
+
+	for _, group := range AllProviderGroups {
+		if group.IsEnabled(config) {
+			enabled = append(enabled, group)
+		}
 	}
 
-	// All available provider groups
-	AllProviderGroups = []*ProviderGroup{
-		&DiskIOGroup,
-		&ThreadGroup,
-	}
-)
+	return enabled
+}
 
 // GetEnabledKernelFlags returns combined kernel flags for all enabled groups
 func GetEnabledKernelFlags(config *CollectorConfig) uint32 {
 	var flags uint32
 
-	// Enable Thread group based on config (requires kernel session)
-	if config.Thread.Enabled && config.Thread.ContextSwitches {
-		flags |= ThreadGroup.KernelFlags
+	for _, group := range AllProviderGroups {
+		if group.IsEnabled(config) {
+			flags |= group.KernelFlags
+		}
 	}
 
 	return flags
 }
 
 // GetEnabledManifestProviders returns all manifest providers for enabled groups
+// Combines providers with the same GUID by merging their keywords
 func GetEnabledManifestProviders(config *CollectorConfig) []etw.Provider {
-	var providers []etw.Provider
+	// Map to combine providers with same GUID
+	providerMap := make(map[string]*etw.Provider)
 
-	// Enable DiskIO group based on config (manifest providers)
-	if config.DiskIO.Enabled {
-		providers = append(providers, DiskIOGroup.ManifestProviders...)
+	for _, group := range AllProviderGroups {
+		if group.IsEnabled(config) {
+			for _, provider := range group.ManifestProviders {
+				key := provider.GUID.String()
+				if existing, exists := providerMap[key]; exists {
+					// Combine keywords for same provider
+					existing.MatchAnyKeyword |= provider.MatchAnyKeyword
+					existing.MatchAllKeyword |= provider.MatchAllKeyword
+					// Use the highest enable level
+					if provider.EnableLevel > existing.EnableLevel {
+						existing.EnableLevel = provider.EnableLevel
+					}
+				} else {
+					// Create a copy of the provider
+					newProvider := provider
+					providerMap[key] = &newProvider
+				}
+			}
+		}
+	}
+
+	// Convert map back to slice
+	var providers []etw.Provider
+	for _, provider := range providerMap {
+		providers = append(providers, *provider)
 	}
 
 	return providers

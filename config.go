@@ -39,8 +39,8 @@ type CollectorConfig struct {
 	// Disk I/O collector configuration
 	DiskIO DiskIOConfig `toml:"disk_io"`
 
-	// Thread collector configuration
-	Thread ThreadConfig `toml:"thread"`
+	// ThreadCS collector configuration
+	ThreadCS ThreadCSConfig `toml:"threadcs"`
 
 	// Future collector configs can be added here:
 	// Network NetworkConfig `toml:"network"`
@@ -58,14 +58,12 @@ type DiskIOConfig struct {
 	TrackDiskInfo bool `toml:"track_disk_info"`
 }
 
-// ThreadConfig contains thread collector settings
-type ThreadConfig struct {
-	// Enable thread event collection (default: true)
+// ThreadCSConfig contains thread context switch collector settings
+// Only enabled state is configurable
+// No context_switches option anymore
+type ThreadCSConfig struct {
+	// Enable thread context switch event collection (default: true)
 	Enabled bool `toml:"enabled"`
-
-	// Track context switch events (default: true)
-	// Context switches show when threads are scheduled/descheduled
-	ContextSwitches bool `toml:"context_switches"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -232,15 +230,14 @@ func DefaultConfig() *AppConfig {
 				Enabled:       true,
 				TrackDiskInfo: true,
 			},
-			Thread: ThreadConfig{
-				Enabled:         true,
-				ContextSwitches: true,
+			ThreadCS: ThreadCSConfig{
+				Enabled: true,
 			},
 		},
 		Logging: LoggingConfig{
 			Defaults: LogDefaults{
 				Level:        "info",
-				Caller:       1,
+				Caller:       0,
 				TimeField:    "time",
 				TimeFormat:   "",
 				TimeLocation: "Local",
@@ -260,7 +257,7 @@ func DefaultConfig() *AppConfig {
 				},
 				{
 					Type:    "file",
-					Enabled: true,
+					Enabled: false,
 					File: &FileConfig{
 						Filename:     "logs/app.log",
 						MaxSize:      104857600, // 100MB
@@ -334,7 +331,7 @@ func (c *AppConfig) Validate() error {
 	}
 
 	// Validate that at least one collector is enabled
-	if !c.Collectors.DiskIO.Enabled && !c.Collectors.Thread.Enabled {
+	if !c.Collectors.DiskIO.Enabled && !c.Collectors.ThreadCS.Enabled {
 		return fmt.Errorf("at least one collector must be enabled")
 	}
 

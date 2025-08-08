@@ -14,11 +14,11 @@ import (
 
 var (
 	// Module-specific loggers
-	diskIOLogger  log.Logger
-	threadLogger  log.Logger
-	eventLogger   log.Logger
-	processLogger log.Logger
-	sessionLogger log.Logger
+	diskIOLogger       log.Logger // Disk I/O collector logger
+	threadLogger       log.Logger // ThreadCS collector logger
+	eventHandlerLogger log.Logger // Event handler logger
+	processTrackLogger log.Logger // Process tracker logger
+	etwSessionLogger   log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -258,6 +258,18 @@ func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
 	return &multiWriter, nil
 }
 
+func createLogger(config LoggingConfig, writer log.Writer, contextStr string) log.Logger {
+	return log.Logger{
+		Level:        parseLogLevel(config.Defaults.Level),
+		Caller:       0, // Disable caller for performance
+		TimeField:    config.Defaults.TimeField,
+		TimeFormat:   config.Defaults.TimeFormat,
+		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
+		Writer:       writer,
+		Context:      log.NewContext(nil).Str("module", contextStr).Value(),
+	}
+}
+
 // ConfigureLogging configures the global logger and module-specific loggers
 func ConfigureLogging(config LoggingConfig) error {
 	// Create a multi-writer that handles all configured outputs
@@ -278,55 +290,11 @@ func ConfigureLogging(config LoggingConfig) error {
 
 	// Configure module-specific loggers using the same multi-writer
 	// This allows all modules to use configured console/file outputs
-	diskIOLogger = log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       multiWriter,
-		Context:      log.NewContext(nil).Str("module", "disk-io").Value(),
-	}
-
-	threadLogger = log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       multiWriter,
-		Context:      log.NewContext(nil).Str("module", "thread").Value(),
-	}
-
-	eventLogger = log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       multiWriter,
-		Context:      log.NewContext(nil).Str("module", "events").Value(),
-	}
-
-	processLogger = log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       multiWriter,
-		Context:      log.NewContext(nil).Str("module", "process").Value(),
-	}
-
-	sessionLogger = log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   config.Defaults.TimeFormat,
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       multiWriter,
-		Context:      log.NewContext(nil).Str("module", "session").Value(),
-	}
+	diskIOLogger = createLogger(config, multiWriter, "diskio")
+	threadLogger = createLogger(config, multiWriter, "threadcs")
+	eventHandlerLogger = createLogger(config, multiWriter, "app-event-handler")
+	processTrackLogger = createLogger(config, multiWriter, "app-process-tracker")
+	etwSessionLogger = createLogger(config, multiWriter, "app-etw-session")
 
 	// Configure ETW library logging
 	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
@@ -336,32 +304,24 @@ func ConfigureLogging(config LoggingConfig) error {
 	return nil
 }
 
-// GetDiskIOLogger returns a high-performance logger for disk-io module
-// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetDiskIOLogger() log.Logger {
 	return diskIOLogger
 }
 
-// GetThreadLogger returns a high-performance logger for thread module
-// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetThreadLogger() log.Logger {
 	return threadLogger
 }
 
-// GetProcessLogger returns a logger with process module context
 func GetProcessLogger() log.Logger {
-	return processLogger
+	return processTrackLogger
 }
 
-// GetSessionLogger returns a logger with session module context
 func GetSessionLogger() log.Logger {
-	return sessionLogger
+	return etwSessionLogger
 }
 
-// GetEventLogger returns a high-performance logger for events module
-// This logger uses fast JSON output regardless of console configuration for optimal performance
 func GetEventLogger() log.Logger {
-	return eventLogger
+	return eventHandlerLogger
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration

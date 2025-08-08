@@ -8,7 +8,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/phuslu/log v1.0.119
 	github.com/prometheus/client_golang v1.23.0
-	github.com/tekert/golang-etw v0.6.0-beta1
+	github.com/tekert/golang-etw v0.6.1
 )
 
 require (

@@ -2,6 +2,8 @@
 
 This document provides comprehensive information about configuring the ETW Exporter using TOML format.
 
+Written by IA (while i work on the interface, this was reviewed dont worry)
+
 ## Configuration File Format
 
 The ETW Exporter uses TOML (Tom's Obvious, Minimal Language) for configuration. TOML is designed to be easy to read and write, with a clear and minimal syntax.
@@ -70,22 +72,17 @@ track_disk_info = true   # Default: true
 - Provides context for understanding disk topology
 - Minimal performance impact
 
-#### Thread Collector
+#### ThreadCS Collector
 
 ```toml
-[collectors.thread]
+[collectors.threadcs]
 enabled = true           # Default: true
-context_switches = true  # Default: true
 ```
 
-**enabled**: Whether to collect thread events.
-- Tracks thread creation, deletion, and state changes
-- Performance impact: Low
-
-**context_switches**: Whether to collect context switch events.
-- Shows when threads are scheduled/descheduled by the OS
+**enabled**: Whether to collect thread context switch events.
+- Tracks thread context switches (when threads are scheduled/descheduled by the OS)
 - High-frequency events that may impact performance under heavy load
-- Disable if experiencing performance issues
+- Performance impact: high
 
 ### Logging Configuration
 
@@ -315,19 +312,11 @@ async = false                 # Default: false
 
 ## Performance Considerations
 
-### Hot Path Optimization
+### Logging Optimization
 
 The ETW Exporter automatically optimizes logging for high-frequency event processing:
 
-- **Hot Path Modules**: `disk-io`, `thread`, and `events` modules always use fast JSON logging regardless of console configuration
-- **Caller Information**: Disabled for hot path modules to improve performance
 - **Async File Writing**: Recommended for file outputs to prevent I/O blocking
-
-### Memory Usage
-
-- **Async Writers**: Use buffered channels (4096 entries by default)
-- **File Rotation**: Keep `max_backups` reasonable to control disk usage
-- **Log Levels**: Higher log levels reduce processing overhead
 
 ### CPU Impact
 
@@ -401,33 +390,18 @@ marker = "@cee:"
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **File Permission Errors**: Check `file_mode` and directory permissions
-2. **Network Syslog Failures**: Verify network connectivity and firewall rules
-3. **High CPU Usage**: Disable console colors, reduce log level, or disable context switches
-
 ### Debug Configuration
 
 To troubleshoot configuration issues:
 
 ```toml
 [logging.defaults]
-level = "trace"
+level = "debug"
 
 lib_level = "debug"
 ```
 
 This will provide detailed information about the ETW library and application behavior.
-
-## Migration from JSON
-
-If migrating from the old JSON configuration format:
-
-1. Copy `config.example.toml` to your config file
-2. Update values to match your JSON configuration
-3. Take advantage of new TOML features like comments and better organization
-4. The new format provides more granular control over logging outputs
 
 ## Validation
 

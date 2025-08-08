@@ -35,6 +35,13 @@ func main() {
 	}
 
 	// TODO: config
+	// go build .
+	//
+	// go tool pprof -output=".\pprof\profile.pb.gz" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
+	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe ".\pprof\profile.pb.gz"
+	// or
+	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
+	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
 	// Start pprof HTTP server on a separate goroutine
 	go func() {
 		log.Info().Msg("Starting pprof HTTP server on :6060")
@@ -64,8 +71,7 @@ func main() {
 		Str("version", version).
 		Bool("disk_io_enabled", config.Collectors.DiskIO.Enabled).
 		Bool("disk_io_track_info", config.Collectors.DiskIO.TrackDiskInfo).
-		Bool("thread_enabled", config.Collectors.Thread.Enabled).
-		Bool("thread_context_switches", config.Collectors.Thread.ContextSwitches).
+		Bool("threadcs_enabled", config.Collectors.ThreadCS.Enabled).
 		Str("listen_address", config.Server.ListenAddress).
 		Str("metrics_path", config.Server.MetricsPath).
 		Msg("🚀 Starting ETW Exporter")
