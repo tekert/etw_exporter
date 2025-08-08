@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/phuslu/log"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/golang-etw/etw"
 )
 
@@ -40,7 +41,7 @@ type FileEventHandler interface {
 type EventHandler struct {
 	// Collectors for different metric categories
 	diskCollector   *DiskIOCollector
-	threadCollector *ThreadCSCollector
+	threadCSHandler *ThreadHandler
 
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
@@ -89,10 +90,12 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 	}
 
 	if config.ThreadCS.Enabled {
-		handler.threadCollector = NewThreadCSCollector()
+		handler.threadCSHandler = NewThreadHandler()
 		// Register the thread collector with the handler
-		handler.RegisterThreadEventHandler(handler.threadCollector)
-		handler.log.Info().Msg("✅ ThreadCS collector enabled")
+		handler.RegisterThreadEventHandler(handler.threadCSHandler)
+		// Register the custom collector with Prometheus for high-performance metrics
+		prometheus.MustRegister(handler.threadCSHandler.GetCustomCollector())
+		handler.log.Info().Msg("✅ ThreadCS collector enabled and registered with Prometheus")
 	}
 
 	handler.log.Info().
@@ -134,21 +137,21 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// Perform any record-level processing here if needed
 	// Return true to continue processing, false to stop
 
-	// From https://learn.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_descriptor
-	// Channel values below 16 are reserved for use by Microsoft to enable special treatment
-	// by the ETW runtime. Channel values 16 and above will be ignored by the ETW runtime
-	// (treated the same as channel 0) and can be given user-defined semantics.
-	//
-	// But we still receive these events, we will ignore them here too.
-	if record.EventHeader.EventDescriptor.Channel >= 16 {
-		h.log.Trace().
-			Uint8("channel", record.EventHeader.EventDescriptor.Channel).
-			Str("provider_guid", record.EventHeader.ProviderId.String()).
-			Uint16("event_id", record.EventHeader.EventDescriptor.Id).
-			Msg("Received event with reserved channel value, skipping processing")
+	// // From https://learn.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_descriptor
+	// // Channel values below 16 are reserved for use by Microsoft to enable special treatment
+	// // by the ETW runtime. Channel values 16 and above will be ignored by the ETW runtime
+	// // (treated the same as channel 0) and can be given user-defined semantics.
+	// //
+	// // But we still receive these events, we will ignore them here too.
+	// if record.EventHeader.EventDescriptor.Channel >= 16 {
+	// 	h.log.Trace().
+	// 		Uint8("channel", record.EventHeader.EventDescriptor.Channel).
+	// 		Str("provider_guid", record.EventHeader.ProviderId.String()).
+	// 		Uint16("event_id", record.EventHeader.EventDescriptor.Id).
+	// 		Msg("Received event with reserved channel value, skipping processing")
 
-		return false // Skip non-applicable channels
-	}
+	// 	return false // Skip non-applicable channels
+	// }
 	return true
 }
 

@@ -14,11 +14,11 @@ import (
 
 var (
 	// Module-specific loggers
-	diskIOLogger       log.Logger // Disk I/O collector logger
-	threadLogger       log.Logger // ThreadCS collector logger
-	eventHandlerLogger log.Logger // Event handler logger
-	processTrackLogger log.Logger // Process tracker logger
-	etwSessionLogger   log.Logger // ETW session manager logger
+	modDiskIOLogger       log.Logger // Disk I/O collector logger
+	modThreadLogger       log.Logger // ThreadCS collector logger
+	modHandlerLogger log.Logger // Event handler logger
+	modProcessLogger log.Logger // Process tracker logger
+	modSessionLogger   log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -290,11 +290,11 @@ func ConfigureLogging(config LoggingConfig) error {
 
 	// Configure module-specific loggers using the same multi-writer
 	// This allows all modules to use configured console/file outputs
-	diskIOLogger = createLogger(config, multiWriter, "diskio")
-	threadLogger = createLogger(config, multiWriter, "threadcs")
-	eventHandlerLogger = createLogger(config, multiWriter, "app-event-handler")
-	processTrackLogger = createLogger(config, multiWriter, "app-process-tracker")
-	etwSessionLogger = createLogger(config, multiWriter, "app-etw-session")
+	modDiskIOLogger = createLogger(config, multiWriter, "diskio")
+	modThreadLogger = createLogger(config, multiWriter, "threadcs")
+	modHandlerLogger = createLogger(config, multiWriter, "app-event-handler")
+	modProcessLogger = createLogger(config, multiWriter, "app-process-tracker")
+	modSessionLogger = createLogger(config, multiWriter, "app-etw-session")
 
 	// Configure ETW library logging
 	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
@@ -305,23 +305,23 @@ func ConfigureLogging(config LoggingConfig) error {
 }
 
 func GetDiskIOLogger() log.Logger {
-	return diskIOLogger
+	return modDiskIOLogger
 }
 
 func GetThreadLogger() log.Logger {
-	return threadLogger
+	return modThreadLogger
 }
 
 func GetProcessLogger() log.Logger {
-	return processTrackLogger
+	return modProcessLogger
 }
 
 func GetSessionLogger() log.Logger {
-	return etwSessionLogger
+	return modSessionLogger
 }
 
 func GetEventLogger() log.Logger {
-	return eventHandlerLogger
+	return modHandlerLogger
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration

@@ -4,275 +4,376 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tekert/golang-etw/etw"
 )
 
-// ThreadCSCollector handles thread events and metrics with low cardinality
-type ThreadCSCollector struct {
-	lastCpuSwitch   sync.Map        // key: cpu (uint16), value: time.Time
-	threadToProcess sync.Map        // key: threadID (uint32), value: processID (uint32)
-	processTracker  *ProcessTracker // Reference to the global process tracker
-	metrics         *ETWMetrics
-	logger          log.Logger // Thread collector logger
+// ThreadCSCollector_T implements prometheus.Collector for thread-related metrics.
+// This collector follows Prometheus best practices by creating new metrics on each scrape
+//
+// It provides high-performance aggregated metrics for:
+// - Context switches per CPU and per process
+// - Context switch intervals (time between switches on same CPU)
+// - Thread state transitions with wait reasons
+// - Thread lifecycle events (creation, termination)
+//
+// All metrics are designed for low cardinality to maintain performance at scale.
+type ThreadCSCollector_T struct {
+	// Atomic counters for high-frequency operations
+	contextSwitchesPerCPU     map[uint16]*int64 // CPU -> context switch count
+	contextSwitchesPerProcess map[uint32]*int64 // PID -> context switch count
+	threadStates              map[string]*int64 // state:wait_reason -> count
+
+	// Context switch interval tracking
+	contextSwitchIntervals map[uint16][]float64 // CPU -> interval durations (seconds)
+
+	// Process information for labels (with validity tracking)
+	processNames map[uint32]string // PID -> process name
+	processValid map[uint32]bool   // PID -> whether process name is valid (not unknown_*)
+
+	// Synchronization
+	mu  sync.RWMutex
+	log log.Logger
 }
 
-// NewThreadCSCollector creates a new thread collector instance
-func NewThreadCSCollector() *ThreadCSCollector {
-	return &ThreadCSCollector{
-		processTracker: GetGlobalProcessTracker(),
-		metrics:        GetMetrics(),
-		logger:         GetThreadLogger(),
+// ThreadMetricsData holds aggregated data for a single scrape
+type ThreadMetricsData struct {
+	ContextSwitchesPerCPU     map[uint16]int64
+	ContextSwitchesPerProcess map[uint32]ProcessContextSwitches
+	ThreadStates              map[string]int64
+	ContextSwitchIntervals    map[uint16]IntervalStats
+}
+
+// ProcessContextSwitches holds context switch data for a process
+type ProcessContextSwitches struct {
+	ProcessID   uint32
+	ProcessName string
+	Count       int64
+}
+
+// IntervalStats holds statistical data for context switch intervals
+type IntervalStats struct {
+	Count   int64
+	Sum     float64
+	Buckets map[float64]int64 // histogram buckets
+}
+
+// NewThreadCSCollector creates a new thread metrics custom collector.
+// This collector aggregates thread-related ETW events and exposes them as Prometheus metrics
+// following the custom collector pattern for optimal performance and correctness.
+func NewThreadCSCollector() *ThreadCSCollector_T {
+	return &ThreadCSCollector_T{
+		contextSwitchesPerCPU:     make(map[uint16]*int64),
+		contextSwitchesPerProcess: make(map[uint32]*int64),
+		threadStates:              make(map[string]*int64),
+		contextSwitchIntervals:    make(map[uint16][]float64),
+		processNames:              make(map[uint32]string),
+		processValid:              make(map[uint32]bool),
+		log:                       GetThreadLogger(),
 	}
 }
 
-// HandleContextSwitch processes context switch events (CSwitch)
-func (c *ThreadCSCollector) HandleContextSwitch(helper *etw.EventRecordHelper) error {
-	// Parse context switch event data according to CSwitch class documentation
-	oldThreadID, _ := helper.GetPropertyUint("OldThreadId")
-	newThreadID, _ := helper.GetPropertyUint("NewThreadId")
-	newThreadPriority, _ := helper.GetPropertyInt("NewThreadPriority")
-	oldThreadPriority, _ := helper.GetPropertyInt("OldThreadPriority")
-	waitReason, _ := helper.GetPropertyInt("OldThreadWaitReason")
-	waitMode, _ := helper.GetPropertyInt("OldThreadWaitMode")
+// Describe implements prometheus.Collector.
+// It sends the descriptors of all the metrics the collector can possibly export
+// to the provided channel. This is called once during registration.
+func (c *ThreadCSCollector_T) Describe(ch chan<- *prometheus.Desc) {
+	// Context switches per CPU
+	ch <- prometheus.NewDesc(
+		"etw_context_switches_per_cpu_total",
+		"Total number of context switches per CPU",
+		[]string{"cpu"}, nil,
+	)
 
-	// Get CPU number from processor index (if available)
-	cpu := uint16(helper.EventRec.BufferContext.Processor)
+	// Context switches per process
+	ch <- prometheus.NewDesc(
+		"etw_context_switches_per_process_total",
+		"Total number of context switches per process",
+		[]string{"process_id", "process_name"}, nil,
+	)
 
-	// Timestamp from the event
-	eventTime := helper.EventRec.EventHeader.UTCTimeStamp()
+	// Context switch intervals histogram
+	ch <- prometheus.NewDesc(
+		"etw_context_switch_interval_seconds",
+		"Histogram of context switch intervals per CPU (time between consecutive switches)",
+		[]string{"cpu"}, nil,
+	)
 
-	// Convert to strings for labels
-	cpuStr := strconv.FormatUint(uint64(cpu), 10)
+	// Thread state transitions
+	ch <- prometheus.NewDesc(
+		"etw_thread_states_total",
+		"Total count of thread state transitions by state and wait reason",
+		[]string{"state", "wait_reason"}, nil,
+	)
+}
 
-	// Track context switches per CPU (low cardinality)
-	c.metrics.ContextSwitchesPerCPU.With(prometheus.Labels{
-		"cpu": cpuStr,
-	}).Inc()
+// Collect implements prometheus.Collector.
+// It is called by Prometheus on each scrape and must create new metrics each time
+// to avoid race conditions and ensure stale metrics are not exposed.
+func (c *ThreadCSCollector_T) Collect(ch chan<- prometheus.Metric) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
 
-	// Track context switches per process for the NEW thread (only count the incoming process)
-	// This avoids double counting and provides a cleaner metric
-	if processID, exists := c.threadToProcess.Load(uint32(newThreadID)); exists {
-		pid := processID.(uint32)
-		processName := c.processTracker.GetProcessName(pid)
+	// Collect current data snapshot
+	data := c.collectData()
 
-		// Only increment if we have a valid process name (not unknown)
-		// This prevents duplicate metrics for unknown vs known process names
-		if !strings.HasPrefix(processName, "unknown_") {
-			c.metrics.ContextSwitchesPerProcess.With(prometheus.Labels{
-				"process_id":   strconv.FormatUint(uint64(pid), 10),
-				"process_name": processName,
-			}).Inc()
+	// Create context switches per CPU metrics
+	for cpu, count := range data.ContextSwitchesPerCPU {
+		ch <- prometheus.MustNewConstMetric(
+			prometheus.NewDesc(
+				"etw_context_switches_per_cpu_total",
+				"Total number of context switches per CPU",
+				[]string{"cpu"}, nil,
+			),
+			prometheus.CounterValue,
+			float64(count),
+			strconv.FormatUint(uint64(cpu), 10),
+		)
+	}
 
-			c.logger.Trace().
-				Uint32("pid", pid).
-				Uint32("thread_id", uint32(newThreadID)).
-				Str("process_name", processName).
-				Msg("Context switch tracked for known process")
-		} else {
-			// Log missing process name for debugging - this helps identify timing issues
-			c.logger.Trace().
-				Uint32("pid", pid).
-				Uint32("thread_id", uint32(newThreadID)).
-				Str("process_name", processName).
-				Msg("Context switch for thread with unknown process name - skipping metric")
+	// Create context switches per process metrics
+	for _, procData := range data.ContextSwitchesPerProcess {
+		ch <- prometheus.MustNewConstMetric(
+			prometheus.NewDesc(
+				"etw_context_switches_per_process_total",
+				"Total number of context switches per process",
+				[]string{"process_id", "process_name"}, nil,
+			),
+			prometheus.CounterValue,
+			float64(procData.Count),
+			strconv.FormatUint(uint64(procData.ProcessID), 10),
+			procData.ProcessName,
+		)
+	}
+
+	// Create context switch interval histograms
+	for cpu, stats := range data.ContextSwitchIntervals {
+		// Convert buckets from int64 to uint64 for Prometheus
+		buckets := make(map[float64]uint64)
+		for bucket, count := range stats.Buckets {
+			buckets[bucket] = uint64(count)
 		}
-	} else {
-		// Thread to process mapping missing - log for debugging
-		c.logger.Trace().
-			Uint32("thread_id", uint32(newThreadID)).
-			Msg("Context switch for thread without known process mapping - skipping metric")
+
+		// Create cumulative histogram
+		ch <- prometheus.MustNewConstHistogram(
+			prometheus.NewDesc(
+				"etw_context_switch_interval_seconds",
+				"Histogram of context switch intervals per CPU (time between consecutive switches)",
+				[]string{"cpu"}, nil,
+			),
+			uint64(stats.Count),
+			stats.Sum,
+			buckets,
+			strconv.FormatUint(uint64(cpu), 10),
+		)
 	}
 
-	// Calculate context switch interval (time between switches on this CPU)
-	if lastCpuSwitchVal, exists := c.lastCpuSwitch.Load(cpu); exists {
-		if lastCpuSwitch, ok := lastCpuSwitchVal.(time.Time); ok {
-			switchInterval := eventTime.Sub(lastCpuSwitch)
+	// Create thread state metrics
+	for stateKey, count := range data.ThreadStates {
+		// Parse state:wait_reason format
+		parts := splitStateKey(stateKey)
+		ch <- prometheus.MustNewConstMetric(
+			prometheus.NewDesc(
+				"etw_thread_states_total",
+				"Total count of thread state transitions by state and wait reason",
+				[]string{"state", "wait_reason"}, nil,
+			),
+			prometheus.CounterValue,
+			float64(count),
+			parts[0], // state
+			parts[1], // wait_reason
+		)
+	}
+}
 
-			c.metrics.ContextSwitchInterval.With(prometheus.Labels{
-				"cpu": cpuStr,
-			}).Observe(switchInterval.Seconds())
+// collectData creates a snapshot of current metrics data.
+// This method is called during metric collection to ensure consistent data.
+func (c *ThreadCSCollector_T) collectData() ThreadMetricsData {
+	data := ThreadMetricsData{
+		ContextSwitchesPerCPU:     make(map[uint16]int64),
+		ContextSwitchesPerProcess: make(map[uint32]ProcessContextSwitches),
+		ThreadStates:              make(map[string]int64),
+		ContextSwitchIntervals:    make(map[uint16]IntervalStats),
+	}
+
+	// Collect CPU context switches
+	for cpu, countPtr := range c.contextSwitchesPerCPU {
+		if countPtr != nil {
+			data.ContextSwitchesPerCPU[cpu] = atomic.LoadInt64(countPtr)
 		}
 	}
-	c.lastCpuSwitch.Store(cpu, eventTime)
 
-	// Track thread state transitions (aggregated)
-	waitReasonStr := GetWaitReasonString(uint8(waitReason))
-	c.metrics.ThreadStatesTotal.With(prometheus.Labels{
-		"state":       "waiting",
-		"wait_reason": waitReasonStr,
-	}).Inc()
+	// Collect process context switches
+	for pid, countPtr := range c.contextSwitchesPerProcess {
+		if countPtr != nil {
+			count := atomic.LoadInt64(countPtr)
+			processName := c.processNames[pid]
+			if processName == "" {
+				processName = "unknown_" + strconv.FormatUint(uint64(pid), 10)
+			}
+			data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
+				ProcessID:   pid,
+				ProcessName: processName,
+				Count:       count,
+			}
+		}
+	}
 
-	c.metrics.ThreadStatesTotal.With(prometheus.Labels{
-		"state":       "running",
-		"wait_reason": "none",
-	}).Inc()
+	// Collect thread states
+	for stateKey, countPtr := range c.threadStates {
+		if countPtr != nil {
+			data.ThreadStates[stateKey] = atomic.LoadInt64(countPtr)
+		}
+	}
 
-	// Log additional context switch details (can be removed in production)
-	_ = newThreadPriority
-	_ = oldThreadPriority
-	_ = waitMode
-	_ = oldThreadID // We use it for debugging but don't count it
+	// Collect and calculate context switch interval statistics
+	for cpu, intervals := range c.contextSwitchIntervals {
+		if len(intervals) > 0 {
+			stats := c.calculateIntervalStats(intervals)
+			data.ContextSwitchIntervals[cpu] = stats
+		}
+	}
 
-	return nil
+	return data
 }
 
-// HandleReadyThread processes thread ready events
-func (c *ThreadCSCollector) HandleReadyThread(helper *etw.EventRecordHelper) error {
-	threadID, _ := helper.GetPropertyUint("ThreadId")
-	threadPriority, _ := helper.GetPropertyInt("ThreadPriority")
-	adjustReason, _ := helper.GetPropertyInt("AdjustReason")
-	adjustIncrement, _ := helper.GetPropertyInt("AdjustIncrement")
+// calculateIntervalStats computes histogram statistics from interval data.
+// This includes count, sum, and histogram buckets for context switch intervals.
+func (c *ThreadCSCollector_T) calculateIntervalStats(intervals []float64) IntervalStats {
+	stats := IntervalStats{
+		Count:   int64(len(intervals)),
+		Sum:     0,
+		Buckets: make(map[float64]int64),
+	}
 
-	// Timestamp from the event (more accurate than time.Now())
-	eventTime := helper.EventRec.EventHeader.UTCTimeStamp()
+	// Define histogram buckets (exponential buckets from 1μs to ~16ms)
+	buckets := []float64{
+		0.000001, 0.000002, 0.000004, 0.000008, 0.000016,
+		0.000032, 0.000064, 0.000128, 0.000256, 0.000512,
+		0.001024, 0.002048, 0.004096, 0.008192, 0.016384,
+	}
 
-	c.logger.Trace().
-		Uint32("thread_id", uint32(threadID)).
-		Int64("priority", threadPriority).
-		Time("event_time", eventTime).
-		Msg("Thread ready event")
+	// Initialize all buckets to zero
+	for _, bucket := range buckets {
+		stats.Buckets[bucket] = 0
+	}
 
-	// Track thread state transition to ready (aggregated)
-	c.metrics.ThreadStatesTotal.With(prometheus.Labels{
-		"state":       "ready",
-		"wait_reason": "none",
-	}).Inc()
+	// Calculate sum and count observations in each bucket
+	for _, interval := range intervals {
+		stats.Sum += interval
 
-	// Log additional details (can be removed in production)
-	_ = adjustReason
-	_ = adjustIncrement
+		// Count observations in each bucket (cumulative histogram)
+		for _, bucket := range buckets {
+			if interval <= bucket {
+				stats.Buckets[bucket]++
+			}
+		}
+	}
 
-	return nil
+	return stats
 }
 
-// HandleThreadStart processes thread start events
-func (c *ThreadCSCollector) HandleThreadStart(helper *etw.EventRecordHelper) error {
-	threadID, _ := helper.GetPropertyUint("TThreadId")
-	processID, _ := helper.GetPropertyUint("ProcessId")
+// RecordContextSwitch records a context switch event.
+//
+// Parameters:
+// - cpu: CPU number where the context switch occurred
+// - newThreadID: Thread ID of the thread being switched to
+// - processID: Process ID that owns the new thread (0 if unknown)
+// - interval: Time since last context switch on this CPU
+func (c *ThreadCSCollector_T) RecordContextSwitch(
+	cpu uint16,
+	newThreadID uint32,
+	processID uint32,
+	interval time.Duration) {
 
-	// Store thread to process mapping for context switch metrics
-	c.threadToProcess.Store(uint32(threadID), uint32(processID))
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	c.logger.Trace().
-		Uint32("thread_id", uint32(threadID)).
-		Uint32("process_id", uint32(processID)).
-		Msg("Thread started - mapping stored")
+	// Record context switch per CPU
+	if c.contextSwitchesPerCPU[cpu] == nil {
+		c.contextSwitchesPerCPU[cpu] = new(int64)
+	}
+	atomic.AddInt64(c.contextSwitchesPerCPU[cpu], 1)
 
-	// Track thread creation (aggregated)
-	c.metrics.ThreadStatesTotal.With(prometheus.Labels{
-		"state":       "created",
-		"wait_reason": "none",
-	}).Inc()
+	// Record context switch per process (only for known processes with valid names)
+	if processID > 0 {
+		// Check if we have a valid process name cached
+		if valid, exists := c.processValid[processID]; !exists || !valid {
+			// Get process name from global tracker and cache validity
+			processTracker := GetGlobalProcessTracker()
+			processName := processTracker.GetProcessName(processID)
+			c.processNames[processID] = processName
+			c.processValid[processID] = !isUnknownProcess(processName)
+		}
 
-	return nil
+		// Only record metrics for processes with valid names
+		if c.processValid[processID] {
+			if c.contextSwitchesPerProcess[processID] == nil {
+				c.contextSwitchesPerProcess[processID] = new(int64)
+			}
+			atomic.AddInt64(c.contextSwitchesPerProcess[processID], 1)
+		}
+	}
+
+	// Record context switch interval
+	if interval > 0 {
+		c.contextSwitchIntervals[cpu] = append(c.contextSwitchIntervals[cpu], interval.Seconds())
+
+		// Limit interval history to prevent memory growth
+		if len(c.contextSwitchIntervals[cpu]) > 1000 {
+			// Keep the most recent 800 intervals
+			copy(c.contextSwitchIntervals[cpu], c.contextSwitchIntervals[cpu][200:])
+			c.contextSwitchIntervals[cpu] = c.contextSwitchIntervals[cpu][:800]
+		}
+	}
 }
 
-// HandleThreadEnd processes thread end events
-func (c *ThreadCSCollector) HandleThreadEnd(helper *etw.EventRecordHelper) error {
-	threadID, _ := helper.GetPropertyUint("TThreadId")
+// RecordThreadStateTransition records a thread state transition event.
+//
+// Parameters:
+// - state: The thread state (e.g., "ready", "waiting", "running", "terminated")
+// - waitReason: The wait reason if state is "waiting", otherwise "none"
+func (c *ThreadCSCollector_T) RecordThreadStateTransition(state, waitReason string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-	// Clean up thread to process mapping
-	if _, existed := c.threadToProcess.LoadAndDelete(uint32(threadID)); existed {
-		c.logger.Trace().
-			Uint32("thread_id", uint32(threadID)).
-			Msg("Thread ended - mapping removed")
+	stateKey := state + ":" + waitReason
+	if c.threadStates[stateKey] == nil {
+		c.threadStates[stateKey] = new(int64)
+	}
+	atomic.AddInt64(c.threadStates[stateKey], 1)
+}
+
+// RecordThreadCreation records a thread creation event.
+// This is a convenience method that records a "created" state transition.
+func (c *ThreadCSCollector_T) RecordThreadCreation() {
+	c.RecordThreadStateTransition("created", "none")
+}
+
+// RecordThreadTermination records a thread termination event.
+// This is a convenience method that records a "terminated" state transition.
+func (c *ThreadCSCollector_T) RecordThreadTermination() {
+	c.RecordThreadStateTransition("terminated", "none")
+}
+
+// Helper functions
+
+// splitStateKey splits a "state:wait_reason" string into its components
+func splitStateKey(stateKey string) []string {
+	parts := make([]string, 2)
+	if idx := strings.Index(stateKey, ":"); idx != -1 {
+		parts[0] = stateKey[:idx]
+		parts[1] = stateKey[idx+1:]
 	} else {
-		c.logger.Trace().
-			Uint32("thread_id", uint32(threadID)).
-			Msg("Thread ended - no mapping found to remove")
+		parts[0] = stateKey
+		parts[1] = "unknown"
 	}
-
-	// Track thread termination (aggregated)
-	c.metrics.ThreadStatesTotal.With(prometheus.Labels{
-		"state":       "terminated",
-		"wait_reason": "none",
-	}).Inc()
-
-	return nil
+	return parts
 }
 
-// GetWaitReasonString converts wait reason code to human-readable string
-func GetWaitReasonString(waitReason uint8) string {
-	switch waitReason {
-	case 0:
-		return "Executive"
-	case 1:
-		return "FreePage"
-	case 2:
-		return "PageIn"
-	case 3:
-		return "PoolAllocation"
-	case 4:
-		return "DelayExecution"
-	case 5:
-		return "Suspended"
-	case 6:
-		return "UserRequest"
-	case 7:
-		return "WrExecutive"
-	case 8:
-		return "WrFreePage"
-	case 9:
-		return "WrPageIn"
-	case 10:
-		return "WrPoolAllocation"
-	case 11:
-		return "WrDelayExecution"
-	case 12:
-		return "WrSuspended"
-	case 13:
-		return "WrUserRequest"
-	case 14:
-		return "WrEventPair"
-	case 15:
-		return "WrQueue"
-	case 16:
-		return "WrLpcReceive"
-	case 17:
-		return "WrLpcReply"
-	case 18:
-		return "WrVirtualMemory"
-	case 19:
-		return "WrPageOut"
-	case 20:
-		return "WrRendezvous"
-	case 21:
-		return "Spare2"
-	case 22:
-		return "Spare3"
-	case 23:
-		return "Spare4"
-	case 24:
-		return "Spare5"
-	case 25:
-		return "WrCalloutStack"
-	case 26:
-		return "WrKernel"
-	case 27:
-		return "WrResource"
-	case 28:
-		return "WrPushLock"
-	case 29:
-		return "WrMutex"
-	case 30:
-		return "WrQuantumEnd"
-	case 31:
-		return "WrDispatchInt"
-	case 32:
-		return "WrPreempted"
-	case 33:
-		return "WrYieldExecution"
-	case 34:
-		return "WrFastMutex"
-	case 35:
-		return "WrGuardedMutex"
-	case 36:
-		return "WrRundown"
-	default:
-		return "Unknown"
-	}
+// isUnknownProcess checks if a process name indicates an unknown process
+func isUnknownProcess(processName string) bool {
+	return strings.HasPrefix(processName, "unknown_")
 }
