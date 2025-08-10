@@ -40,7 +40,7 @@ type FileEventHandler interface {
 // for better code organization and future extensibility
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskCollector   *DiskIOCollector
+	diskHandler     *DiskIOHandler
 	threadCSHandler *ThreadHandler
 
 	// Future collectors will be added here:
@@ -80,13 +80,15 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
-		handler.diskCollector = NewDiskIOCollector()
-		// Register the disk collector with the handler
-		handler.RegisterDiskEventHandler(handler.diskCollector)
+		handler.diskHandler = NewDiskIOHandler()
+		// Register the disk handler with the event handler
+		handler.RegisterDiskEventHandler(handler.diskHandler)
 		// Register for file events for process correlation
-		handler.RegisterFileEventHandler(handler.diskCollector)
+		handler.RegisterFileEventHandler(handler.diskHandler)
+		// Register the custom collector with Prometheus for high-performance metrics
+		prometheus.MustRegister(handler.diskHandler.GetCustomCollector())
 
-		handler.log.Info().Msg("Disk I/O collector enabled")
+		handler.log.Info().Msg("Disk I/O collector enabled and registered with Prometheus")
 	}
 
 	if config.ThreadCS.Enabled {

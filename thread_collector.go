@@ -11,6 +11,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
+// ThreadStateKey represents a composite key for thread state transitions.
+type ThreadStateKey struct {
+	State      string
+	WaitReason string
+}
+
 // ThreadCSCollector implements prometheus.Collector for thread-related metrics.
 // This collector follows Prometheus best practices by creating new metrics on each scrape
 //
@@ -23,9 +29,9 @@ import (
 // All metrics are designed for low cardinality to maintain performance at scale.
 type ThreadCSCollector struct {
 	// Atomic counters for high-frequency operations
-	contextSwitchesPerCPU     map[uint16]*int64 // CPU -> context switch count
-	contextSwitchesPerProcess map[uint32]*int64 // PID -> context switch count
-	threadStates              map[string]*int64 // state:wait_reason -> count
+	contextSwitchesPerCPU     map[uint16]*int64         // CPU -> context switch count
+	contextSwitchesPerProcess map[uint32]*int64         // PID -> context switch count
+	threadStates              map[ThreadStateKey]*int64 // {state, waitReason} -> count
 
 	// Context switch interval tracking
 	contextSwitchIntervals map[uint16][]float64 // CPU -> interval durations (seconds)
@@ -43,7 +49,7 @@ type ThreadCSCollector struct {
 type ThreadMetricsData struct {
 	ContextSwitchesPerCPU     map[uint16]int64
 	ContextSwitchesPerProcess map[uint32]ProcessContextSwitches
-	ThreadStates              map[string]int64
+	ThreadStates              map[ThreadStateKey]int64
 	ContextSwitchIntervals    map[uint16]IntervalStats
 }
 
@@ -68,7 +74,7 @@ func NewThreadCSCollector() *ThreadCSCollector {
 	return &ThreadCSCollector{
 		contextSwitchesPerCPU:     make(map[uint16]*int64),
 		contextSwitchesPerProcess: make(map[uint32]*int64),
-		threadStates:              make(map[string]*int64),
+		threadStates:              make(map[ThreadStateKey]*int64),
 		contextSwitchIntervals:    make(map[uint16][]float64),
 		processNames:              make(map[uint32]string),
 		processValid:              make(map[uint32]bool),
@@ -172,8 +178,6 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Create thread state metrics
 	for stateKey, count := range data.ThreadStates {
-		// Parse state:wait_reason format
-		parts := splitStateKey(stateKey)
 		ch <- prometheus.MustNewConstMetric(
 			prometheus.NewDesc(
 				"etw_thread_states_total",
@@ -182,8 +186,8 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 			),
 			prometheus.CounterValue,
 			float64(count),
-			parts[0], // state
-			parts[1], // wait_reason
+			stateKey.State,
+			stateKey.WaitReason,
 		)
 	}
 }
@@ -194,7 +198,7 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 	data := ThreadMetricsData{
 		ContextSwitchesPerCPU:     make(map[uint16]int64),
 		ContextSwitchesPerProcess: make(map[uint32]ProcessContextSwitches),
-		ThreadStates:              make(map[string]int64),
+		ThreadStates:              make(map[ThreadStateKey]int64),
 		ContextSwitchIntervals:    make(map[uint16]IntervalStats),
 	}
 
@@ -305,7 +309,8 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 			processTracker := GetGlobalProcessTracker()
 			processName := processTracker.GetProcessName(processID)
 			c.processNames[processID] = processName
-			c.processValid[processID] = !isUnknownProcess(processName)
+			// Process is valid if it doesn't have the "unknown_" prefix
+			c.processValid[processID] = !strings.HasPrefix(processName, "unknown_")
 		}
 
 		// Only record metrics for processes with valid names
@@ -339,7 +344,8 @@ func (c *ThreadCSCollector) RecordThreadStateTransition(state, waitReason string
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	stateKey := state + ":" + waitReason
+
+	stateKey := ThreadStateKey{State: state, WaitReason: waitReason}
 	if c.threadStates[stateKey] == nil {
 		c.threadStates[stateKey] = new(int64)
 	}
@@ -356,24 +362,4 @@ func (c *ThreadCSCollector) RecordThreadCreation() {
 // This is a convenience method that records a "terminated" state transition.
 func (c *ThreadCSCollector) RecordThreadTermination() {
 	c.RecordThreadStateTransition("terminated", "none")
-}
-
-// Helper functions
-
-// splitStateKey splits a "state:wait_reason" string into its components
-func splitStateKey(stateKey string) []string {
-	parts := make([]string, 2)
-	if idx := strings.Index(stateKey, ":"); idx != -1 {
-		parts[0] = stateKey[:idx]
-		parts[1] = stateKey[idx+1:]
-	} else {
-		parts[0] = stateKey
-		parts[1] = "unknown"
-	}
-	return parts
-}
-
-// isUnknownProcess checks if a process name indicates an unknown process
-func isUnknownProcess(processName string) bool {
-	return strings.HasPrefix(processName, "unknown_")
 }

@@ -158,7 +158,7 @@ func main() {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	log.Debug().Msg("🔌 Shutting down HTTP server...")
+	log.Debug().Msg("Shutting down HTTP server...")
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		log.Error().Err(err).Msg("❌ Error shutting down HTTP server")
 	} else {

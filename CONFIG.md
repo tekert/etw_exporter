@@ -163,7 +163,6 @@ async = false           # Default: false
 
 **format**: Output format when `fast_io = false`.
 - `"auto"` = colorized console format with key=value pairs
-- `"json"` = structured JSON (equivalent to `fast_io = true`)
 - `"logfmt"` = logfmt format (`key=value key=value`)
 - `"glog"` = Google glog format (`LEVEL mmdd hh:mm:ss.uuuuuu threadid file:line] msg`)
 

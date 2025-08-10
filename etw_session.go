@@ -120,12 +120,12 @@ func (s *SessionManager) captureSystemConfigEvents() error {
 		if providerGUID.Equals(SystemConfigGUID) {
 			switch eventType {
 			case 11: // EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK
-				if s.config.DiskIO.Enabled && s.eventHandler.diskCollector != nil {
-					return s.eventHandler.diskCollector.HandleSystemConfigPhyDisk(helper)
+				if s.config.DiskIO.Enabled && s.eventHandler.diskHandler != nil {
+					return s.eventHandler.diskHandler.HandleSystemConfigPhyDisk(helper)
 				}
 			case 12: // EVENT_TRACE_TYPE_CONFIG_LOGICALDISK
-				if s.config.DiskIO.Enabled && s.eventHandler.diskCollector != nil {
-					return s.eventHandler.diskCollector.HandleSystemConfigLogDisk(helper)
+				if s.config.DiskIO.Enabled && s.eventHandler.diskHandler != nil {
+					return s.eventHandler.diskHandler.HandleSystemConfigLogDisk(helper)
 				}
 			}
 		}
