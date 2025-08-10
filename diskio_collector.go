@@ -3,7 +3,6 @@ package main
 import (
 	"maps"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -34,10 +33,6 @@ type DiskIOCustomCollector struct {
 	// Physical and logical disk information
 	physicalDisks map[uint32]PhysicalDiskInfo // diskNumber -> disk info
 	logicalDisks  map[uint32]LogicalDiskInfo  // diskNumber -> logical disk info
-
-	// Process information for labels (with validity tracking)
-	processNames map[uint32]string // PID -> process name
-	processValid map[uint32]bool   // PID -> whether process name is valid (not unknown_*)
 
 	// Synchronization
 	mu  sync.RWMutex
@@ -127,8 +122,6 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 		processBytesWritten: make(map[ProcessBytesKey]*int64),
 		physicalDisks:       make(map[uint32]PhysicalDiskInfo),
 		logicalDisks:        make(map[uint32]LogicalDiskInfo),
-		processNames:        make(map[uint32]string),
-		processValid:        make(map[uint32]bool),
 		log:                 GetDiskIOLogger(),
 	}
 }
@@ -376,19 +369,19 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	}
 
 	// Collect process I/O counts
+	processCollector := GetGlobalProcessCollector()
 	for key, countPtr := range c.processIOCount {
 		if countPtr != nil {
-			count := atomic.LoadInt64(countPtr)
-			processName := c.processNames[key.ProcessID]
-			if processName == "" {
-				processName = "unknown_" + strconv.FormatUint(uint64(key.ProcessID), 10)
-			}
-			data.ProcessIOCount[key] = ProcessIOCountData{
-				ProcessID:   key.ProcessID,
-				ProcessName: processName,
-				DiskNumber:  key.DiskNumber,
-				Operation:   key.Operation,
-				Count:       count,
+			// Only create metrics for processes that are still known at scrape time
+			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+				count := atomic.LoadInt64(countPtr)
+				data.ProcessIOCount[key] = ProcessIOCountData{
+					ProcessID:   key.ProcessID,
+					ProcessName: processName,
+					DiskNumber:  key.DiskNumber,
+					Operation:   key.Operation,
+					Count:       count,
+				}
 			}
 		}
 	}
@@ -396,16 +389,15 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	// Collect process bytes
 	for key, countPtr := range c.processBytesRead {
 		if countPtr != nil {
-			bytes := atomic.LoadInt64(countPtr)
-			processName := c.processNames[key.ProcessID]
-			if processName == "" {
-				processName = "unknown_" + strconv.FormatUint(uint64(key.ProcessID), 10)
-			}
-			data.ProcessBytesRead[key] = ProcessBytesData{
-				ProcessID:   key.ProcessID,
-				ProcessName: processName,
-				DiskNumber:  key.DiskNumber,
-				Bytes:       bytes,
+			// Only create metrics for processes that are still known at scrape time
+			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+				bytes := atomic.LoadInt64(countPtr)
+				data.ProcessBytesRead[key] = ProcessBytesData{
+					ProcessID:   key.ProcessID,
+					ProcessName: processName,
+					DiskNumber:  key.DiskNumber,
+					Bytes:       bytes,
+				}
 			}
 		}
 	}
@@ -413,16 +405,15 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	// Collect process bytes written
 	for key, countPtr := range c.processBytesWritten {
 		if countPtr != nil {
-			bytes := atomic.LoadInt64(countPtr)
-			processName := c.processNames[key.ProcessID]
-			if processName == "" {
-				processName = "unknown_" + strconv.FormatUint(uint64(key.ProcessID), 10)
-			}
-			data.ProcessBytesWritten[key] = ProcessBytesData{
-				ProcessID:   key.ProcessID,
-				ProcessName: processName,
-				DiskNumber:  key.DiskNumber,
-				Bytes:       bytes,
+			// Only create metrics for processes that are still known at scrape time
+			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+				bytes := atomic.LoadInt64(countPtr)
+				data.ProcessBytesWritten[key] = ProcessBytesData{
+					ProcessID:   key.ProcessID,
+					ProcessName: processName,
+					DiskNumber:  key.DiskNumber,
+					Bytes:       bytes,
+				}
 			}
 		}
 	}
@@ -479,18 +470,9 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 
 	// Record process-level metrics (only for known processes with valid names)
 	if processID > 0 {
-		// Check if we have a valid process name cached
-		if valid, exists := c.processValid[processID]; !exists || !valid {
-			// Get process name from global tracker and cache validity
-			processTracker := GetGlobalProcessTracker()
-			processName := processTracker.GetProcessName(processID)
-			c.processNames[processID] = processName
-			// Process is valid if it doesn't have the "unknown_" prefix
-			c.processValid[processID] = !strings.HasPrefix(processName, "unknown_")
-		}
-
-		// Only record metrics for processes with valid names
-		if c.processValid[processID] {
+		// Check if process is known by the global process collector
+		processCollector := GetGlobalProcessCollector()
+		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
 			// Record process I/O count
 			processIOKey := ProcessIOKey{ProcessID: processID, DiskNumber: diskNumber, Operation: operation}
 			if c.processIOCount[processIOKey] == nil {

@@ -169,7 +169,7 @@ func (s *SessionManager) setupSessions() error {
 			}
 			// force rundown events for manifest providers
 			// This ensures we get initial state for providers that support rundown
-			s.manifestSession.GetRundownEvents(&provider)
+			s.manifestSession.GetRundownEvents(&provider.GUID)
 		}
 		sessions = append(sessions, s.manifestSession)
 	}
@@ -200,6 +200,25 @@ func (s *SessionManager) setupConsumer() error {
 	s.consumer.EventPreparedCallback = s.eventHandler.EventPreparedCallback
 	s.consumer.EventCallback = s.eventHandler.EventCallback
 
+	return nil
+}
+
+// TriggerProcessRundown requests the ETW system to emit events for all currently
+// running processes. This is used to refresh the state of the process collector.
+func (s *SessionManager) TriggerProcessRundown() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.running {
+		return fmt.Errorf("cannot trigger process rundown: session is not running")
+	}
+
+	s.log.Debug().Msg("Triggering process rundown...")
+	if err := s.manifestSession.GetRundownEvents(MicrosoftWindowsKernelProcessGUID); err != nil {
+		s.log.Error().Err(err).Msg("Failed to trigger process rundown")
+		return err
+	}
+	s.log.Debug().Msg("Process rundown triggered successfully")
 	return nil
 }
 

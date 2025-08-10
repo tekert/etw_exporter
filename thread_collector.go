@@ -2,7 +2,6 @@ package main
 
 import (
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -35,10 +34,6 @@ type ThreadCSCollector struct {
 
 	// Context switch interval tracking
 	contextSwitchIntervals map[uint16][]float64 // CPU -> interval durations (seconds)
-
-	// Process information for labels (with validity tracking)
-	processNames map[uint32]string // PID -> process name
-	processValid map[uint32]bool   // PID -> whether process name is valid (not unknown_*)
 
 	// Synchronization
 	mu  sync.RWMutex
@@ -76,8 +71,6 @@ func NewThreadCSCollector() *ThreadCSCollector {
 		contextSwitchesPerProcess: make(map[uint32]*int64),
 		threadStates:              make(map[ThreadStateKey]*int64),
 		contextSwitchIntervals:    make(map[uint16][]float64),
-		processNames:              make(map[uint32]string),
-		processValid:              make(map[uint32]bool),
 		log:                       GetThreadLogger(),
 	}
 }
@@ -210,17 +203,17 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 	}
 
 	// Collect process context switches
+	processCollector := GetGlobalProcessCollector()
 	for pid, countPtr := range c.contextSwitchesPerProcess {
 		if countPtr != nil {
-			count := atomic.LoadInt64(countPtr)
-			processName := c.processNames[pid]
-			if processName == "" {
-				processName = "unknown_" + strconv.FormatUint(uint64(pid), 10)
-			}
-			data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
-				ProcessID:   pid,
-				ProcessName: processName,
-				Count:       count,
+			// Only create metrics for processes that are still known at scrape time
+			if processName, isKnown := processCollector.GetProcessName(pid); isKnown {
+				count := atomic.LoadInt64(countPtr)
+				data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
+					ProcessID:   pid,
+					ProcessName: processName,
+					Count:       count,
+				}
 			}
 		}
 	}
@@ -303,18 +296,9 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 
 	// Record context switch per process (only for known processes with valid names)
 	if processID > 0 {
-		// Check if we have a valid process name cached
-		if valid, exists := c.processValid[processID]; !exists || !valid {
-			// Get process name from global tracker and cache validity
-			processTracker := GetGlobalProcessTracker()
-			processName := processTracker.GetProcessName(processID)
-			c.processNames[processID] = processName
-			// Process is valid if it doesn't have the "unknown_" prefix
-			c.processValid[processID] = !strings.HasPrefix(processName, "unknown_")
-		}
-
-		// Only record metrics for processes with valid names
-		if c.processValid[processID] {
+		// Check if process is known by the global process collector
+		processCollector := GetGlobalProcessCollector()
+		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
 			if c.contextSwitchesPerProcess[processID] == nil {
 				c.contextSwitchesPerProcess[processID] = new(int64)
 			}
@@ -343,7 +327,6 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 func (c *ThreadCSCollector) RecordThreadStateTransition(state, waitReason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-
 
 	stateKey := ThreadStateKey{State: state, WaitReason: waitReason}
 	if c.threadStates[stateKey] == nil {

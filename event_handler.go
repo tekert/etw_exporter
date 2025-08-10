@@ -72,11 +72,11 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		fileEventHandlers:    make([]FileEventHandler, 0),
 	}
 
-	// Always register the global process tracker for process events
+	// Always register the global process handler for process events
 	// This ensures we have process name mappings available for all collectors
-	processTracker := GetGlobalProcessTracker()
-	handler.RegisterProcessEventHandler(processTracker)
-	handler.log.Debug().Msg("Registered global process tracker")
+	processHandler := NewProcessHandler()
+	handler.RegisterProcessEventHandler(processHandler)
+	handler.log.Debug().Msg("Registered global process handler")
 
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
