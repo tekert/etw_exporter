@@ -77,7 +77,7 @@ Work in progress...
 - **Windows**: Administrator privileges required for ETW access
 - **Go**: 1.19+ for building from source 
 - > (recommended 2.24+ for performance jump on cgo callbacks)
-- **Dependencies**: tekert/golang-etw, prometheus/client_golang
+- **Dependencies**: tekert/goetw, prometheus/client_golang
 
 ## Build
 
