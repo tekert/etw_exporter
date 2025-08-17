@@ -7,11 +7,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/phuslu/log"
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 var (
@@ -146,18 +145,15 @@ func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
 		}
 	}
 
+	// TODO: (report the author). see if can isolate the problem
+	// TODO: Delete this, not needed, is a problem with the library
+	// https://github.com/phuslu/log/issues/105
+
 	if config.Async {
 		return &log.AsyncWriter{
 			ChannelSize: 4096,
 			Writer:      writer,
 		}, nil
-	} else if !config.FastIO {
-		// If not async and not FastIO, we are using the complex ConsoleWriter.
-		// Wrap it in a mutex to make it thread-safe, preventing crashes
-		// TODO: (report the author). see if can isolate the problem
-		// It seems if a cgo goroutine writes to the console while another goroutine
-		// is writing, it can cause a crash, this fixes that, or async.
-		writer = &safeWriter{w: writer}
 	}
 	return writer, nil
 }
@@ -298,30 +294,6 @@ func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
 	return &multiWriter, nil
 }
 
-// safeWriter is a simple log.Writer wrapper that ensures thread-safety via a mutex.
-type safeWriter struct {
-	mu sync.Mutex
-	w  log.Writer
-}
-
-// WriteEntry implements the log.Writer interface by calling the wrapped
-// writer's WriteEntry method under a lock.
-func (sw *safeWriter) WriteEntry(e *log.Entry) (int, error) {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	return sw.w.WriteEntry(e)
-}
-
-// Close implements io.Closer to pass the close call to the underlying writer if it's a closer.
-func (sw *safeWriter) Close() error {
-	sw.mu.Lock()
-	defer sw.mu.Unlock()
-	if closer, ok := sw.w.(io.Closer); ok {
-		return closer.Close()
-	}
-	return nil
-}
-
 func createLogger(config LoggingConfig, writer log.Writer, contextStr string) log.Logger {
 	return log.Logger{
 		Level:        parseLogLevel(config.Defaults.Level),
@@ -354,11 +326,11 @@ func ConfigureLogging(config LoggingConfig) error {
 
 	// Configure module-specific loggers using the same multi-writer
 	// This allows all modules to use configured console/file outputs
-	modDiskIOLogger = createLogger(config, multiWriter, "diskio")
-	modThreadLogger = createLogger(config, multiWriter, "threadcs")
-	modHandlerLogger = createLogger(config, multiWriter, "app-event-handler")
-	modProcessLogger = createLogger(config, multiWriter, "app-process-tracker")
-	modSessionLogger = createLogger(config, multiWriter, "app-etw-session")
+	modDiskIOLogger = createLogger(config, multiWriter, "H-diskio")
+	modThreadLogger = createLogger(config, multiWriter, "H-threadcs")
+	modHandlerLogger = createLogger(config, multiWriter, "eventhandler")
+	modProcessLogger = createLogger(config, multiWriter, "H-process")
+	modSessionLogger = createLogger(config, multiWriter, "etwsession")
 
 	// Configure ETW library logging
 	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
@@ -390,13 +362,17 @@ func GetEventLogger() log.Logger {
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration
 func ConfigureETWLibraryLogger(level string, sharedMultiWriter log.Writer) error {
-	etwLogger := log.Logger{
-		Level:   parseLogLevel(level),
-		Caller:  0, // ETW library manages its own caller info
-		Writer:  sharedMultiWriter,
-		Context: log.NewContext(nil).Str("source", "etw-lib").Value(),
+	lm := etw.GetLogManager()
+	ctx := log.NewContext(nil).Str("source", "etw-lib").Value()
+	levels := map[etw.LoggerName]log.Level{
+		etw.ConsumerLogger: parseLogLevel(level),
+		etw.SessionLogger:  parseLogLevel(level),
+		etw.DefaultLogger:  parseLogLevel(level),
 	}
+	lm.SetLogLevels(levels)
+	lm.SetBaseContext(ctx)
+	lm.SetWriter(sharedMultiWriter)
 
-	etw.SetLogger(&etwLogger)
+	//etw.SetLogger(&etwLogger)
 	return nil
 }
