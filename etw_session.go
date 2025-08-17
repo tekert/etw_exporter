@@ -7,8 +7,12 @@ import (
 	"time"
 
 	"github.com/phuslu/log"
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
+
+// TODO(tekert): reopen NT Kernel Logger session if it closes, just a goroutine that checks every 5 seconds
+// TODO(tekert): If in windows 11, use System Config Provider instead of NT Kernel Logger
+// TODO(tekert): Explain that in Windows 10 only 1 NT Kernel Logger session can be active at a time.
 
 // SessionManager manages ETW sessions and event consumption
 type SessionManager struct {
@@ -59,11 +63,13 @@ func (s *SessionManager) Start() error {
 	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
 	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
 	// So we use this workaround to capture SystemConfig events
-	s.log.Debug().Msg("Capturing SystemConfig events...")
-	if err := s.captureSystemConfigEvents(); err != nil {
-		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
+	if s.config.DiskIO.TrackDiskInfo {
+		s.log.Debug().Msg("Capturing SystemConfig events...")
+		if err := s.captureSystemConfigEvents(); err != nil {
+			return fmt.Errorf("failed to capture SystemConfig events: %w", err)
+		}
+		s.log.Debug().Msg("SystemConfig events captured")
 	}
-	s.log.Debug().Msg("SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
 	s.log.Debug().Msg("Setting up ETW sessions...")
@@ -85,6 +91,13 @@ func (s *SessionManager) Start() error {
 		return fmt.Errorf("failed to start consumer: %w", err)
 	}
 	s.log.Debug().Msg("ETW consumer started")
+
+	// Start periodic cleanup of stale processes in the background
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.startStaleProcessCleanup()
+	}()
 
 	s.running = true
 	s.log.Info().Msg("✅ ETW session/s started successfully")
@@ -203,25 +216,6 @@ func (s *SessionManager) setupConsumer() error {
 	return nil
 }
 
-// TriggerProcessRundown requests the ETW system to emit events for all currently
-// running processes. This is used to refresh the state of the process collector.
-func (s *SessionManager) TriggerProcessRundown() error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	if !s.running {
-		return fmt.Errorf("cannot trigger process rundown: session is not running")
-	}
-
-	s.log.Debug().Msg("Triggering process rundown...")
-	if err := s.manifestSession.GetRundownEvents(MicrosoftWindowsKernelProcessGUID); err != nil {
-		s.log.Error().Err(err).Msg("Failed to trigger process rundown")
-		return err
-	}
-	s.log.Debug().Msg("Process rundown triggered successfully")
-	return nil
-}
-
 // Stop gracefully stops the session manager
 func (s *SessionManager) Stop() error {
 	s.mu.Lock()
@@ -282,4 +276,71 @@ func (s *SessionManager) GetEnabledProviderGroups() []string {
 		}
 	}
 	return enabled
+}
+
+// TriggerProcessRundown requests the ETW system to emit events for all currently
+// running processes. This is used to refresh the state of the process collector.
+func (s *SessionManager) TriggerProcessRundown() error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if !s.running {
+		return fmt.Errorf("cannot trigger process rundown: session is not running")
+	}
+
+	s.log.Debug().Msg("Triggering process rundown...")
+	if err := s.manifestSession.GetRundownEvents(MicrosoftWindowsKernelProcessGUID); err != nil {
+		s.log.Error().Err(err).Msg("Failed to trigger process rundown")
+		return err
+	}
+	s.log.Debug().Msg("Process rundown triggered successfully")
+	return nil
+}
+
+// startStaleProcessCleanup runs a periodic task to remove stale process entries.
+func (s *SessionManager) startStaleProcessCleanup() {
+	const cleanupInterval = 5 * time.Minute
+	// max age must be slightly longer than the interval to avoid race conditions
+	const processMaxAge = cleanupInterval + 10*time.Second
+	// Time to wait for the OS to process the rundown request and emit events
+	const rundownWait = 5 * time.Second
+
+	log.Info().
+		Dur("interval", cleanupInterval).
+		Dur("max_age", processMaxAge).
+		Msg("🧹 Starting stale process cleanup routine (ETW Rundown)")
+
+	ticker := time.NewTicker(cleanupInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			// Only trigger rundown if the session is actually running.
+			if !s.IsRunning() {
+				continue
+			}
+
+			// 1. Trigger a process rundown to get events for all active processes.
+			if err := s.TriggerProcessRundown(); err != nil {
+				log.Error().Err(err).Msg("Skipping cleanup due to rundown failure")
+				continue
+			}
+
+			// 2. Wait for a moment to allow the rundown events to be processed.
+			log.Debug().Dur("wait_time", rundownWait).Msg("Waiting for rundown events to be processed")
+			time.Sleep(rundownWait)
+
+			// 3. Clean up processes that were not "seen" during the rundown.
+			pc := GetGlobalProcessCollector()
+			cleanedCount := pc.CleanupStaleProcesses(processMaxAge)
+			if cleanedCount > 0 {
+				log.Info().Int("count", cleanedCount).Msg("Cleaned up stale processes")
+			}
+
+		case <-s.ctx.Done():
+			log.Debug().Msg("Stopping stale process cleanup routine")
+			return
+		}
+	}
 }
