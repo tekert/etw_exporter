@@ -3,7 +3,7 @@ package main
 import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 // Event handler interfaces for different event types

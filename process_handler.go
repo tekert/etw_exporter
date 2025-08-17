@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 // ProcessHandler processes ETW process events and delegates to the process collector
@@ -70,7 +70,6 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 
 	// use the timestamp of the event as LastSeen
 	timestamp := helper.EventRec.EventHeader.UTCTimeStamp()
-
 
 	ph.processCollector.AddProcess(uint32(processID), processName, uint32(parentProcessID), imagePath, timestamp)
 	return nil

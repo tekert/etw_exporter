@@ -4,7 +4,7 @@ import (
 	"sync"
 
 	"github.com/phuslu/log"
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 // DiskIOHandler handles disk I/O events from ETW providers.

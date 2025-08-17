@@ -1,7 +1,7 @@
 package main
 
 import (
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 // ProviderGroup defines a group of related ETW providers for a specific metric category
