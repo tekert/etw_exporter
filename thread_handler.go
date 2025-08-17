@@ -1,11 +1,13 @@
 package main
 
 import (
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phuslu/log"
-	"github.com/tekert/golang-etw/etw"
+	"github.com/tekert/goetw/etw"
 )
 
 // ThreadHandler handles thread events and metrics with low cardinality.
@@ -25,7 +27,7 @@ import (
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
 type ThreadHandler struct {
-	lastCpuSwitch   sync.Map           // key: cpu (uint16), value: time.Time
+	lastCpuSwitch   []atomic.Int64     // stores the last context switch timestamp (in ns) for each CPU
 	threadToProcess sync.Map           // key: threadID (uint32), value: processID (uint32)
 	customCollector *ThreadCSCollector // High-performance custom collector
 	log             log.Logger         // Thread collector logger
@@ -35,6 +37,7 @@ type ThreadHandler struct {
 // The custom collector provides high-performance metrics aggregation
 func NewThreadHandler() *ThreadHandler {
 	return &ThreadHandler{
+		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
 		customCollector: NewThreadCSCollector(),
 		log:             GetThreadLogger(),
 	}
@@ -73,19 +76,17 @@ func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error
 	waitReason, _ := helper.GetPropertyInt("OldThreadWaitReason")
 
 	// Get CPU number from processor index
-	cpu := uint16(helper.EventRec.BufferContext.Processor)
+	cpu := uint16(helper.EventRec.ProcessorNumber())
 
 	// Timestamp from the event
-	eventTime := helper.EventRec.EventHeader.UTCTimeStamp()
+	eventTimeNano := helper.EventRec.EventHeader.UTCTimeStamp().UnixNano()
 
-	// Calculate context switch interval
+	// Calculate context switch interval using atomic operations to avoid allocations and locks.
 	var interval time.Duration
-	if lastCpuSwitchVal, exists := c.lastCpuSwitch.Load(cpu); exists {
-		if lastCpuSwitch, ok := lastCpuSwitchVal.(time.Time); ok {
-			interval = eventTime.Sub(lastCpuSwitch)
-		}
+	// Swap the new time and get the old time in a single atomic operation.
+	if lastSwitchNano := c.lastCpuSwitch[cpu].Swap(eventTimeNano); lastSwitchNano > 0 {
+		interval = time.Duration(eventTimeNano - lastSwitchNano)
 	}
-	c.lastCpuSwitch.Store(cpu, eventTime)
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
