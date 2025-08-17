@@ -37,6 +37,16 @@ type DiskIOCustomCollector struct {
 	// Synchronization
 	mu  sync.RWMutex
 	log log.Logger
+
+	// Metric Descriptors
+	diskIOCountDesc         *prometheus.Desc
+	diskReadBytesDesc       *prometheus.Desc
+	diskWrittenBytesDesc    *prometheus.Desc
+	processIOCountDesc      *prometheus.Desc
+	processReadBytesDesc    *prometheus.Desc
+	processWrittenBytesDesc *prometheus.Desc
+	physicalDiskInfoDesc    *prometheus.Desc
+	logicalDiskInfoDesc     *prometheus.Desc
 }
 
 // DiskIOKey represents a composite key for disk I/O operations.
@@ -123,6 +133,48 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 		physicalDisks:       make(map[uint32]PhysicalDiskInfo),
 		logicalDisks:        make(map[uint32]LogicalDiskInfo),
 		log:                 GetDiskIOLogger(),
+
+		// Disk I/O metrics
+		diskIOCountDesc: prometheus.NewDesc(
+			"etw_disk_io_operations_total",
+			"Total number of disk I/O operations per disk and operation type",
+			[]string{"disk", "operation"}, nil,
+		),
+		diskReadBytesDesc: prometheus.NewDesc(
+			"etw_disk_read_bytes_total",
+			"Total bytes read from disk",
+			[]string{"disk"}, nil,
+		),
+		diskWrittenBytesDesc: prometheus.NewDesc(
+			"etw_disk_written_bytes_total",
+			"Total bytes written to disk",
+			[]string{"disk"}, nil,
+		),
+		processIOCountDesc: prometheus.NewDesc(
+			"etw_disk_process_io_operations_total",
+			"Total number of disk I/O operations per process, disk, and operation type",
+			[]string{"process_id", "process_name", "disk", "operation"}, nil,
+		),
+		processReadBytesDesc: prometheus.NewDesc(
+			"etw_disk_process_read_bytes_total",
+			"Total bytes read from disk per process",
+			[]string{"process_id", "process_name", "disk"}, nil,
+		),
+		processWrittenBytesDesc: prometheus.NewDesc(
+			"etw_disk_process_written_bytes_total",
+			"Total bytes written to disk per process",
+			[]string{"process_id", "process_name", "disk"}, nil,
+		),
+		physicalDiskInfoDesc: prometheus.NewDesc(
+			"etw_physical_disk_info",
+			"Physical disk information",
+			[]string{"disk", "manufacturer"}, nil,
+		),
+		logicalDiskInfoDesc: prometheus.NewDesc(
+			"etw_logical_disk_info",
+			"Logical disk information",
+			[]string{"disk", "drive_letter", "file_system"}, nil,
+		),
 	}
 }
 
@@ -133,61 +185,14 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 // Parameters:
 //   - ch: Channel to send metric descriptors to
 func (c *DiskIOCustomCollector) Describe(ch chan<- *prometheus.Desc) {
-	// Disk I/O count metrics
-	ch <- prometheus.NewDesc(
-		"etw_disk_io_operations_total",
-		"Total number of disk I/O operations per disk and operation type",
-		[]string{"disk", "operation"}, nil,
-	)
-
-	// Disk bytes read metrics
-	ch <- prometheus.NewDesc(
-		"etw_disk_bytes_read_total",
-		"Total bytes read from disk",
-		[]string{"disk"}, nil,
-	)
-
-	// Disk bytes written metrics
-	ch <- prometheus.NewDesc(
-		"etw_disk_bytes_written_total",
-		"Total bytes written to disk",
-		[]string{"disk"}, nil,
-	)
-
-	// Process I/O count metrics
-	ch <- prometheus.NewDesc(
-		"etw_process_disk_io_operations_total",
-		"Total number of disk I/O operations per process, disk, and operation type",
-		[]string{"process_id", "process_name", "disk", "operation"}, nil,
-	)
-
-	// Process bytes read metrics
-	ch <- prometheus.NewDesc(
-		"etw_process_disk_bytes_read_total",
-		"Total bytes read from disk per process",
-		[]string{"process_id", "process_name", "disk"}, nil,
-	)
-
-	// Process bytes written metrics
-	ch <- prometheus.NewDesc(
-		"etw_process_disk_bytes_written_total",
-		"Total bytes written to disk per process",
-		[]string{"process_id", "process_name", "disk"}, nil,
-	)
-
-	// Physical disk information metrics
-	ch <- prometheus.NewDesc(
-		"etw_physical_disk_info",
-		"Physical disk information",
-		[]string{"disk", "manufacturer"}, nil,
-	)
-
-	// Logical disk information metrics
-	ch <- prometheus.NewDesc(
-		"etw_logical_disk_info",
-		"Logical disk information",
-		[]string{"disk", "drive_letter", "file_system"}, nil,
-	)
+	ch <- c.diskIOCountDesc
+	ch <- c.diskReadBytesDesc
+	ch <- c.diskWrittenBytesDesc
+	ch <- c.processIOCountDesc
+	ch <- c.processReadBytesDesc
+	ch <- c.processWrittenBytesDesc
+	ch <- c.physicalDiskInfoDesc
+	ch <- c.logicalDiskInfoDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -205,11 +210,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create disk I/O count metrics
 	for _, ioData := range data.DiskIOCount {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_disk_io_operations_total",
-				"Total number of disk I/O operations per disk and operation type",
-				[]string{"disk", "operation"}, nil,
-			),
+			c.diskIOCountDesc,
 			prometheus.CounterValue,
 			float64(ioData.Count),
 			strconv.FormatUint(uint64(ioData.DiskNumber), 10),
@@ -220,11 +221,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create disk bytes read metrics
 	for diskNumber, bytes := range data.DiskBytesRead {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_disk_bytes_read_total",
-				"Total bytes read from disk",
-				[]string{"disk"}, nil,
-			),
+			c.diskReadBytesDesc,
 			prometheus.CounterValue,
 			float64(bytes),
 			strconv.FormatUint(uint64(diskNumber), 10),
@@ -234,11 +231,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create disk bytes written metrics
 	for diskNumber, bytes := range data.DiskBytesWritten {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_disk_bytes_written_total",
-				"Total bytes written to disk",
-				[]string{"disk"}, nil,
-			),
+			c.diskWrittenBytesDesc,
 			prometheus.CounterValue,
 			float64(bytes),
 			strconv.FormatUint(uint64(diskNumber), 10),
@@ -248,11 +241,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create process I/O count metrics
 	for _, procData := range data.ProcessIOCount {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_process_disk_io_operations_total",
-				"Total number of disk I/O operations per process, disk, and operation type",
-				[]string{"process_id", "process_name", "disk", "operation"}, nil,
-			),
+			c.processIOCountDesc,
 			prometheus.CounterValue,
 			float64(procData.Count),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
@@ -265,11 +254,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create process bytes read metrics
 	for _, procData := range data.ProcessBytesRead {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_process_disk_bytes_read_total",
-				"Total bytes read from disk per process",
-				[]string{"process_id", "process_name", "disk"}, nil,
-			),
+			c.processReadBytesDesc,
 			prometheus.CounterValue,
 			float64(procData.Bytes),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
@@ -281,11 +266,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create process bytes written metrics
 	for _, procData := range data.ProcessBytesWritten {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_process_disk_bytes_written_total",
-				"Total bytes written to disk per process",
-				[]string{"process_id", "process_name", "disk"}, nil,
-			),
+			c.processWrittenBytesDesc,
 			prometheus.CounterValue,
 			float64(procData.Bytes),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
@@ -297,11 +278,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create physical disk information metrics
 	for _, physDisk := range data.PhysicalDisks {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_physical_disk_info",
-				"Physical disk information",
-				[]string{"disk", "manufacturer"}, nil,
-			),
+			c.physicalDiskInfoDesc,
 			prometheus.GaugeValue,
 			1,
 			strconv.FormatUint(uint64(physDisk.DiskNumber), 10),
@@ -312,11 +289,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create logical disk information metrics
 	for _, logDisk := range data.LogicalDisks {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_logical_disk_info",
-				"Logical disk information",
-				[]string{"disk", "drive_letter", "file_system"}, nil,
-			),
+			c.logicalDiskInfoDesc,
 			prometheus.GaugeValue,
 			1,
 			strconv.FormatUint(uint64(logDisk.DiskNumber), 10),
