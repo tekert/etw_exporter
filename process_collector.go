@@ -205,14 +205,20 @@ func (pc *ProcessCollector) CleanupStaleProcesses(lastSeenIn time.Duration) int 
 		return 0
 	}
 
-	pc.log.Info().
-		Int("stale_count", len(pidsToDelete)).
-		Dur("max_age", lastSeenIn).
-		Msg("Cleaning up stale processes not seen in rundown")
-
+	var deletedDetails []string
 	for _, pid := range pidsToDelete {
+		if info, exists := pc.GetProcessInfo(pid); exists {
+			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":"+info.Name)
+		} else {
+			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":<unknown>")
+		}
 		pc.RemoveProcess(pid)
 	}
+	pc.log.Debug().
+		Int("stale_count", len(pidsToDelete)).
+		Dur("max_age", lastSeenIn).
+		Strs("deleted", deletedDetails).
+		Msg("Cleaning up stale processes not seen in rundown")
 
 	return len(pidsToDelete)
 }
