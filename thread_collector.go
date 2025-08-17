@@ -38,6 +38,12 @@ type ThreadCSCollector struct {
 	// Synchronization
 	mu  sync.RWMutex
 	log log.Logger
+
+	// Metric Descriptors
+	contextSwitchesPerCPUDesc     *prometheus.Desc
+	contextSwitchesPerProcessDesc *prometheus.Desc
+	contextSwitchIntervalsDesc    *prometheus.Desc
+	threadStatesDesc              *prometheus.Desc
 }
 
 // ThreadMetricsData holds aggregated data for a single scrape
@@ -72,6 +78,28 @@ func NewThreadCSCollector() *ThreadCSCollector {
 		threadStates:              make(map[ThreadStateKey]*int64),
 		contextSwitchIntervals:    make(map[uint16][]float64),
 		log:                       GetThreadLogger(),
+
+		// Initialize descriptors once
+		contextSwitchesPerCPUDesc: prometheus.NewDesc(
+			"etw_context_switches_per_cpu_total",
+			"Total number of context switches per CPU",
+			[]string{"cpu"}, nil,
+		),
+		contextSwitchesPerProcessDesc: prometheus.NewDesc(
+			"etw_context_switches_per_process_total",
+			"Total number of context switches per process",
+			[]string{"process_id", "process_name"}, nil,
+		),
+		contextSwitchIntervalsDesc: prometheus.NewDesc(
+			"etw_context_switch_interval_milliseconds",
+			"Histogram of context switch intervals per CPU (time between consecutive switches) in milliseconds.",
+			[]string{"cpu"}, nil,
+		),
+		threadStatesDesc: prometheus.NewDesc(
+			"etw_thread_states_total",
+			"Total count of thread state transitions by state and wait reason",
+			[]string{"state", "wait_reason"}, nil,
+		),
 	}
 }
 
@@ -79,33 +107,10 @@ func NewThreadCSCollector() *ThreadCSCollector {
 // It sends the descriptors of all the metrics the collector can possibly export
 // to the provided channel. This is called once during registration.
 func (c *ThreadCSCollector) Describe(ch chan<- *prometheus.Desc) {
-	// Context switches per CPU
-	ch <- prometheus.NewDesc(
-		"etw_context_switches_per_cpu_total",
-		"Total number of context switches per CPU",
-		[]string{"cpu"}, nil,
-	)
-
-	// Context switches per process
-	ch <- prometheus.NewDesc(
-		"etw_context_switches_per_process_total",
-		"Total number of context switches per process",
-		[]string{"process_id", "process_name"}, nil,
-	)
-
-	// Context switch intervals histogram
-	ch <- prometheus.NewDesc(
-		"etw_context_switch_interval_seconds",
-		"Histogram of context switch intervals per CPU (time between consecutive switches)",
-		[]string{"cpu"}, nil,
-	)
-
-	// Thread state transitions
-	ch <- prometheus.NewDesc(
-		"etw_thread_states_total",
-		"Total count of thread state transitions by state and wait reason",
-		[]string{"state", "wait_reason"}, nil,
-	)
+	ch <- c.contextSwitchesPerCPUDesc
+	ch <- c.contextSwitchesPerProcessDesc
+	ch <- c.contextSwitchIntervalsDesc
+	ch <- c.threadStatesDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -121,11 +126,7 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create context switches per CPU metrics
 	for cpu, count := range data.ContextSwitchesPerCPU {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_context_switches_per_cpu_total",
-				"Total number of context switches per CPU",
-				[]string{"cpu"}, nil,
-			),
+			c.contextSwitchesPerCPUDesc,
 			prometheus.CounterValue,
 			float64(count),
 			strconv.FormatUint(uint64(cpu), 10),
@@ -135,11 +136,7 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create context switches per process metrics
 	for _, procData := range data.ContextSwitchesPerProcess {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_context_switches_per_process_total",
-				"Total number of context switches per process",
-				[]string{"process_id", "process_name"}, nil,
-			),
+			c.contextSwitchesPerProcessDesc,
 			prometheus.CounterValue,
 			float64(procData.Count),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
@@ -157,11 +154,7 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 
 		// Create cumulative histogram
 		ch <- prometheus.MustNewConstHistogram(
-			prometheus.NewDesc(
-				"etw_context_switch_interval_seconds",
-				"Histogram of context switch intervals per CPU (time between consecutive switches)",
-				[]string{"cpu"}, nil,
-			),
+			c.contextSwitchIntervalsDesc,
 			uint64(stats.Count),
 			stats.Sum,
 			buckets,
@@ -172,11 +165,7 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 	// Create thread state metrics
 	for stateKey, count := range data.ThreadStates {
 		ch <- prometheus.MustNewConstMetric(
-			prometheus.NewDesc(
-				"etw_thread_states_total",
-				"Total count of thread state transitions by state and wait reason",
-				[]string{"state", "wait_reason"}, nil,
-			),
+			c.threadStatesDesc,
 			prometheus.CounterValue,
 			float64(count),
 			stateKey.State,
@@ -245,11 +234,11 @@ func (c *ThreadCSCollector) calculateIntervalStats(intervals []float64) Interval
 		Buckets: make(map[float64]int64),
 	}
 
-	// Define histogram buckets (exponential buckets from 1μs to ~16ms)
+	// Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
 	buckets := []float64{
-		0.000001, 0.000002, 0.000004, 0.000008, 0.000016,
-		0.000032, 0.000064, 0.000128, 0.000256, 0.000512,
-		0.001024, 0.002048, 0.004096, 0.008192, 0.016384,
+		0.001, 0.002, 0.004, 0.008, 0.016,
+		0.032, 0.064, 0.128, 0.256, 0.512,
+		1.024, 2.048, 4.096, 8.192, 16.384,
 	}
 
 	// Initialize all buckets to zero
@@ -306,9 +295,10 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 		}
 	}
 
-	// Record context switch interval
+	// Record context switch interval, converted to milliseconds
 	if interval > 0 {
-		c.contextSwitchIntervals[cpu] = append(c.contextSwitchIntervals[cpu], interval.Seconds())
+		intervalMs := float64(interval.Nanoseconds()) / 1_000_000.0
+		c.contextSwitchIntervals[cpu] = append(c.contextSwitchIntervals[cpu], intervalMs)
 
 		// Limit interval history to prevent memory growth
 		if len(c.contextSwitchIntervals[cpu]) > 1000 {
