@@ -92,9 +92,9 @@ var AllProviderGroups = []*ProviderGroup{
 		},
 	},
 
-	// InterruptLatencyGroup uses kernel session for interrupt and DPC events
+	// PerfInfoGroup uses kernel session for interrupt and DPC events
 	{
-		Name: "interrupt_latency",
+		Name: "perfinfo",
 		KernelFlags: etw.EVENT_TRACE_FLAG_INTERRUPT | // PerfInfo
 			etw.EVENT_TRACE_FLAG_DPC | // PerfInfo
 			etw.EVENT_TRACE_FLAG_IMAGE_LOAD | // Image

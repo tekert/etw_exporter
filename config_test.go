@@ -123,7 +123,7 @@ enable_counts = true
 `,
 			validate: func(t *testing.T, c *AppConfig) {
 				if !c.Collectors.PerfInfo.Enabled {
-					t.Error("Expected InterruptLatency to be enabled")
+					t.Error("Expected PerfInfo to be enabled")
 				}
 				if !c.Collectors.PerfInfo.EnablePerDriver {
 					t.Error("Expected EnablePerDriver to be true")
