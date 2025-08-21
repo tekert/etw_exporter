@@ -15,12 +15,12 @@ import (
 
 var (
 	// Module-specific loggers
-	modDiskIOLogger     log.Logger // Disk I/O collector logger
-	modThreadLogger     log.Logger // ThreadCS collector logger
-	modInterruptLogger  log.Logger // Interrupt latency collector logger
-	modHandlerLogger    log.Logger // Event handler logger
-	modProcessLogger    log.Logger // Process tracker logger
-	modSessionLogger    log.Logger // ETW session manager logger
+	modDiskIOLogger    log.Logger // Disk I/O collector logger
+	modThreadLogger    log.Logger // ThreadCS collector logger
+	modInterruptLogger log.Logger // Interrupt latency collector logger
+	modHandlerLogger   log.Logger // Event handler logger
+	modProcessLogger   log.Logger // Process tracker logger
+	modSessionLogger   log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -350,7 +350,7 @@ func GetThreadLogger() log.Logger {
 	return modThreadLogger
 }
 
-func GetInterruptLogger() log.Logger {
+func GetPerfinfoLogger() log.Logger {
 	return modInterruptLogger
 }
 
