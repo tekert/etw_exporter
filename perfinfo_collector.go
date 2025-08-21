@@ -275,14 +275,23 @@ func (c *PerfInfoCollector) Collect(ch chan<- prometheus.Metric) {
 
 // collectInterruptLatencyHistogram creates the system-wide interrupt latency histogram
 func (c *PerfInfoCollector) collectInterruptLatencyHistogram(ch chan<- prometheus.Metric) {
-	buckets := make(map[float64]uint64)
+	cumulativeBuckets := make(map[float64]uint64)
 	var sampleCount uint64
 	var sampleSum float64
+	var cumulativeCount uint64
 
-	for bucket, count := range c.interruptLatencyBuckets {
-		buckets[bucket] = uint64(count)
-		sampleCount += uint64(count)
-		sampleSum += float64(bucket) * float64(count)
+	// Iterate over the defined buckets in order to calculate cumulative counts
+	for _, bucketBound := range InterruptLatencyBuckets {
+		count := uint64(c.interruptLatencyBuckets[bucketBound])
+		if count > 0 {
+			// This approximation of sum is incorrect for a true histogram, but we'll
+			// keep it to only fix the cumulative count issue. A better approach
+			// would be to store and use the actual sum of observed values.
+			sampleSum += float64(bucketBound) * float64(count)
+			sampleCount += count
+		}
+		cumulativeCount += count
+		cumulativeBuckets[bucketBound] = cumulativeCount
 	}
 
 	// Create histogram metric
@@ -290,7 +299,7 @@ func (c *PerfInfoCollector) collectInterruptLatencyHistogram(ch chan<- prometheu
 		c.interruptLatencyDesc,
 		sampleCount,
 		sampleSum,
-		buckets,
+		cumulativeBuckets,
 	)
 
 	ch <- histogram
@@ -299,14 +308,20 @@ func (c *PerfInfoCollector) collectInterruptLatencyHistogram(ch chan<- prometheu
 // collectISRDurationHistograms creates ISR duration histograms by driver
 func (c *PerfInfoCollector) collectISRDurationHistograms(ch chan<- prometheus.Metric) {
 	for driverKey, driverBuckets := range c.isrDurationBuckets {
-		buckets := make(map[float64]uint64)
+		cumulativeBuckets := make(map[float64]uint64)
 		var sampleCount uint64
 		var sampleSum float64
+		var cumulativeCount uint64
 
-		for bucket, count := range driverBuckets {
-			buckets[bucket] = uint64(count)
-			sampleCount += uint64(count)
-			sampleSum += float64(bucket) * float64(count)
+		// Iterate over the defined buckets in order to calculate cumulative counts
+		for _, bucketBound := range ISRDurationBuckets {
+			count := uint64(driverBuckets[bucketBound])
+			if count > 0 {
+				sampleSum += float64(bucketBound) * float64(count)
+				sampleCount += count
+			}
+			cumulativeCount += count
+			cumulativeBuckets[bucketBound] = cumulativeCount
 		}
 
 		if sampleCount > 0 {
@@ -314,7 +329,7 @@ func (c *PerfInfoCollector) collectISRDurationHistograms(ch chan<- prometheus.Me
 				c.isrDurationDesc,
 				sampleCount,
 				sampleSum,
-				buckets,
+				cumulativeBuckets,
 				driverKey.ImageName,
 			)
 			ch <- histogram
@@ -325,14 +340,20 @@ func (c *PerfInfoCollector) collectISRDurationHistograms(ch chan<- prometheus.Me
 // collectDPCDurationHistograms creates DPC duration histograms by driver
 func (c *PerfInfoCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric) {
 	for driverKey, driverBuckets := range c.dpcDurationBuckets {
-		buckets := make(map[float64]uint64)
+		cumulativeBuckets := make(map[float64]uint64)
 		var sampleCount uint64
 		var sampleSum float64
+		var cumulativeCount uint64
 
-		for bucket, count := range driverBuckets {
-			buckets[bucket] = uint64(count)
-			sampleCount += uint64(count)
-			sampleSum += float64(bucket) * float64(count)
+		// Iterate over the defined buckets in order to calculate cumulative counts
+		for _, bucketBound := range DPCDurationBuckets {
+			count := uint64(driverBuckets[bucketBound])
+			if count > 0 {
+				sampleSum += float64(bucketBound) * float64(count)
+				sampleCount += count
+			}
+			cumulativeCount += count
+			cumulativeBuckets[bucketBound] = cumulativeCount
 		}
 
 		if sampleCount > 0 {
@@ -340,7 +361,7 @@ func (c *PerfInfoCollector) collectDPCDurationHistograms(ch chan<- prometheus.Me
 				c.dpcDurationDesc,
 				sampleCount,
 				sampleSum,
-				buckets,
+				cumulativeBuckets,
 				driverKey.ImageName,
 			)
 			ch <- histogram
