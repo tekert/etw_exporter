@@ -46,7 +46,7 @@ type CollectorConfig struct {
 	ThreadCS ThreadCSConfig `toml:"threadcs"`
 
 	// Interrupt latency collector configuration
-	PerfInfo InterruptLatencyConfig `toml:"interrupt_latency"`
+	PerfInfo PerfInfoConfig `toml:"interrupt_latency"`
 
 	// Future collector configs can be added here:
 	// Network NetworkConfig `toml:"network"`
@@ -69,8 +69,8 @@ type ThreadCSConfig struct {
 	Enabled bool `toml:"enabled"`
 }
 
-// InterruptLatencyConfig contains interrupt latency collector settings
-type InterruptLatencyConfig struct {
+// PerfInfoConfig contains interrupt latency collector settings
+type PerfInfoConfig struct {
 	// Enable interrupt latency event collection (default: true)
 	// This enables the System-Wide Latency Metrics (core metrics always on)
 	Enabled bool `toml:"enabled"`
@@ -232,7 +232,7 @@ func DefaultConfig() *AppConfig {
 			ThreadCS: ThreadCSConfig{
 				Enabled: false,
 			},
-			PerfInfo: InterruptLatencyConfig{
+			PerfInfo: PerfInfoConfig{
 				Enabled:         true,  // Core system-wide metrics enabled by default
 				EnablePerDriver: false, // Per-driver metrics disabled by default
 				EnablePerCPU:    false, // Disabled by default to reduce cardinality

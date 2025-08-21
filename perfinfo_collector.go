@@ -21,7 +21,7 @@ import (
 // All metrics use the etw_ prefix and are designed for low cardinality.
 type PerfInfoCollector struct {
 	// Configuration options
-	config *InterruptLatencyConfig
+	config *PerfInfoConfig
 
 	// Pending ISR tracking for latency correlation
 	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
@@ -118,8 +118,8 @@ var (
 	SMIGapBuckets = []float64{50, 100, 200, 500, 1000, 2000, 5000}
 )
 
-// NewInterruptLatencyCollector creates a new interrupt latency collector
-func NewInterruptLatencyCollector(config *InterruptLatencyConfig) *PerfInfoCollector {
+// NewPerfInfoCollector creates a new interrupt latency collector
+func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoCollector {
 	collector := &PerfInfoCollector{
 		config:                  config,
 		pendingISRs:             make(map[ISRKey]*ISREvent, 256),  // Pre-size for performance
@@ -131,7 +131,7 @@ func NewInterruptLatencyCollector(config *InterruptLatencyConfig) *PerfInfoColle
 		lastEventTime:           make(map[uint16]time.Time, 64),
 		driverCounters:          make(map[string]int64, 100), // Track driver activity for bounded set
 		maxDrivers:              50,                          // Limit to top 50 most active drivers
-		log:                     GetInterruptLogger(),
+		log:                     GetPerfinfoLogger(),
 	}
 
 	// Initialize per-driver histogram buckets only if per-driver metrics are enabled
@@ -481,7 +481,8 @@ func (c *PerfInfoCollector) ProcessISREvent(cpu uint16, vector uint16, initialTi
 }
 
 // ProcessDPCEvent processes a DPC event and correlates with ISR for latency calculation
-func (c *PerfInfoCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time, routineAddress uint64, durationMicros float64) {
+func (c *PerfInfoCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
+	routineAddress uint64, durationMicros float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync"
 	"time"
 
 	"github.com/phuslu/log"
@@ -8,18 +9,45 @@ import (
 	"github.com/tekert/goetw/etw"
 )
 
+// pendingDPCInfo holds the data for a DPC event that is waiting for the next
+// DPC on the same CPU to determine its duration.
+type pendingDPCInfo struct {
+	initialTime    time.Time
+	routineAddress uint64
+}
+
 // PerfInfoHandler handles interrupt-related ETW events for performance monitoring
 // It implements the event handler interfaces needed for interrupt latency tracking
 type PerfInfoHandler struct {
 	collector *PerfInfoCollector
 	log       log.Logger
+
+	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
+	// of our DPC duration calculation logic.
+	//
+	// The duration of a DPC is the time from its start until the start of the
+	// next significant event on the same CPU core. In the Windows kernel, DPCs
+	// on a single core are serialized. Therefore, the next significant event
+	// will either be:
+	//  1. The next DPC event: Its start time marks the end of the previous one.
+	//  2. A Context Switch (CSwitch) event: This signifies that the DPC queue
+	//     for that core was empty and the scheduler is now running.
+	//
+	// This map is keyed by the CPU number from the event header. The logic is
+	// thread-safe, protected by dpcMutex, as events from the different sessions can be
+	// are executed by different goroutines. "Whatever comes first" (the next DPC
+	// or a CSwitch) on a given CPU correctly finalizes the duration of the
+	// pending DPC.
+	lastDPCPerCPU map[uint16]pendingDPCInfo
+	dpcMutex      sync.Mutex
 }
 
-// NewInterruptHandler creates a new interrupt event handler
-func NewInterruptHandler(config *InterruptLatencyConfig) *PerfInfoHandler {
+// NewPerfInfoHandler creates a new interrupt event handler
+func NewPerfInfoHandler(config *PerfInfoConfig) *PerfInfoHandler {
 	return &PerfInfoHandler{
-		collector: NewInterruptLatencyCollector(config),
-		log:       GetInterruptLogger(),
+		collector:     NewPerfInfoCollector(config),
+		log:           GetPerfinfoLogger(),
+		lastDPCPerCPU: make(map[uint16]pendingDPCInfo),
 	}
 }
 
@@ -117,30 +145,100 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	var cpu uint16
 	var routineAddress uint64
 	var initialTime time.Time
-	var durationMicros float64
 
 	// Get CPU from the proper processor number field
 	cpu = event.ProcessorNumber()
 
 	// Extract properties using proper helper methods for kernel events
-	// The InitialTime is NOT a property - it's the event timestamp itself
 	if routineAddr, err := helper.GetPropertyUint("Routine"); err == nil {
 		routineAddress = routineAddr
+	} else {
+		return nil // Cannot process without routine address
 	}
 
 	if init, err := helper.GetPropertyInt("InitialTime"); err == nil {
 		initialTime = etw.UnixFiletime(init)
+	} else {
+		return nil // Cannot process without a timestamp
 	}
 
-	// For DPC events, we get entry events only. Duration must be calculated
-	// from correlating with other events or estimated.
-	// DPC events are entry events - no duration property is available
-	durationMicros = 10.0 // Default estimate in microseconds
+	h.dpcMutex.Lock()
+	defer h.dpcMutex.Unlock()
 
-	// Process the DPC event
-	h.collector.ProcessDPCEvent(cpu, initialTime, routineAddress, durationMicros)
+	// Check if there was a previous DPC on this CPU. If so, its duration is the
+	// time between its start and the start of the current DPC.
+	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
+		// Calculate the duration of the previous DPC.
+		durationMicros := float64(initialTime.Sub(lastDPC.initialTime).Microseconds())
+
+		// Process the completed (previous) DPC event now that we have its duration.
+		h.collector.ProcessDPCEvent(cpu, lastDPC.initialTime, lastDPC.routineAddress, durationMicros)
+	}
+
+	// Store the current DPC as the last one seen on this CPU. Its duration will be
+	// calculated when the *next* DPC on this same CPU arrives. OR when a context switch occurs.
+	h.lastDPCPerCPU[cpu] = pendingDPCInfo{
+		initialTime:    initialTime,
+		routineAddress: routineAddress,
+	}
 
 	return nil
+}
+
+// HandleContextSwitch processes context switch events to finalize DPC durations.
+// When a context switch occurs on a CPU, it signifies the end of any pending DPC
+// execution on that core. This handler calculates the duration of the last DPC
+// in a chain.
+//
+// ETW Event Details:
+// - Provider: NT Kernel Logger (CSwitch)
+// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+// - Event Type: 36
+// - Event Class: CSwitch
+//
+// The CSwitch event marks the point where the scheduler switches from one thread
+// to another. Since DPCs run at a high IRQL, they must complete before the
+// scheduler can run and perform a context switch. Therefore, the timestamp of a
+// CSwitch event on a given CPU provides a reliable end time for any DPC that
+// was running just before it.
+func (h *PerfInfoHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+	// The only properties we need from the CSwitch event are its timestamp and
+	// the CPU it occurred on, which are available in the event header.
+	cpu := helper.EventRec.ProcessorNumber()
+	eventTime := helper.EventRec.EventHeader.UTCTimeStamp()
+
+	h.dpcMutex.Lock()
+	defer h.dpcMutex.Unlock()
+
+	// If a DPC was pending on this CPU, the context switch marks its end.
+	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
+		// Calculate the duration from the DPC start to the context switch.
+		durationMicros := float64(eventTime.Sub(lastDPC.initialTime).Microseconds())
+
+		// Process the completed DPC event now that we have its duration.
+		h.collector.ProcessDPCEvent(cpu, lastDPC.initialTime, lastDPC.routineAddress, durationMicros)
+
+		// The DPC is no longer pending and its duration has been recorded.
+		// We remove it from the map to prevent it from being processed again.
+		delete(h.lastDPCPerCPU, cpu)
+	}
+
+	return nil
+}
+
+// HandleReadyThread is a stub implementation to satisfy the ThreadNtEventHandler interface.
+func (h *PerfInfoHandler) HandleReadyThread(helper *etw.EventRecordHelper) error {
+	return nil // PerfInfoHandler does not process this event.
+}
+
+// HandleThreadStart is a stub implementation to satisfy the ThreadNtEventHandler interface.
+func (h *PerfInfoHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
+	return nil // PerfInfoHandler does not process this event.
+}
+
+// HandleThreadEnd is a stub implementation to satisfy the ThreadNtEventHandler interface.
+func (h *PerfInfoHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
+	return nil // PerfInfoHandler does not process this event.
 }
 
 // HandleImageLoadEvent processes image load events for driver mapping
@@ -231,9 +329,6 @@ func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) er
 //
 // This handler counts hard page faults for memory performance metrics.
 func (h *PerfInfoHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error {
-	// For hard page fault events, we need to check the event type
-	// Event type 32 (EVENT_TRACE_TYPE_MM_HPF) indicates a hard page fault
-	// For classic/MOF events, we need to check if this is a hard page fault
 
 	h.collector.ProcessHardPageFaultEvent()
 
