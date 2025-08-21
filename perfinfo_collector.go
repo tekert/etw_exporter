@@ -378,10 +378,7 @@ func (c *PerfInfoCollector) collectDPCQueueDepth(ch chan<- prometheus.Metric) {
 		totalExecuted += c.dpcExecutedCount[cpu]
 	}
 
-	systemQueueDepth := totalQueued - totalExecuted
-	if systemQueueDepth < 0 {
-		systemQueueDepth = 0
-	}
+	systemQueueDepth := max(totalQueued-totalExecuted, 0)
 
 	ch <- prometheus.MustNewConstMetric(
 		c.dpcQueueDepthDesc,
@@ -392,10 +389,7 @@ func (c *PerfInfoCollector) collectDPCQueueDepth(ch chan<- prometheus.Metric) {
 	// Per-CPU DPC queue depth (only if enabled)
 	if c.config.EnablePerCPU && c.dpcQueueDepthCPUDesc != nil {
 		for cpu := range c.dpcQueuedCount {
-			cpuQueueDepth := c.dpcQueuedCount[cpu] - c.dpcExecutedCount[cpu]
-			if cpuQueueDepth < 0 {
-				cpuQueueDepth = 0
-			}
+			cpuQueueDepth := max(c.dpcQueuedCount[cpu]-c.dpcExecutedCount[cpu], 0)
 
 			ch <- prometheus.MustNewConstMetric(
 				c.dpcQueueDepthCPUDesc,
