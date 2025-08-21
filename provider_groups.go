@@ -86,7 +86,7 @@ var AllProviderGroups = []*ProviderGroup{
 		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
 			etw.EVENT_TRACE_FLAG_THREAD |
 			etw.EVENT_TRACE_FLAG_DISPATCHER,
-		ManifestProviders: []etw.Provider{}, // No manifest providers - using kernel session only
+		ManifestProviders: []etw.Provider{}, // No manifest providers
 		IsEnabled: func(config *CollectorConfig) bool {
 			return config.ThreadCS.Enabled
 		},
@@ -95,11 +95,12 @@ var AllProviderGroups = []*ProviderGroup{
 	// InterruptLatencyGroup uses kernel session for interrupt and DPC events
 	{
 		Name: "interrupt_latency",
-		KernelFlags: etw.EVENT_TRACE_FLAG_INTERRUPT |
-			etw.EVENT_TRACE_FLAG_DPC |
-			etw.EVENT_TRACE_FLAG_IMAGE_LOAD |
-			etw.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS,
-		ManifestProviders: []etw.Provider{}, // No manifest providers - using kernel session only
+		KernelFlags: etw.EVENT_TRACE_FLAG_INTERRUPT | // PerfInfo
+			etw.EVENT_TRACE_FLAG_DPC | // PerfInfo
+			etw.EVENT_TRACE_FLAG_IMAGE_LOAD | // Image
+			etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // PageFault
+			etw.EVENT_TRACE_FLAG_CSWITCH, // Thread V2 (Used for DPC duration calculation)
+		ManifestProviders: []etw.Provider{}, // No manifest providers
 		IsEnabled: func(config *CollectorConfig) bool {
 			return config.PerfInfo.Enabled
 		},
