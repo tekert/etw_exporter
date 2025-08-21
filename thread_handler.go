@@ -141,7 +141,7 @@ func (c *ThreadHandler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 // - Event Types: 1, 3 (Thread start events)
 // - Event Class: Thread_V2_TypeGroup1, Thread_V3_TypeGroup1, Thread_TypeGroup1
 //
-// MOF Class Definition (from gen_mof_kerneldef.go):
+// MOF Class Definition:
 // Thread start event properties:
 // - ProcessId (uint32): Process ID that owns the thread (format: hex)
 // - TThreadId (uint32): Thread ID of the new thread (format: hex)

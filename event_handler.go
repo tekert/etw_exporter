@@ -47,9 +47,9 @@ type PerfInfoNtEventHandler interface {
 // for better code organization and future extensibility
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskHandler      *DiskIOHandler
-	threadCSHandler  *ThreadHandler
-	interruptHandler *PerfInfoHandler
+	diskHandler     *DiskIOHandler
+	threadCSHandler *ThreadHandler
+	perfinfoHandler *PerfInfoHandler
 
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
@@ -64,7 +64,7 @@ type EventHandler struct {
 	// Routing tables for different event types - hot path optimized
 	diskEventHandlers    []DiskEventHandler
 	processEventHandlers []ProcessEventHandler
-	threadHandlers       []ThreadNtEventHandler
+	threadEventHandlers  []ThreadNtEventHandler
 	fileEventHandlers    []FileEventHandler
 	perfinfoHandlers     []PerfInfoNtEventHandler
 }
@@ -77,7 +77,7 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		log:                  GetEventLogger(),
 		diskEventHandlers:    make([]DiskEventHandler, 0),
 		processEventHandlers: make([]ProcessEventHandler, 0),
-		threadHandlers:       make([]ThreadNtEventHandler, 0),
+		threadEventHandlers:  make([]ThreadNtEventHandler, 0),
 		fileEventHandlers:    make([]FileEventHandler, 0),
 		perfinfoHandlers:     make([]PerfInfoNtEventHandler, 0),
 	}
@@ -90,7 +90,7 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
-		handler.diskHandler = NewDiskIOHandler()
+		handler.diskHandler = NewDiskIOHandler(&config.DiskIO)
 		// Register the disk handler with the event handler
 		handler.RegisterDiskEventHandler(handler.diskHandler)
 		// Register for file events for process correlation
@@ -111,18 +111,20 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 	}
 
 	if config.PerfInfo.Enabled {
-		handler.interruptHandler = NewInterruptHandler(&config.PerfInfo)
+		handler.perfinfoHandler = NewPerfInfoHandler(&config.PerfInfo)
 		// Register the interrupt handler with the event handler
-		handler.RegisterInterruptEventHandler(handler.interruptHandler)
+		handler.RegisterPerfInfoEventHandler(handler.perfinfoHandler)
+		// Also register for thread events to finalize DPC durations with CSwitch events.
+		handler.RegisterThreadEventHandler(handler.perfinfoHandler)
 		// Register the custom collector with Prometheus for high-performance metrics
-		prometheus.MustRegister(handler.interruptHandler.GetCustomCollector())
-		handler.log.Info().Msg("Interrupt latency collector enabled and registered with Prometheus")
+		prometheus.MustRegister(handler.perfinfoHandler.GetCustomCollector())
+		handler.log.Info().Msg("PerfInfo collector enabled and registered with Prometheus")
 	}
 
 	handler.log.Info().
 		Int("disk_handlers", len(handler.diskEventHandlers)).
 		Int("process_handlers", len(handler.processEventHandlers)).
-		Int("thread_handlers", len(handler.threadHandlers)).
+		Int("thread_handlers", len(handler.threadEventHandlers)).
 		Int("file_handlers", len(handler.fileEventHandlers)).
 		Int("interrupt_handlers", len(handler.perfinfoHandlers)).
 		Msg("Event handlers initialized")
@@ -142,8 +144,8 @@ func (h *EventHandler) RegisterProcessEventHandler(handler ProcessEventHandler) 
 }
 
 func (h *EventHandler) RegisterThreadEventHandler(handler ThreadNtEventHandler) {
-	h.threadHandlers = append(h.threadHandlers, handler)
-	h.log.Debug().Int("total_thread_handlers", len(h.threadHandlers)).Msg("Thread event handler registered")
+	h.threadEventHandlers = append(h.threadEventHandlers, handler)
+	h.log.Debug().Int("total_thread_handlers", len(h.threadEventHandlers)).Msg("Thread event handler registered")
 }
 
 func (h *EventHandler) RegisterFileEventHandler(handler FileEventHandler) {
@@ -151,9 +153,9 @@ func (h *EventHandler) RegisterFileEventHandler(handler FileEventHandler) {
 	h.log.Debug().Int("total_file_handlers", len(h.fileEventHandlers)).Msg("File event handler registered")
 }
 
-func (h *EventHandler) RegisterInterruptEventHandler(handler PerfInfoNtEventHandler) {
+func (h *EventHandler) RegisterPerfInfoEventHandler(handler PerfInfoNtEventHandler) {
 	h.perfinfoHandlers = append(h.perfinfoHandlers, handler)
-	h.log.Debug().Int("total_interrupt_handlers", len(h.perfinfoHandlers)).Msg("Interrupt event handler registered")
+	h.log.Debug().Int("total_perfinfo_handlers", len(h.perfinfoHandlers)).Msg("PerfInfo event handler registered")
 }
 
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
@@ -200,8 +202,10 @@ func (h *EventHandler) EventPreparedCallback(helper *etw.EventRecordHelper) erro
 	return h.RouteEvent(helper)
 }
 
-// RouteEvent routes events to appropriate handlers based on provider GUID and event type
-// This is the hot path - optimized for performance
+// RouteEvent routes events to appropriate handlers based on provider GUID and event type.
+// This is the hot path - optimized for performance. The router is intentionally kept
+// simple and does not check collector configurations; it only routes events to
+// handlers that have been registered. If a handler is registered, it will receive events.
 func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 	// Extract event information for routing
 	eventRecord := helper.EventRec
@@ -213,48 +217,44 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 		eventID = eventRecord.EventHeader.EventDescriptor.Id
 	}
 
-	// Route SystemConfig events (available in both kernel and manifest modes)
+	// Route SystemConfig events
 	if providerGUID.Equals(SystemConfigGUID) {
 		return h.routeSystemConfigEvents(helper, eventID)
 	}
 
 	// Route disk events from Microsoft-Windows-Kernel-Disk
-	if providerGUID.Equals(MicrosoftWindowsKernelDiskGUID) && h.config.DiskIO.Enabled {
+	if providerGUID.Equals(MicrosoftWindowsKernelDiskGUID) {
 		return h.routeDiskEvents(helper, eventID)
 	}
 
 	// Route process events from Microsoft-Windows-Kernel-Process
-	// Always route process events if we have handlers (needed for process name tracking)
-	if providerGUID.Equals(MicrosoftWindowsKernelProcessGUID) && len(h.processEventHandlers) > 0 {
+	if providerGUID.Equals(MicrosoftWindowsKernelProcessGUID) {
 		return h.routeProcessEvents(helper, eventID)
 	}
 
 	// Route file events from Microsoft-Windows-Kernel-File
-	if providerGUID.Equals(MicrosoftWindowsKernelFileGUID) && h.config.DiskIO.Enabled {
+	if providerGUID.Equals(MicrosoftWindowsKernelFileGUID) {
 		return h.routeFileEvents(helper, eventID)
 	}
 
 	// Route thread events from Thread kernel provider
-	if providerGUID.Equals(ThreadKernelGUID) && h.config.ThreadCS.Enabled {
+	if providerGUID.Equals(ThreadKernelGUID) {
 		return h.routeThreadEvents(helper, eventID)
 	}
 
-	// Route interrupt latency events from kernel providers
-	if h.config.PerfInfo.Enabled && len(h.perfinfoHandlers) > 0 {
-		// Route PerfInfo events (ISR, DPC)
-		if providerGUID.Equals(PerfInfoKernelGUID) {
-			return h.routePerfInfoEvents(helper, eventID)
-		}
+	// Route PerfInfo events (ISR, DPC)
+	if providerGUID.Equals(PerfInfoKernelGUID) {
+		return h.routePerfInfoEvents(helper, eventID)
+	}
 
-		// Route Image events (Image)
-		if providerGUID.Equals(ImageKernelGUID) {
-			return h.routeImageEvents(helper, eventID)
-		}
+	// Route Image events (Image)
+	if providerGUID.Equals(ImageKernelGUID) {
+		return h.routeImageEvents(helper, eventID)
+	}
 
-		// Route PageFault events
-		if providerGUID.Equals(PageFaultKernelGUID) {
-			return h.routePageFaultEvents(helper, eventID)
-		}
+	// Route PageFault events
+	if providerGUID.Equals(PageFaultKernelGUID) {
+		return h.routePageFaultEvents(helper, eventID)
 	}
 
 	return nil
@@ -262,7 +262,7 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 
 // routeSystemConfigEvents routes SystemConfig events to disk handlers
 func (h *EventHandler) routeSystemConfigEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if !h.config.DiskIO.Enabled || !h.config.DiskIO.TrackDiskInfo || len(h.diskEventHandlers) == 0 {
+	if len(h.diskEventHandlers) == 0 {
 		return nil
 	}
 
@@ -385,31 +385,31 @@ func (h *EventHandler) routeFileEvents(helper *etw.EventRecordHelper, eventID ui
 
 // routeThreadEvents routes thread events to all registered handlers
 func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.threadHandlers) == 0 {
+	if len(h.threadEventHandlers) == 0 {
 		return nil
 	}
 
 	switch eventID {
-	case 36: // TODO: Context Switch - need to find ETW constant
-		for _, handler := range h.threadHandlers {
+	case 36: // CSwitch
+		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleContextSwitch(helper); err != nil {
 				return err
 			}
 		}
-	case 50: // TODO: ReadyThread - need to find ETW constant
-		for _, handler := range h.threadHandlers {
+	case 50: // ReadyThread
+		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleReadyThread(helper); err != nil {
 				return err
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_START, etw.EVENT_TRACE_TYPE_DC_START: // 1, 3
-		for _, handler := range h.threadHandlers {
+		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleThreadStart(helper); err != nil {
 				return err
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_END, etw.EVENT_TRACE_TYPE_DC_END: // 2, 4
-		for _, handler := range h.threadHandlers {
+		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleThreadEnd(helper); err != nil {
 				return err
 			}

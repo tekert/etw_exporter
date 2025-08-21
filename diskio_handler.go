@@ -29,6 +29,7 @@ import (
 // of disk operations to the correct processes.
 type DiskIOHandler struct {
 	customCollector *DiskIOCustomCollector // High-performance custom collector
+	config          *DiskIOConfig          // Collector configuration
 
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
@@ -41,9 +42,10 @@ type DiskIOHandler struct {
 //
 // Returns:
 //   - *DiskIOHandler: A new disk I/O handler instance
-func NewDiskIOHandler() *DiskIOHandler {
+func NewDiskIOHandler(config *DiskIOConfig) *DiskIOHandler {
 	return &DiskIOHandler{
 		customCollector: NewDiskIOCustomCollector(),
+		config:          config,
 		fileObjectMap:   make(map[uint64]uint32),
 		log:             GetDiskIOLogger(),
 	}
@@ -470,6 +472,11 @@ func (d *DiskIOHandler) HandleFileDelete(helper *etw.EventRecordHelper) error {
 // Returns:
 //   - error: Error if event processing fails, nil otherwise
 func (d *DiskIOHandler) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error {
+	// Check if disk info tracking is enabled for this collector
+	if !d.config.TrackDiskInfo {
+		return nil
+	}
+
 	// Get required DiskNumber field
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
@@ -528,6 +535,11 @@ func (d *DiskIOHandler) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper)
 // Returns:
 //   - error: Error if event processing fails, nil otherwise
 func (d *DiskIOHandler) HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error {
+	// Check if disk info tracking is enabled for this collector
+	if !d.config.TrackDiskInfo {
+		return nil
+	}
+
 	// Get required DiskNumber field
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
