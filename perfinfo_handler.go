@@ -19,7 +19,7 @@ type pendingDPCInfo struct {
 // PerfInfoHandler handles interrupt-related ETW events for performance monitoring
 // It implements the event handler interfaces needed for interrupt latency tracking
 type PerfInfoHandler struct {
-	collector *PerfInfoCollector
+	collector *PerfInfoInterruptCollector
 	log       log.Logger
 
 	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
@@ -129,7 +129,7 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 // [EventType{66, 68, 69}, EventTypeName{"ThreadDPC", "DPC", "TimerDPC"}]
 //
 //	class DPC : PerfInfo {
-//	  object InitialTime;  // WmiTime = FILETIME = UINT64
+//	  object InitialTime;   // WmiTime = UINT64 = FILETIME if Wnode.ClientContext == 1
 //	  uint32 Routine;
 //	};
 //
@@ -314,7 +314,7 @@ func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) er
 // [EventType{32}, EventTypeName{"HardFault"}]
 //
 //	class PageFault_HardFault : PageFault_V2 {
-//	  object InitialTime;  // WmiTime = FILETIME = UINT64
+//	  object InitialTime;  // WmiTime = UINT64 = FILETIME if Wnode.ClientContext == 1
 //	  uint64 ReadOffset;
 //	  uint32 VirtualAddress;
 //	  uint32 FileObject;
