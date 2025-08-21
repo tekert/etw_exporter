@@ -6,7 +6,7 @@
 # Format: TOML (Tom's Obvious, Minimal Language)
 
 [server]
-  listen_address = ":9189"
+  listen_address = "localhost:9189"
   metrics_path = "/metrics"
 
 [collectors]
@@ -15,6 +15,10 @@
     track_disk_info = true
   [collectors.threadcs]
     enabled = true
+  [collectors.interrupt_latency]
+    enabled = false
+    enable_per_cpu = false
+    enable_counts = false
 
 [logging]
   lib_level = "warn"

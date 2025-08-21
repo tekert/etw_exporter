@@ -1,14 +1,13 @@
 module etw_exporter
 
-go 1.24
+go 1.24.5
 
-replace github.com/tekert/goetw => ../../projects/goetw
 
 require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/phuslu/log v1.0.119
 	github.com/prometheus/client_golang v1.23.0
-	github.com/tekert/goetw v0.6.2
+	github.com/tekert/goetw v0.7.4
 )
 
 require (

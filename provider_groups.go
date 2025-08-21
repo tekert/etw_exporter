@@ -26,6 +26,21 @@ var (
 
 	// Kernel provider GUIDs for context switches (these require kernel session)
 	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread
+
+	// Kernel session MOF class GUIDs for interrupt latency tracking
+	// Based on MOF documentation:
+
+	// PerfInfo MOF class - handles ISR, DPC, and system call events
+	// [Guid("{ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}"), EventVersion(2)]
+	PerfInfoKernelGUID = etw.MustParseGUID("{ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}")
+
+	// Image MOF class - handles image load/unload events
+	// [Guid("{2cb15d1d-5fc1-11d2-abe1-00a0c911f518}"), EventVersion(2)]
+	ImageKernelGUID = etw.MustParseGUID("{2cb15d1d-5fc1-11d2-abe1-00a0c911f518}")
+
+	// PageFault_V2 MOF class - handles page fault events
+	// [Guid("{3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c}"), EventVersion(2)]
+	PageFaultKernelGUID = etw.MustParseGUID("{3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c}")
 )
 
 // AllProviderGroups contains all available provider groups in a simple slice
@@ -74,6 +89,19 @@ var AllProviderGroups = []*ProviderGroup{
 		ManifestProviders: []etw.Provider{}, // No manifest providers - using kernel session only
 		IsEnabled: func(config *CollectorConfig) bool {
 			return config.ThreadCS.Enabled
+		},
+	},
+
+	// InterruptLatencyGroup uses kernel session for interrupt and DPC events
+	{
+		Name: "interrupt_latency",
+		KernelFlags: etw.EVENT_TRACE_FLAG_INTERRUPT |
+			etw.EVENT_TRACE_FLAG_DPC |
+			etw.EVENT_TRACE_FLAG_IMAGE_LOAD |
+			etw.EVENT_TRACE_FLAG_MEMORY_PAGE_FAULTS,
+		ManifestProviders: []etw.Provider{}, // No manifest providers - using kernel session only
+		IsEnabled: func(config *CollectorConfig) bool {
+			return config.PerfInfo.Enabled
 		},
 	},
 }

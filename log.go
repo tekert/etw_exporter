@@ -15,11 +15,12 @@ import (
 
 var (
 	// Module-specific loggers
-	modDiskIOLogger  log.Logger // Disk I/O collector logger
-	modThreadLogger  log.Logger // ThreadCS collector logger
-	modHandlerLogger log.Logger // Event handler logger
-	modProcessLogger log.Logger // Process tracker logger
-	modSessionLogger log.Logger // ETW session manager logger
+	modDiskIOLogger     log.Logger // Disk I/O collector logger
+	modThreadLogger     log.Logger // ThreadCS collector logger
+	modInterruptLogger  log.Logger // Interrupt latency collector logger
+	modHandlerLogger    log.Logger // Event handler logger
+	modProcessLogger    log.Logger // Process tracker logger
+	modSessionLogger    log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -328,6 +329,7 @@ func ConfigureLogging(config LoggingConfig) error {
 	// This allows all modules to use configured console/file outputs
 	modDiskIOLogger = createLogger(config, multiWriter, "H-diskio")
 	modThreadLogger = createLogger(config, multiWriter, "H-threadcs")
+	modInterruptLogger = createLogger(config, multiWriter, "H-interrupt")
 	modHandlerLogger = createLogger(config, multiWriter, "eventhandler")
 	modProcessLogger = createLogger(config, multiWriter, "H-process")
 	modSessionLogger = createLogger(config, multiWriter, "etwsession")
@@ -346,6 +348,10 @@ func GetDiskIOLogger() log.Logger {
 
 func GetThreadLogger() log.Logger {
 	return modThreadLogger
+}
+
+func GetInterruptLogger() log.Logger {
+	return modInterruptLogger
 }
 
 func GetProcessLogger() log.Logger {

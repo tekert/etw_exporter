@@ -35,7 +35,7 @@ The `[server]` section configures the HTTP server that exposes Prometheus metric
 
 ```toml
 [server]
-listen_address = ":9189"    # Default: ":9189"
+listen_address = ":9189"    # Default: "localhost:9189"
 metrics_path = "/metrics"   # Default: "/metrics"
 ```
 
@@ -83,6 +83,37 @@ enabled = true           # Default: true
 - Tracks thread context switches (when threads are scheduled/descheduled by the OS)
 - High-frequency events that may impact performance under heavy load
 - Performance impact: high
+
+#### Interrupt Latency Collector
+
+```toml
+[collectors.interrupt_latency]
+enabled = false              # Default: false
+enable_per_cpu = false       # Default: false  
+enable_counts = false        # Default: false
+```
+
+**enabled**: Whether to collect interrupt latency metrics.
+- Provides system-wide interrupt to process latency
+- ISR and DPC execution time by driver
+- DPC queue depth tracking and SMI gap detection
+- Hard page fault counting for memory pressure analysis
+- **Disabled by default** due to very high event volume and performance impact
+
+**enable_per_cpu**: Whether to include per-CPU metrics.
+- Adds CPU labels to queue depth metrics  
+- Increases cardinality significantly on systems with many CPUs
+- Only enable if per-CPU analysis is specifically needed
+
+**enable_counts**: Whether to include ISR/DPC count metrics.
+- Tracks total ISR and DPC count per driver
+- Adds additional cardinality to metrics
+- Only enable if count analysis is specifically needed
+
+**Performance Impact**: Very high - interrupt events occur at extremely high frequency.
+Use only when investigating specific latency issues.
+
+// TODO: this is wrong, one set of metrics is safe to be always on, the other are for specific things.
 
 ### Logging Configuration
 

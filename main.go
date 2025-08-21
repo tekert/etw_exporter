@@ -22,6 +22,11 @@ var (
 	version = "0.1.0"
 )
 
+// TODO(tekert):
+//  - Memory collector
+//  - Interrupt to process latency
+// link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (exelent article)
+
 func main() {
 	var (
 		listenAddress  = flag.String("web.listen-address", ":9189", "Address to listen on for web interface and telemetry.")
@@ -53,8 +58,8 @@ func main() {
 	// go tool pprof -output=".\pprof\profile.pb.gz" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
 	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe ".\pprof\profile.pb.gz"
 	// or
-	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
-	// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
+	// cpu> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
+	// mem> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
 	// Start pprof HTTP server on a separate goroutine
 	go func() {
 		log.Info().Msg("Starting pprof HTTP server on :6060")
@@ -85,6 +90,9 @@ func main() {
 		Bool("disk_io_enabled", config.Collectors.DiskIO.Enabled).
 		Bool("disk_io_track_info", config.Collectors.DiskIO.TrackDiskInfo).
 		Bool("threadcs_enabled", config.Collectors.ThreadCS.Enabled).
+		Bool("interrupt_latency_enabled", config.Collectors.PerfInfo.Enabled).
+		Bool("interrupt_latency_per_cpu", config.Collectors.PerfInfo.EnablePerCPU).
+		Bool("interrupt_latency_counts", config.Collectors.PerfInfo.EnableCounts).
 		Str("listen_address", config.Server.ListenAddress).
 		Str("metrics_path", config.Server.MetricsPath).
 		Msg("Starting ETW Exporter")
@@ -124,7 +132,7 @@ func main() {
 	if err := etwSession.Start(); err != nil {
 		log.Fatal().Err(err).Msg("❌ Failed to start ETW session")
 	}
-	log.Debug().Msg("ETW session started successfully")
+	log.Info().Msg("ETW session started successfully")
 
 	// Set up HTTP server for Prometheus metrics
 	log.Debug().Str("metrics_path", config.Server.MetricsPath).Msg("🌐 Setting up HTTP handlers")

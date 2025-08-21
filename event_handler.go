@@ -11,8 +11,8 @@ type DiskEventHandler interface {
 	HandleDiskRead(helper *etw.EventRecordHelper) error
 	HandleDiskWrite(helper *etw.EventRecordHelper) error
 	HandleDiskFlush(helper *etw.EventRecordHelper) error
-	HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error
-	HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error
+	HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error // TODO: move to SystemConfigHandler
+	HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error // TODO: move to SystemConfigHandler
 }
 
 type ProcessEventHandler interface {
@@ -20,7 +20,7 @@ type ProcessEventHandler interface {
 	HandleProcessEnd(helper *etw.EventRecordHelper) error
 }
 
-type ThreadEventHandler interface {
+type ThreadNtEventHandler interface {
 	HandleContextSwitch(helper *etw.EventRecordHelper) error
 	HandleReadyThread(helper *etw.EventRecordHelper) error
 	HandleThreadStart(helper *etw.EventRecordHelper) error
@@ -35,13 +35,21 @@ type FileEventHandler interface {
 	HandleFileDelete(helper *etw.EventRecordHelper) error
 }
 
+type PerfInfoNtEventHandler interface {
+	HandleISREvent(helper *etw.EventRecordHelper) error
+	HandleDPCEvent(helper *etw.EventRecordHelper) error
+	HandleImageLoadEvent(helper *etw.EventRecordHelper) error     // TODO: this should go to KernelImage handler.
+	HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelPageFault handler.
+}
+
 // EventHandler encapsulates state and logic for ETW event processing
 // This struct-based approach allows reusability of eventID, helper, and other components
 // for better code organization and future extensibility
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskHandler     *DiskIOHandler
-	threadCSHandler *ThreadHandler
+	diskHandler      *DiskIOHandler
+	threadCSHandler  *ThreadHandler
+	interruptHandler *PerfInfoHandler
 
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
@@ -56,8 +64,9 @@ type EventHandler struct {
 	// Routing tables for different event types - hot path optimized
 	diskEventHandlers    []DiskEventHandler
 	processEventHandlers []ProcessEventHandler
-	threadHandlers       []ThreadEventHandler
+	threadHandlers       []ThreadNtEventHandler
 	fileEventHandlers    []FileEventHandler
+	perfinfoHandlers     []PerfInfoNtEventHandler
 }
 
 // NewEventHandler creates a new handler with dependencies injected
@@ -68,8 +77,9 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		log:                  GetEventLogger(),
 		diskEventHandlers:    make([]DiskEventHandler, 0),
 		processEventHandlers: make([]ProcessEventHandler, 0),
-		threadHandlers:       make([]ThreadEventHandler, 0),
+		threadHandlers:       make([]ThreadNtEventHandler, 0),
 		fileEventHandlers:    make([]FileEventHandler, 0),
+		perfinfoHandlers:     make([]PerfInfoNtEventHandler, 0),
 	}
 
 	// Always register the global process handler for process events
@@ -100,11 +110,21 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		handler.log.Info().Msg("ThreadCS collector enabled and registered with Prometheus")
 	}
 
+	if config.PerfInfo.Enabled {
+		handler.interruptHandler = NewInterruptHandler(&config.PerfInfo)
+		// Register the interrupt handler with the event handler
+		handler.RegisterInterruptEventHandler(handler.interruptHandler)
+		// Register the custom collector with Prometheus for high-performance metrics
+		prometheus.MustRegister(handler.interruptHandler.GetCustomCollector())
+		handler.log.Info().Msg("Interrupt latency collector enabled and registered with Prometheus")
+	}
+
 	handler.log.Info().
 		Int("disk_handlers", len(handler.diskEventHandlers)).
 		Int("process_handlers", len(handler.processEventHandlers)).
 		Int("thread_handlers", len(handler.threadHandlers)).
 		Int("file_handlers", len(handler.fileEventHandlers)).
+		Int("interrupt_handlers", len(handler.perfinfoHandlers)).
 		Msg("Event handlers initialized")
 
 	return handler
@@ -121,7 +141,7 @@ func (h *EventHandler) RegisterProcessEventHandler(handler ProcessEventHandler) 
 	h.log.Debug().Int("total_process_handlers", len(h.processEventHandlers)).Msg("Process event handler registered")
 }
 
-func (h *EventHandler) RegisterThreadEventHandler(handler ThreadEventHandler) {
+func (h *EventHandler) RegisterThreadEventHandler(handler ThreadNtEventHandler) {
 	h.threadHandlers = append(h.threadHandlers, handler)
 	h.log.Debug().Int("total_thread_handlers", len(h.threadHandlers)).Msg("Thread event handler registered")
 }
@@ -129,6 +149,11 @@ func (h *EventHandler) RegisterThreadEventHandler(handler ThreadEventHandler) {
 func (h *EventHandler) RegisterFileEventHandler(handler FileEventHandler) {
 	h.fileEventHandlers = append(h.fileEventHandlers, handler)
 	h.log.Debug().Int("total_file_handlers", len(h.fileEventHandlers)).Msg("File event handler registered")
+}
+
+func (h *EventHandler) RegisterInterruptEventHandler(handler PerfInfoNtEventHandler) {
+	h.perfinfoHandlers = append(h.perfinfoHandlers, handler)
+	h.log.Debug().Int("total_interrupt_handlers", len(h.perfinfoHandlers)).Msg("Interrupt event handler registered")
 }
 
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
@@ -154,6 +179,9 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 
 	// 	return false // Skip non-applicable channels
 	// }
+
+	// TODO: if event is mof and we dont need it, we can skip it here.
+
 	return true
 }
 
@@ -211,6 +239,24 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 		return h.routeThreadEvents(helper, eventID)
 	}
 
+	// Route interrupt latency events from kernel providers
+	if h.config.PerfInfo.Enabled && len(h.perfinfoHandlers) > 0 {
+		// Route PerfInfo events (ISR, DPC)
+		if providerGUID.Equals(PerfInfoKernelGUID) {
+			return h.routePerfInfoEvents(helper, eventID)
+		}
+
+		// Route Image events (Image)
+		if providerGUID.Equals(ImageKernelGUID) {
+			return h.routeImageEvents(helper, eventID)
+		}
+
+		// Route PageFault events
+		if providerGUID.Equals(PageFaultKernelGUID) {
+			return h.routePageFaultEvents(helper, eventID)
+		}
+	}
+
 	return nil
 }
 
@@ -221,13 +267,13 @@ func (h *EventHandler) routeSystemConfigEvents(helper *etw.EventRecordHelper, ev
 	}
 
 	switch eventID {
-	case 11: // EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK
+	case etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK: // 11
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleSystemConfigPhyDisk(helper); err != nil {
 				return err
 			}
 		}
-	case 12: // EVENT_TRACE_TYPE_CONFIG_LOGICALDISK
+	case etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK: // 12
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleSystemConfigLogDisk(helper); err != nil {
 				return err
@@ -245,21 +291,21 @@ func (h *EventHandler) routeDiskEvents(helper *etw.EventRecordHelper, eventID ui
 	}
 
 	switch eventID {
-	case 10: // DiskIo Read completion
+	case etw.EVENT_TRACE_TYPE_IO_READ: // 10 - DiskIo Read completion
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskRead(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk read event")
 				return err
 			}
 		}
-	case 11: // DiskIo Write completion
+	case etw.EVENT_TRACE_TYPE_IO_WRITE: // 11 - DiskIo Write completion
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskWrite(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk write event")
 				return err
 			}
 		}
-	case 14: // DiskIo Flush
+	case etw.EVENT_TRACE_TYPE_IO_FLUSH: // 14 - DiskIo Flush
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskFlush(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk flush event")
@@ -344,25 +390,25 @@ func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID 
 	}
 
 	switch eventID {
-	case 36: // Context Switch
+	case 36: // TODO: Context Switch - need to find ETW constant
 		for _, handler := range h.threadHandlers {
 			if err := handler.HandleContextSwitch(helper); err != nil {
 				return err
 			}
 		}
-	case 50: // ReadyThread
+	case 50: // TODO: ReadyThread - need to find ETW constant
 		for _, handler := range h.threadHandlers {
 			if err := handler.HandleReadyThread(helper); err != nil {
 				return err
 			}
 		}
-	case 1, 3: // Thread Start, DCStart
+	case etw.EVENT_TRACE_TYPE_START, etw.EVENT_TRACE_TYPE_DC_START: // 1, 3
 		for _, handler := range h.threadHandlers {
 			if err := handler.HandleThreadStart(helper); err != nil {
 				return err
 			}
 		}
-	case 2, 4: // Thread End, DCEnd
+	case etw.EVENT_TRACE_TYPE_END, etw.EVENT_TRACE_TYPE_DC_END: // 2, 4
 		for _, handler := range h.threadHandlers {
 			if err := handler.HandleThreadEnd(helper); err != nil {
 				return err
@@ -376,5 +422,69 @@ func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID 
 // EventCallback is called for higher-level event processing
 func (h *EventHandler) EventCallback(event *etw.Event) error {
 	// Perform any event-level processing here if needed
+	return nil
+}
+
+// routePerfInfoEvents routes interrupt and DPC events to all registered interrupt handlers
+func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventID uint16) error {
+	if len(h.perfinfoHandlers) == 0 {
+		return nil
+	}
+
+	switch eventID {
+	case 67: // MOF
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleISREvent(helper); err != nil {
+				return err
+			}
+		}
+	case 66, 68, 69: // MOF
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleDPCEvent(helper); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// routeImageEvents routes image load events to all registered interrupt handlers
+func (h *EventHandler) routeImageEvents(helper *etw.EventRecordHelper, eventID uint16) error {
+	if len(h.perfinfoHandlers) == 0 {
+		return nil
+	}
+
+	switch eventID {
+	case etw.EVENT_TRACE_TYPE_END,
+		etw.EVENT_TRACE_TYPE_DC_START,
+		etw.EVENT_TRACE_TYPE_DC_END,
+		etw.EVENT_TRACE_TYPE_LOAD: // Image Load events
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleImageLoadEvent(helper); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// routePageFaultEvents routes page fault events to all registered interrupt handlers
+func (h *EventHandler) routePageFaultEvents(helper *etw.EventRecordHelper, eventID uint16) error {
+	if len(h.perfinfoHandlers) == 0 {
+		return nil
+	}
+
+	// Page fault events - need to check specific event IDs for hard page faults
+	switch eventID {
+	case 32: // 32 - Hard page fault
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleHardPageFaultEvent(helper); err != nil {
+				return err
+			}
+		}
+	}
+
 	return nil
 }

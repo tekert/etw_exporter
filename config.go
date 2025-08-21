@@ -45,6 +45,9 @@ type CollectorConfig struct {
 	// ThreadCS collector configuration
 	ThreadCS ThreadCSConfig `toml:"threadcs"`
 
+	// Interrupt latency collector configuration
+	PerfInfo InterruptLatencyConfig `toml:"interrupt_latency"`
+
 	// Future collector configs can be added here:
 	// Network NetworkConfig `toml:"network"`
 	// Memory  MemoryConfig  `toml:"memory"`
@@ -64,6 +67,22 @@ type DiskIOConfig struct {
 type ThreadCSConfig struct {
 	// Enable thread context switch event collection (default: true)
 	Enabled bool `toml:"enabled"`
+}
+
+// InterruptLatencyConfig contains interrupt latency collector settings
+type InterruptLatencyConfig struct {
+	// Enable interrupt latency event collection (default: true)
+	// This enables the System-Wide Latency Metrics (core metrics always on)
+	Enabled bool `toml:"enabled"`
+
+	// Enable per-driver latency metrics (default: false, adds per-driver labels)
+	EnablePerDriver bool `toml:"enable_per_driver"`
+
+	// Enable per-CPU metrics (default: false, can be high cardinality)
+	EnablePerCPU bool `toml:"enable_per_cpu"`
+
+	// Enable ISR/DPC count metrics (default: false, can be high cardinality)
+	EnableCounts bool `toml:"enable_counts"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -202,7 +221,7 @@ type EventlogConfig struct {
 func DefaultConfig() *AppConfig {
 	return &AppConfig{
 		Server: ServerConfig{
-			ListenAddress: ":9189",
+			ListenAddress: "localhost:9189",
 			MetricsPath:   "/metrics",
 		},
 		Collectors: CollectorConfig{
@@ -211,7 +230,13 @@ func DefaultConfig() *AppConfig {
 				TrackDiskInfo: true,
 			},
 			ThreadCS: ThreadCSConfig{
-				Enabled: true,
+				Enabled: false,
+			},
+			PerfInfo: InterruptLatencyConfig{
+				Enabled:         true,  // Core system-wide metrics enabled by default
+				EnablePerDriver: false, // Per-driver metrics disabled by default
+				EnablePerCPU:    false, // Disabled by default to reduce cardinality
+				EnableCounts:    false, // Disabled by default to reduce cardinality
 			},
 		},
 		Logging: LoggingConfig{
@@ -364,7 +389,7 @@ func (c *AppConfig) Validate() error {
 	}
 
 	// Validate that at least one collector is enabled
-	if !c.Collectors.DiskIO.Enabled && !c.Collectors.ThreadCS.Enabled {
+	if !c.Collectors.DiskIO.Enabled && !c.Collectors.ThreadCS.Enabled && !c.Collectors.PerfInfo.Enabled {
 		return fmt.Errorf("at least one collector must be enabled")
 	}
 

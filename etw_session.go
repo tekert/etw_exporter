@@ -65,7 +65,7 @@ func (s *SessionManager) Start() error {
 	// So we use this workaround to capture SystemConfig events
 	if s.config.DiskIO.TrackDiskInfo {
 		s.log.Debug().Msg("Capturing SystemConfig events...")
-		if err := s.captureSystemConfigEvents(); err != nil {
+		if err := s.captureNtSystemConfigEvents(); err != nil {
 			return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 		}
 		s.log.Debug().Msg("SystemConfig events captured")
@@ -92,21 +92,25 @@ func (s *SessionManager) Start() error {
 	}
 	s.log.Debug().Msg("ETW consumer started")
 
-	// Start periodic cleanup of stale processes in the background
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.startStaleProcessCleanup()
-	}()
+	// Start periodic cleanup of stale processes in the background, but only if
+	// a manifest session is active, as it's required for rundown events.
+	if s.manifestSession != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.startStaleProcessCleanup()
+		}()
+	}
 
 	s.running = true
 	s.log.Info().Msg("✅ ETW session/s started successfully")
 	return nil
 }
 
-// captureSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
-// These events are only emitted when a kernel session is stopped, so we need this special handling
-func (s *SessionManager) captureSystemConfigEvents() error {
+// captureNtSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
+// These events are only emitted when a nt kernel session is stopped, so we need this special handling
+// This is a workaround for Windows 10 and below where System Config manifest Provider is not available
+func (s *SessionManager) captureNtSystemConfigEvents() error {
 	s.log.Trace().Msg("Creating temporary kernel session for SystemConfig events")
 
 	// Create a temporary kernel session to get SystemConfig events
@@ -195,7 +199,7 @@ func (s *SessionManager) setupSessions() error {
 		if err := s.kernelSession.Start(); err != nil {
 			return fmt.Errorf("failed to start kernel session: %w", err)
 		}
-		//s.kernelSession.GetRundownEvents(nil)
+		//s.kernelSession.GetRundownEvents(etw.SystemConfigGuid)
 		sessions = append(sessions, s.kernelSession)
 	}
 
@@ -284,6 +288,9 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	if s.manifestSession == nil {
+		return fmt.Errorf("no manifest session available for process rundown")
+	}
 	if !s.running {
 		return fmt.Errorf("cannot trigger process rundown: session is not running")
 	}
@@ -297,9 +304,11 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	return nil
 }
 
+
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.
 func (s *SessionManager) startStaleProcessCleanup() {
-	const cleanupInterval = 5 * time.Minute
+	//	const cleanupInterval = 5 * time.Minute
+	const cleanupInterval = 5 * time.Second
 	// max age must be slightly longer than the interval to avoid race conditions
 	const processMaxAge = cleanupInterval + 10*time.Second
 	// Time to wait for the OS to process the rundown request and emit events
