@@ -45,10 +45,10 @@ type CollectorConfig struct {
 	// ThreadCS collector configuration
 	ThreadCS ThreadCSConfig `toml:"threadcs"`
 
-	// Interrupt latency collector configuration
-	PerfInfo PerfInfoConfig `toml:"interrupt_latency"`
+	// PerfInfo collector configuration
+	PerfInfo PerfInfoConfig `toml:"perfinfo"`
 
-	// Future collector configs can be added here:
+	// TODO(tekert): Future collector configs can be added here:
 	// Network NetworkConfig `toml:"network"`
 	// Memory  MemoryConfig  `toml:"memory"`
 	// CPU     CPUConfig     `toml:"cpu"`

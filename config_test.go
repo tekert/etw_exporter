@@ -22,7 +22,7 @@ func TestConfigData(t *testing.T) {
 			name:   "default config",
 			config: DefaultConfig(),
 			validate: func(t *testing.T, c *AppConfig) {
-				if c.Server.ListenAddress != ":9189" {
+				if c.Server.ListenAddress != "localhost:9189" {
 					t.Errorf("Expected ListenAddress ':9189', got %s", c.Server.ListenAddress)
 				}
 				if c.Logging.Defaults.Level != "info" {
@@ -75,6 +75,7 @@ filename = "app.log"
 			setupFunc: func(c *AppConfig) {
 				c.Collectors.DiskIO.Enabled = false
 				c.Collectors.ThreadCS.Enabled = false
+				c.Collectors.PerfInfo.Enabled = false
 			},
 			expectErr: true,
 		},
@@ -108,6 +109,30 @@ track_disk_info = false
 				}
 				if c.Collectors.DiskIO.Enabled {
 					t.Error("Expected DiskIO to be disabled")
+				}
+			},
+		},
+		{
+			name: "valid custom perfinfo interrupt latency config",
+			configTOML: `
+[collectors.perfinfo]
+enabled = true
+enable_per_driver = true
+enable_per_cpu = true
+enable_counts = true
+`,
+			validate: func(t *testing.T, c *AppConfig) {
+				if !c.Collectors.PerfInfo.Enabled {
+					t.Error("Expected InterruptLatency to be enabled")
+				}
+				if !c.Collectors.PerfInfo.EnablePerDriver {
+					t.Error("Expected EnablePerDriver to be true")
+				}
+				if !c.Collectors.PerfInfo.EnablePerCPU {
+					t.Error("Expected EnablePerCPU to be true")
+				}
+				if !c.Collectors.PerfInfo.EnableCounts {
+					t.Error("Expected EnableCounts to be true")
 				}
 			},
 		},

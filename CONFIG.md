@@ -87,33 +87,37 @@ enabled = true           # Default: true
 #### Interrupt Latency Collector
 
 ```toml
-[collectors.interrupt_latency]
-enabled = false              # Default: false
-enable_per_cpu = false       # Default: false  
+[collectors.perfinfo]
+enabled = true               # Default: true
+enable_per_driver = false    # Default: false
+enable_per_cpu = false       # Default: false
 enable_counts = false        # Default: false
 ```
 
 **enabled**: Whether to collect interrupt latency metrics.
-- Provides system-wide interrupt to process latency
-- ISR and DPC execution time by driver
-- DPC queue depth tracking and SMI gap detection
-- Hard page fault counting for memory pressure analysis
-- **Disabled by default** due to very high event volume and performance impact
+- Provides system-wide interrupt to process latency, DPC queue depth, and hard page fault counts.
+- These base metrics have a **low performance impact** and are safe to enable in most environments.
+- Additional high-cardinality metrics can be enabled for detailed analysis.
 
-**enable_per_cpu**: Whether to include per-CPU metrics.
-- Adds CPU labels to queue depth metrics  
-- Increases cardinality significantly on systems with many CPUs
-- Only enable if per-CPU analysis is specifically needed
+**enable_per_driver**: Whether to collect ISR and DPC execution time by driver.
+- Adds `image_name` labels to ISR/DPC duration histograms.
+- Increases cardinality based on the number of active drivers.
+- Useful for identifying drivers causing high latency.
+- Performance impact: Low to Medium.
 
-**enable_counts**: Whether to include ISR/DPC count metrics.
-- Tracks total ISR and DPC count per driver
-- Adds additional cardinality to metrics
-- Only enable if count analysis is specifically needed
+**enable_per_cpu**: Whether to include per-CPU metrics for DPC queue depth.
+- Adds `cpu` labels to queue depth metrics.
+- Increases cardinality significantly on systems with many CPUs.
+- Only enable if per-CPU analysis is specifically needed.
 
-**Performance Impact**: Very high - interrupt events occur at extremely high frequency.
-Use only when investigating specific latency issues.
+**enable_counts**: Whether to include ISR/DPC count metrics by driver.
+- Tracks total ISR and DPC count per driver.
+- Adds additional cardinality to metrics.
+- Only enable if count analysis is specifically needed.
 
-// TODO: this is wrong, one set of metrics is safe to be always on, the other are for specific things.
+**Performance Impact**:
+- **Base metrics (enabled=true)**: Low. Suitable for continuous monitoring.
+- **High-cardinality metrics (per_driver, per_cpu, counts)**: Medium. Enable these when investigating specific latency issues to avoid excessive metric cardinality.
 
 ### Logging Configuration
 

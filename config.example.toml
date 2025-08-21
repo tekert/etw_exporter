@@ -15,7 +15,7 @@
     track_disk_info = true
   [collectors.threadcs]
     enabled = true
-  [collectors.interrupt_latency]
+  [collectors.perfinfo]
     enabled = false
     enable_per_cpu = false
     enable_counts = false
