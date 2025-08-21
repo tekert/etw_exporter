@@ -119,7 +119,6 @@ track_disk_info = false
 enabled = true
 enable_per_driver = true
 enable_per_cpu = true
-enable_counts = true
 `,
 			validate: func(t *testing.T, c *AppConfig) {
 				if !c.Collectors.PerfInfo.Enabled {
@@ -130,9 +129,6 @@ enable_counts = true
 				}
 				if !c.Collectors.PerfInfo.EnablePerCPU {
 					t.Error("Expected EnablePerCPU to be true")
-				}
-				if !c.Collectors.PerfInfo.EnableCounts {
-					t.Error("Expected EnableCounts to be true")
 				}
 			},
 		},

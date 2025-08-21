@@ -91,7 +91,6 @@ enabled = true           # Default: true
 enabled = true               # Default: true
 enable_per_driver = false    # Default: false
 enable_per_cpu = false       # Default: false
-enable_counts = false        # Default: false
 ```
 
 **enabled**: Whether to collect interrupt latency metrics.
@@ -109,11 +108,6 @@ enable_counts = false        # Default: false
 - Adds `cpu` labels to queue depth metrics.
 - Increases cardinality significantly on systems with many CPUs.
 - Only enable if per-CPU analysis is specifically needed.
-
-**enable_counts**: Whether to include ISR/DPC count metrics by driver.
-- Tracks total ISR and DPC count per driver.
-- Adds additional cardinality to metrics.
-- Only enable if count analysis is specifically needed.
 
 **Performance Impact**:
 - **Base metrics (enabled=true)**: Low. Suitable for continuous monitoring.

@@ -80,9 +80,6 @@ type PerfInfoConfig struct {
 
 	// Enable per-CPU metrics (default: false, can be high cardinality)
 	EnablePerCPU bool `toml:"enable_per_cpu"`
-
-	// Enable ISR/DPC count metrics (default: false, can be high cardinality)
-	EnableCounts bool `toml:"enable_counts"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -236,7 +233,6 @@ func DefaultConfig() *AppConfig {
 				Enabled:         true,  // Core system-wide metrics enabled by default
 				EnablePerDriver: false, // Per-driver metrics disabled by default
 				EnablePerCPU:    false, // Disabled by default to reduce cardinality
-				EnableCounts:    false, // Disabled by default to reduce cardinality
 			},
 		},
 		Logging: LoggingConfig{

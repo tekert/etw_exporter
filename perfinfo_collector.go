@@ -2,13 +2,13 @@
 package main
 
 import (
-    "sort"
-    "strconv"
-    "sync"
-    "time"
+	"sort"
+	"strconv"
+	"sync"
+	"time"
 
-    "github.com/phuslu/log"
-    "github.com/prometheus/client_golang/prometheus"
+	"github.com/phuslu/log"
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // # PromQL queries
@@ -53,10 +53,6 @@ type PerfInfoInterruptCollector struct {
 	isrDurationBuckets      map[ISRDriverKey]map[float64]int64 // {driver} -> histogram buckets
 	dpcDurationBuckets      map[DPCDriverKey]map[float64]int64 // {driver} -> histogram buckets
 
-	// Optional count metrics (only if enabled)
-	isrCounters map[string]int64 // driver name -> ISR count
-	dpcCounters map[string]int64 // driver name -> DPC count
-
 	// DPC queue tracking
 	dpcQueuedCount   map[uint16]int64 // CPU -> queued count
 	dpcExecutedCount map[uint16]int64 // CPU -> executed count
@@ -83,10 +79,6 @@ type PerfInfoInterruptCollector struct {
 	dpcExecutedCPUDesc   *prometheus.Desc
 	smiGapsDesc          *prometheus.Desc
 	hardPageFaultsDesc   *prometheus.Desc
-
-	// Optional metric descriptors (only created if enabled)
-	isrCountDesc *prometheus.Desc
-	dpcCountDesc *prometheus.Desc
 
 	// Bounded driver tracking (top 50 most active drivers)
 	driverCounters map[string]int64  // driver name -> event count
@@ -159,7 +151,7 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 		dpcExecutedCount:        make(map[uint16]int64, 64),
 		lastEventTime:           make(map[uint16]time.Time, 64),
 		driverCounters:          make(map[string]int64, 100), // Track driver activity for bounded set
-		maxDrivers:              100,                         // Limit to most active drivers
+		maxDrivers:              50,                          // Limit to most active drivers
 		log:                     GetPerfinfoLogger(),
 		lastPruneTime:           time.Now(),
 		pruneInterval:           5 * time.Minute,
@@ -171,12 +163,6 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 	if config.EnablePerDriver {
 		collector.isrDurationBuckets = make(map[ISRDriverKey]map[float64]int64, 50)
 		collector.dpcDurationBuckets = make(map[DPCDriverKey]map[float64]int64, 50)
-	}
-
-	// Initialize count maps only if enabled
-	if config.EnableCounts {
-		collector.isrCounters = make(map[string]int64)
-		collector.dpcCounters = make(map[string]int64)
 	}
 
 	// Initialize histogram buckets
@@ -236,19 +222,6 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 			[]string{"cpu"}, nil)
 	}
 
-	// Create count descriptors only if enabled
-	if config.EnableCounts {
-		collector.isrCountDesc = prometheus.NewDesc(
-			"etw_isr_count_total",
-			"Total number of ISR events by driver",
-			[]string{"image_name"}, nil)
-
-		collector.dpcCountDesc = prometheus.NewDesc(
-			"etw_dpc_count_total",
-			"Total number of DPC events by driver",
-			[]string{"image_name"}, nil)
-	}
-
 	collector.log.Debug().Msg("Interrupt latency collector created")
 	return collector
 }
@@ -277,55 +250,40 @@ func (c *PerfInfoInterruptCollector) Describe(ch chan<- *prometheus.Desc) {
 			ch <- c.dpcExecutedCPUDesc
 		}
 	}
-
-	// Only include count metrics if enabled
-	if c.config.EnableCounts {
-		if c.isrCountDesc != nil {
-			ch <- c.isrCountDesc
-		}
-		if c.dpcCountDesc != nil {
-			ch <- c.dpcCountDesc
-		}
-	}
 }
 
 // Collect implements the prometheus.Collector interface
 func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
-    c.mu.Lock()
-    defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-    // Periodically prune the driver list to maintain a bounded set of top drivers.
-    if time.Since(c.lastPruneTime) > c.pruneInterval {
-        c.pruneDriverMetrics()
-        c.lastPruneTime = time.Now()
-    }
+	// Periodically prune the driver list to maintain a bounded set of top drivers.
+	if time.Since(c.lastPruneTime) > c.pruneInterval {
+		c.pruneDriverMetrics()
+		c.lastPruneTime = time.Now()
+	}
 
-    // System-wide interrupt latency histogram (always enabled)
-    c.collectInterruptLatencyHistogram(ch)
+	// System-wide interrupt latency histogram (always enabled)
+	c.collectInterruptLatencyHistogram(ch)
 
-    // ISR/DPC duration histograms by driver (only if per-driver enabled)
-    if c.config.EnablePerDriver {
-        c.collectISRDurationHistograms(ch)
-        c.collectDPCDurationHistograms(ch)
-    }
+	// ISR/DPC duration histograms by driver (only if per-driver enabled)
+	if c.config.EnablePerDriver {
+		c.collectISRDurationHistograms(ch)
+		c.collectDPCDurationHistograms(ch)
+	}
 
-    // DPC queue counters (always enabled)
-    c.collectDPCCounters(ch)
+	// DPC queue counters (always enabled)
+	c.collectDPCCounters(ch)
 
-    // SMI gap histogram (always enabled for now)
-    c.collectSMIGaps(ch)
+	// SMI gap histogram (always enabled for now)
+	c.collectSMIGaps(ch)
 
-    // Hard page fault counter (always enabled)
-    ch <- prometheus.MustNewConstMetric(
-        c.hardPageFaultsDesc,
-        prometheus.CounterValue,
-        float64(c.hardPageFaultCount),
-    )
-
-    // Optional count metrics
-    if c.config.EnableCounts {
-        c.collectCountMetrics(ch)
-    }
+	// Hard page fault counter (always enabled)
+	ch <- prometheus.MustNewConstMetric(
+		c.hardPageFaultsDesc,
+		prometheus.CounterValue,
+		float64(c.hardPageFaultCount),
+	)
 }
 
 // collectInterruptLatencyHistogram creates the system-wide interrupt latency histogram
@@ -492,33 +450,6 @@ func (c *PerfInfoInterruptCollector) collectSMIGaps(ch chan<- prometheus.Metric)
 	ch <- histogram
 }
 
-// collectCountMetrics creates ISR and DPC count metrics by driver
-func (c *PerfInfoInterruptCollector) collectCountMetrics(ch chan<- prometheus.Metric) {
-	// ISR count metrics by driver
-	if c.isrCountDesc != nil {
-		for driverName, count := range c.isrCounters {
-			ch <- prometheus.MustNewConstMetric(
-				c.isrCountDesc,
-				prometheus.CounterValue,
-				float64(count),
-				driverName,
-			)
-		}
-	}
-
-	// DPC count metrics by driver
-	if c.dpcCountDesc != nil {
-		for driverName, count := range c.dpcCounters {
-			ch <- prometheus.MustNewConstMetric(
-				c.dpcCountDesc,
-				prometheus.CounterValue,
-				float64(count),
-				driverName,
-			)
-		}
-	}
-}
-
 // ProcessISREvent processes an ISR event for latency tracking
 func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16, initialTime time.Time, routineAddress uint64) {
 	c.mu.Lock()
@@ -537,22 +468,17 @@ func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16, 
 	isr.Vector = vector
 	c.pendingISRs[key] = isr
 
-	// Only track per-driver metrics if enabled
-	if c.config.EnablePerDriver || c.config.EnableCounts {
-		// Resolve driver name and track activity for bounded set management
-		driverName := c.resolveDriverNameUnsafe(routineAddress)
-		c.driverCounters[driverName]++
+    // Only track per-driver metrics if enabled
+    if c.config.EnablePerDriver {
+        // Resolve driver name and track activity for bounded set management
+        driverName := c.resolveDriverNameUnsafe(routineAddress)
+        c.driverCounters[driverName]++
+    }
 
-		// Update ISR count if enabled (avoid nil check in critical path)
-		if c.isrCounters != nil {
-			c.isrCounters[driverName]++
-		}
-	}
-
-	// Clean up old pending ISRs periodically (reduce frequency to improve performance)
-	if len(c.pendingISRs)%100 == 0 {
-		c.cleanupOldISRs(initialTime)
-	}
+    // Clean up old pending ISRs periodically (reduce frequency to improve performance)
+    if len(c.pendingISRs)%100 == 0 {
+        c.cleanupOldISRs(initialTime)
+    }
 }
 
 // ProcessDPCEvent processes a DPC event and correlates with ISR for latency calculation
@@ -566,20 +492,13 @@ func (c *PerfInfoInterruptCollector) ProcessDPCEvent(cpu uint16, initialTime tim
 
 	// Only resolve driver name if we need it for per-driver or count metrics
 	var driverName string
-	if c.config.EnablePerDriver || c.config.EnableCounts {
+	if c.config.EnablePerDriver {
 		// Resolve driver name and track activity for bounded set management
 		driverName = c.resolveDriverNameUnsafe(routineAddress)
 		c.driverCounters[driverName]++
 
-		// Update DPC count if enabled (avoid nil check in critical path)
-		if c.dpcCounters != nil {
-			c.dpcCounters[driverName]++
-		}
-
 		// Record DPC duration for per-driver metrics
-		if c.config.EnablePerDriver {
-			c.recordDPCDuration(driverName, durationMicros)
-		}
+		c.recordDPCDuration(driverName, durationMicros)
 	}
 
 	// Find matching ISR on same CPU for latency calculation
@@ -637,135 +556,123 @@ func (c *PerfInfoInterruptCollector) ProcessImageLoadEvent(imageBase, imageSize 
 
 // ProcessHardPageFaultEvent increments the hard page fault counter
 func (c *PerfInfoInterruptCollector) ProcessHardPageFaultEvent() {
-    c.mu.Lock()
-    defer c.mu.Unlock()
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
-    c.hardPageFaultCount++
+	c.hardPageFaultCount++
 }
 
 // resolveDriverNameUnsafe is an optimized version for use within locked contexts
 // Assumes caller already holds the mutex
 func (c *PerfInfoInterruptCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
-    // Check cache first
-    if driverName, exists := c.driverNames[routineAddress]; exists {
-        return driverName
-    }
+	// Check cache first
+	if driverName, exists := c.driverNames[routineAddress]; exists {
+		return driverName
+	}
 
-    // Binary search through image database
-    for imageBase, imageInfo := range c.imageDatabase {
-        if routineAddress >= imageBase && routineAddress < imageBase+imageInfo.ImageSize {
-            driverName := imageInfo.ImageName
+	// Binary search through image database
+	for imageBase, imageInfo := range c.imageDatabase {
+		if routineAddress >= imageBase && routineAddress < imageBase+imageInfo.ImageSize {
+			driverName := imageInfo.ImageName
 
-            // Cache the result for future lookups
-            c.driverNames[routineAddress] = driverName
-            return driverName
-        }
-    }
+			// Cache the result for future lookups
+			c.driverNames[routineAddress] = driverName
+			return driverName
+		}
+	}
 
-    // Unknown driver - cache the result to avoid repeated lookups
-    c.driverNames[routineAddress] = "unknown"
-    return "unknown"
+	// Unknown driver - cache the result to avoid repeated lookups
+	c.driverNames[routineAddress] = "unknown"
+	return "unknown"
 }
 
 // pruneDriverMetrics identifies the top N most active drivers and aggregates the rest into an "other" bucket.
 // This is called periodically from the Collect method to manage metric cardinality.
 func (c *PerfInfoInterruptCollector) pruneDriverMetrics() {
-    if len(c.driverCounters) <= c.maxDrivers {
-        return // No need to prune if we are under the limit
-    }
+	if len(c.driverCounters) <= c.maxDrivers {
+		return // No need to prune if we are under the limit
+	}
 
-    c.log.Debug().Int("count", len(c.driverCounters)).Msg("Pruning driver metrics to top N")
+	c.log.Debug().Int("count", len(c.driverCounters)).Msg("Pruning driver metrics to top N")
 
-    // 1. Create a slice of all drivers and their activity counts for sorting.
-    activities := make([]driverActivity, 0, len(c.driverCounters))
-    for name, count := range c.driverCounters {
-        // "unknown" and "other" are special categories and not subject to pruning.
-        if name == "unknown" || name == "other" {
-            continue
-        }
-        activities = append(activities, driverActivity{name: name, count: count})
-    }
+	// 1. Create a slice of all drivers and their activity counts for sorting.
+	activities := make([]driverActivity, 0, len(c.driverCounters))
+	for name, count := range c.driverCounters {
+		// "unknown" and "other" are special categories and not subject to pruning.
+		if name == "unknown" || name == "other" {
+			continue
+		}
+		activities = append(activities, driverActivity{name: name, count: count})
+	}
 
-    // 2. Sort drivers by activity count, descending.
-    sort.Slice(activities, func(i, j int) bool {
-        return activities[i].count > activities[j].count
-    })
+	// 2. Sort drivers by activity count, descending.
+	sort.Slice(activities, func(i, j int) bool {
+		return activities[i].count > activities[j].count
+	})
 
-    // 3. Identify which drivers to keep and which to prune.
-    driversToKeep := make(map[string]struct{})
-    // We reserve two slots for "unknown" and "other".
-    keepCount := max(c.maxDrivers - 2, 0)
+	// 3. Identify which drivers to keep and which to prune.
+	driversToKeep := make(map[string]struct{})
+	// We reserve two slots for "unknown" and "other".
+	keepCount := max(c.maxDrivers-2, 0)
 
-    if len(activities) > keepCount {
-        for i := 0; i < keepCount; i++ {
-            driversToKeep[activities[i].name] = struct{}{}
-        }
-    } else {
-        // Not enough drivers to prune, so we keep them all.
-        for _, act := range activities {
-            driversToKeep[act.name] = struct{}{}
-        }
-    }
+	if len(activities) > keepCount {
+		for i := range keepCount {
+			driversToKeep[activities[i].name] = struct{}{}
+		}
+	} else {
+		// Not enough drivers to prune, so we keep them all.
+		for _, act := range activities {
+			driversToKeep[act.name] = struct{}{}
+		}
+	}
 
-    driversToPrune := make([]string, 0)
-    for _, act := range activities {
-        if _, keep := driversToKeep[act.name]; !keep {
-            driversToPrune = append(driversToPrune, act.name)
-        }
-    }
+	driversToPrune := make([]string, 0)
+	for _, act := range activities {
+		if _, keep := driversToKeep[act.name]; !keep {
+			driversToPrune = append(driversToPrune, act.name)
+		}
+	}
 
-    if len(driversToPrune) == 0 {
-        return
-    }
+	if len(driversToPrune) == 0 {
+		return
+	}
 
-    c.log.Debug().Int("pruned_count", len(driversToPrune)).Msg("Aggregating pruned drivers into 'other' bucket")
+	c.log.Debug().Int("pruned_count", len(driversToPrune)).Msg("Aggregating pruned drivers into 'other' bucket")
 
-    // 4. Aggregate the metrics of pruned drivers into the "other" category.
-    for _, driverName := range driversToPrune {
-        // Aggregate duration histograms if they are enabled.
-        if c.config.EnablePerDriver {
-            aggregatePrunedHistogram(&c.dpcDurationBuckets, DPCDriverKey{ImageName: driverName}, DPCDriverKey{ImageName: "other"})
-            aggregatePrunedHistogram(&c.isrDurationBuckets, ISRDriverKey{ImageName: driverName}, ISRDriverKey{ImageName: "other"})
-        }
+	// 4. Aggregate the metrics of pruned drivers into the "other" category.
+	for _, driverName := range driversToPrune {
+		// Aggregate duration histograms if they are enabled.
+		if c.config.EnablePerDriver {
+			aggregatePrunedHistogram(&c.dpcDurationBuckets, DPCDriverKey{ImageName: driverName}, DPCDriverKey{ImageName: "other"})
+			aggregatePrunedHistogram(&c.isrDurationBuckets, ISRDriverKey{ImageName: driverName}, ISRDriverKey{ImageName: "other"})
+		}
 
-        // Aggregate counters if they are enabled.
-        if c.config.EnableCounts {
-            if count, exists := c.dpcCounters[driverName]; exists {
-                c.dpcCounters["other"] += count
-                delete(c.dpcCounters, driverName)
-            }
-            if count, exists := c.isrCounters[driverName]; exists {
-                c.isrCounters["other"] += count
-                delete(c.isrCounters, driverName)
-            }
-        }
-
-        // Finally, aggregate the main activity counter and remove the pruned driver.
-        if count, exists := c.driverCounters[driverName]; exists {
-            c.driverCounters["other"] += count
-            delete(c.driverCounters, driverName)
-        }
-    }
+		// Finally, aggregate the main activity counter and remove the pruned driver.
+		if count, exists := c.driverCounters[driverName]; exists {
+			c.driverCounters["other"] += count
+			delete(c.driverCounters, driverName)
+		}
+	}
 }
 
 // aggregatePrunedHistogram is a helper to merge histogram data from a pruned driver into the "other" bucket.
 func aggregatePrunedHistogram[K comparable](
-    histBuckets *map[K]map[float64]int64,
-    prunedKey K,
-    otherKey K,
+	histBuckets *map[K]map[float64]int64,
+	prunedKey K,
+	otherKey K,
 ) {
-    if buckets, exists := (*histBuckets)[prunedKey]; exists {
-        // Ensure the "other" bucket exists before merging.
-        if _, otherExists := (*histBuckets)[otherKey]; !otherExists {
-            (*histBuckets)[otherKey] = make(map[float64]int64)
-        }
-        // Add the counts from the pruned driver to the "other" driver.
-        for bucket, count := range buckets {
-            (*histBuckets)[otherKey][bucket] += count
-        }
-        // Remove the pruned driver's entry.
-        delete(*histBuckets, prunedKey)
-    }
+	if buckets, exists := (*histBuckets)[prunedKey]; exists {
+		// Ensure the "other" bucket exists before merging.
+		if _, otherExists := (*histBuckets)[otherKey]; !otherExists {
+			(*histBuckets)[otherKey] = make(map[float64]int64)
+		}
+		// Add the counts from the pruned driver to the "other" driver.
+		for bucket, count := range buckets {
+			(*histBuckets)[otherKey][bucket] += count
+		}
+		// Remove the pruned driver's entry.
+		delete(*histBuckets, prunedKey)
+	}
 }
 
 // shouldTrackDriver determines if we should track this driver individually
@@ -773,27 +680,27 @@ func aggregatePrunedHistogram[K comparable](
 // Deprecated: This logic is replaced by the periodic pruning mechanism in pruneDriverMetrics.
 // The function is kept for historical reference but is no longer called.
 func (c *PerfInfoInterruptCollector) shouldTrackDriver(driverName string) bool {
-    // Always track unknown and other
-    if driverName == "unknown" || driverName == "other" {
-        return true
-    }
+	// Always track unknown and other
+	if driverName == "unknown" || driverName == "other" {
+		return true
+	}
 
-    // Count current tracked drivers (excluding "unknown" and "other")
-    trackedCount := 0
-    for name := range c.driverCounters {
-        if name != "unknown" && name != "other" {
-            trackedCount++
-        }
-    }
+	// Count current tracked drivers (excluding "unknown" and "other")
+	trackedCount := 0
+	for name := range c.driverCounters {
+		if name != "unknown" && name != "other" {
+			trackedCount++
+		}
+	}
 
-    // If under limit, track it
-    if trackedCount < c.maxDrivers-2 { // Reserve 2 slots for "unknown" and "other"
-        return true
-    }
+	// If under limit, track it
+	if trackedCount < c.maxDrivers-2 { // Reserve 2 slots for "unknown" and "other"
+		return true
+	}
 
-    // If at limit, only track if already being tracked
-    _, alreadyTracked := c.driverCounters[driverName]
-    return alreadyTracked
+	// If at limit, only track if already being tracked
+	_, alreadyTracked := c.driverCounters[driverName]
+	return alreadyTracked
 }
 
 // recordInterruptLatency records a system-wide interrupt latency sample

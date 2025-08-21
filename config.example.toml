@@ -18,7 +18,6 @@
   [collectors.perfinfo]
     enabled = false
     enable_per_cpu = false
-    enable_counts = false
 
 [logging]
   lib_level = "warn"
