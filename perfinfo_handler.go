@@ -56,6 +56,22 @@ func (h *PerfInfoHandler) GetCustomCollector() prometheus.Collector {
 	return h.collector
 }
 
+// finalizeAndClearPendingDPC checks for a pending/previous DPC on a given CPU, processes it
+// if one exists, and clears it from the pending map. The mutex must be held by the caller.
+func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Time) {
+	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
+		// Calculate the duration from the DPC start to the provided end time.
+		durationMicros := float64(endTime.Sub(lastDPC.initialTime).Microseconds())
+
+		// Process the completed DPC event now that we have its duration.
+		h.collector.ProcessDPCEvent(cpu, lastDPC.initialTime, lastDPC.routineAddress, durationMicros)
+
+		// The DPC is no longer pending and its duration has been recorded.
+		// We must remove it from the map to prevent it from being processed again.
+		delete(h.lastDPCPerCPU, cpu)
+	}
+}
+
 // HandleISREvent processes ISR (Interrupt Service Routine) events
 // This handler processes ETW events for interrupt service routines (ISRs).
 // It tracks ISR entry and routine address for latency analysis.
@@ -106,7 +122,7 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	}
 
 	if init, err := helper.GetPropertyInt("InitialTime"); err == nil {
-		initialTime = etw.UnixFiletime(init)
+		initialTime = helper.TimestampFromRaw(init)
 	}
 
 	// Process the ISR event
@@ -157,7 +173,7 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	}
 
 	if init, err := helper.GetPropertyInt("InitialTime"); err == nil {
-		initialTime = etw.UnixFiletime(init)
+		initialTime = helper.TimestampFromRaw(init)
 	} else {
 		return nil // Cannot process without a timestamp
 	}
@@ -165,18 +181,14 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	h.dpcMutex.Lock()
 	defer h.dpcMutex.Unlock()
 
-	// Check if there was a previous DPC on this CPU. If so, its duration is the
-	// time between its start and the start of the current DPC.
-	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
-		// Calculate the duration of the previous DPC.
-		durationMicros := float64(initialTime.Sub(lastDPC.initialTime).Microseconds())
+	// A new DPC event marks the end of any previously pending DPC on the same CPU.
+	// We use the current event's timestamp as the end time for the previous one.
+	// If there was no previous DPC (e.g., after a context switch), this function does nothing.
+	h.finalizeAndClearPendingDPC(cpu, initialTime)
 
-		// Process the completed (previous) DPC event now that we have its duration.
-		h.collector.ProcessDPCEvent(cpu, lastDPC.initialTime, lastDPC.routineAddress, durationMicros)
-	}
-
-	// Store the current DPC as the last one seen on this CPU. Its duration will be
-	// calculated when the *next* DPC on this same CPU arrives. OR when a context switch occurs.
+	// The current DPC is now stored as the new "pending" event. It is NOT lost.
+	// Its duration will be calculated and it will be counted when the *next*
+	// DPC or a context switch occurs on this CPU.
 	h.lastDPCPerCPU[cpu] = pendingDPCInfo{
 		initialTime:    initialTime,
 		routineAddress: routineAddress,
@@ -205,23 +217,14 @@ func (h *PerfInfoHandler) HandleContextSwitch(helper *etw.EventRecordHelper) err
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
 	cpu := helper.EventRec.ProcessorNumber()
-	eventTime := helper.EventRec.EventHeader.UTCTimeStamp()
+	eventTime := helper.Timestamp()
 
 	h.dpcMutex.Lock()
 	defer h.dpcMutex.Unlock()
 
-	// If a DPC was pending on this CPU, the context switch marks its end.
-	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
-		// Calculate the duration from the DPC start to the context switch.
-		durationMicros := float64(eventTime.Sub(lastDPC.initialTime).Microseconds())
-
-		// Process the completed DPC event now that we have its duration.
-		h.collector.ProcessDPCEvent(cpu, lastDPC.initialTime, lastDPC.routineAddress, durationMicros)
-
-		// The DPC is no longer pending and its duration has been recorded.
-		// We remove it from the map to prevent it from being processed again.
-		delete(h.lastDPCPerCPU, cpu)
-	}
+	// A context switch signifies that the DPC queue is idle, marking the end
+	// of any pending DPC on that CPU.
+	h.finalizeAndClearPendingDPC(cpu, eventTime)
 
 	return nil
 }
@@ -297,6 +300,19 @@ func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) er
 	// Process the image load event
 	h.collector.ProcessImageLoadEvent(imageBase, imageSize, fileName)
 
+	return nil
+}
+
+// HandleImageUnloadEvent processes image unload events to remove driver metrics.
+func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
+	var imageBase uint64
+	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
+		imageBase = base
+	} else {
+		return nil // Cannot process without image base
+	}
+
+	h.collector.ProcessImageUnloadEvent(imageBase)
 	return nil
 }
 

@@ -79,7 +79,7 @@ func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error
 	cpu := uint16(helper.EventRec.ProcessorNumber())
 
 	// Timestamp from the event
-	eventTimeNano := helper.EventRec.EventHeader.UTCTimeStamp().UnixNano()
+	eventTimeNano := helper.Timestamp().UnixNano()
 
 	// Calculate context switch interval using atomic operations to avoid allocations and locks.
 	var interval time.Duration

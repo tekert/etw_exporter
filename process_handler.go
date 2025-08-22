@@ -69,7 +69,7 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 	}
 
 	// use the timestamp of the event as LastSeen
-	timestamp := helper.EventRec.EventHeader.UTCTimeStamp()
+	timestamp := helper.Timestamp()
 
 	ph.processCollector.AddProcess(uint32(processID), processName, uint32(parentProcessID), imagePath, timestamp)
 	return nil

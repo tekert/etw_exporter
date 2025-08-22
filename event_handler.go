@@ -38,7 +38,8 @@ type FileEventHandler interface {
 type PerfInfoNtEventHandler interface {
 	HandleISREvent(helper *etw.EventRecordHelper) error
 	HandleDPCEvent(helper *etw.EventRecordHelper) error
-	HandleImageLoadEvent(helper *etw.EventRecordHelper) error     // TODO: this should go to KernelImage handler.
+	HandleImageLoadEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelImage handler.
+	HandleImageUnloadEvent(helper *etw.EventRecordHelper) error
 	HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelPageFault handler.
 }
 
@@ -456,12 +457,17 @@ func (h *EventHandler) routeImageEvents(helper *etw.EventRecordHelper, eventID u
 	}
 
 	switch eventID {
-	case etw.EVENT_TRACE_TYPE_END,
-		etw.EVENT_TRACE_TYPE_DC_START,
+	case etw.EVENT_TRACE_TYPE_DC_START,
 		etw.EVENT_TRACE_TYPE_DC_END,
 		etw.EVENT_TRACE_TYPE_LOAD: // Image Load events
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleImageLoadEvent(helper); err != nil {
+				return err
+			}
+		}
+	case etw.EVENT_TRACE_TYPE_END: // Image Unload event
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleImageUnloadEvent(helper); err != nil {
 				return err
 			}
 		}

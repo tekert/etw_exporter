@@ -86,7 +86,16 @@ var AllProviderGroups = []*ProviderGroup{
 		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
 			etw.EVENT_TRACE_FLAG_THREAD |
 			etw.EVENT_TRACE_FLAG_DISPATCHER,
-		ManifestProviders: []etw.Provider{}, // No manifest providers
+		ManifestProviders: []etw.Provider{
+			{
+				Name: "Microsoft-Windows-Kernel-Process", // For thread process name correlation
+				GUID: *MicrosoftWindowsKernelProcessGUID,
+				// Enable process events: Start (1), Stop (2), Rundown (15)
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x10, // WINEVENT_KEYWORD_PROCESS
+				MatchAllKeyword: 0x0,
+			},
+		},
 		IsEnabled: func(config *CollectorConfig) bool {
 			return config.ThreadCS.Enabled
 		},
