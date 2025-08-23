@@ -18,6 +18,8 @@
   [collectors.perfinfo]
     enabled = false
     enable_per_cpu = false
+    enable_per_driver = false
+    enable_smi_detection = false
 
 [logging]
   lib_level = "warn"
