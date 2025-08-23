@@ -43,6 +43,69 @@ func NewThreadHandler() *ThreadHandler {
 	}
 }
 
+// HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
+// This is a high-performance "fast path" that reads directly from the UserData
+// buffer using known offsets, bypassing the creation of an EventRecordHelper and
+// the associated parsing overhead.
+//
+// CSwitch MOF Layout (V2-V4):
+// - NewThreadId (uint32): offset 0
+// - OldThreadId (uint32): offset 4
+// - NewThreadPriority (int8): offset 8
+// - OldThreadPriority (int8): offset 9
+// - PreviousCState (uint8): offset 10
+// - SpareByte (int8): offset 11
+// - OldThreadWaitReason (int8): offset 12
+// - OldThreadWaitMode (int8): offset 13
+// - OldThreadState (int8): offset 14
+// - OldThreadWaitIdealProcessor (int8): offset 15
+// - NewThreadWaitTime (uint32): offset 16
+// - Reserved (uint32): offset 20
+func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+	// Read properties using direct offsets.
+	newThreadID, err := er.GetUint32At(0)
+	if err != nil {
+		// TODO: import sampler
+		c.log.Error().Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
+		return err
+	}
+	waitReason, err := er.GetInt8At(12)
+	if err != nil {
+		// TODO: import sampler
+		c.log.Error().Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
+		return err
+	}
+
+	// Get CPU number from processor index
+	cpu := er.ProcessorNumber()
+
+	// TODO: make the correct timestamp available to events.
+	// Timestamp from the event header. We must convert it from FILETIME.
+	eventTimeNano := etw.FromFiletime(er.EventHeader.TimeStamp).UnixNano()
+
+	// Calculate context switch interval using atomic operations.
+	var interval time.Duration
+	if lastSwitchNano := c.lastCpuSwitch[cpu].Swap(eventTimeNano); lastSwitchNano > 0 {
+		interval = time.Duration(eventTimeNano - lastSwitchNano)
+	}
+
+	// Get process ID for the NEW thread (incoming thread)
+	var processID uint32
+	if pid, exists := c.threadToProcess.Load(newThreadID); exists {
+		processID = pid.(uint32)
+	}
+
+	// Record context switch in custom collector
+	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, interval)
+
+	// Track thread state transitions
+	waitReasonStr := GetWaitReasonString(uint8(waitReason))
+	c.customCollector.RecordThreadStateTransition("waiting", waitReasonStr)
+	c.customCollector.RecordThreadStateTransition("running", "none")
+
+	return nil
+}
+
 // HandleContextSwitch processes context switch events (CSwitch).
 // This handler processes ETW events from the kernel thread provider for context switches,
 // which occur when the Windows scheduler switches execution from one thread to another.
@@ -71,6 +134,10 @@ func NewThreadHandler() *ThreadHandler {
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
 func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+	// This is now the fallback/slower path. The primary logic has been moved to
+	// HandleContextSwitchRaw for performance. This function will not be called
+	// for CSwitch events due to the routing logic in EventRecordCallback.
+
 	// Parse context switch event data according to CSwitch class documentation
 	newThreadID, _ := helper.GetPropertyUint("NewThreadId")
 	waitReason, _ := helper.GetPropertyInt("OldThreadWaitReason")
@@ -294,6 +361,21 @@ func GetWaitReasonString(waitReason uint8) string {
 		return "WrRundown"
 	default:
 		return "Unknown"
+	}
+}
+
+// GetAllWaitReasonStrings returns a slice of all known, valid wait reason strings.
+// This provides a definitive list for pre-allocating metrics, ensuring that
+// "Unknown" or "Spare" values are not included.
+func GetAllWaitReasonStrings() []string {
+	return []string{
+		"Executive", "FreePage", "PageIn", "PoolAllocation", "DelayExecution",
+		"Suspended", "UserRequest", "WrExecutive", "WrFreePage", "WrPageIn",
+		"WrPoolAllocation", "WrDelayExecution", "WrSuspended", "WrUserRequest",
+		"WrEventPair", "WrQueue", "WrLpcReceive", "WrLpcReply", "WrVirtualMemory",
+		"WrPageOut", "WrRendezvous", "WrCalloutStack", "WrKernel", "WrResource",
+		"WrPushLock", "WrMutex", "WrQuantumEnd", "WrDispatchInt", "WrPreempted",
+		"WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown",
 	}
 }
 
