@@ -20,6 +20,7 @@ type pendingDPCInfo struct {
 // It implements the event handler interfaces needed for interrupt latency tracking
 type PerfInfoHandler struct {
 	collector *PerfInfoInterruptCollector
+	config    *PerfInfoConfig
 	log       log.Logger
 
 	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
@@ -46,6 +47,7 @@ type PerfInfoHandler struct {
 func NewPerfInfoHandler(config *PerfInfoConfig) *PerfInfoHandler {
 	return &PerfInfoHandler{
 		collector:     NewPerfInfoCollector(config),
+		config:        config,
 		log:           GetPerfinfoLogger(),
 		lastDPCPerCPU: make(map[uint16]pendingDPCInfo),
 	}
@@ -74,7 +76,7 @@ func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Ti
 
 // HandleISREvent processes ISR (Interrupt Service Routine) events
 // This handler processes ETW events for interrupt service routines (ISRs).
-// It tracks ISR entry and routine address for latency analysis.
+// / It tracks ISR entry and routine address for latency analysis.
 //
 // ETW Event Details:
 // - Provider: PerfInfo
@@ -100,36 +102,31 @@ func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Ti
 //
 // This handler records ISR entry and routine mapping for driver analysis.
 func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
-	event := helper.EventRec
+	cpu := helper.EventRec.ProcessorNumber()
 
-	// Extract ISR event properties using optimized methods
-	var cpu uint16
-	var vector uint16
-	var routineAddress uint64
-	var initialTime time.Time
-
-	// Get CPU from the proper processor number field
-	cpu = event.ProcessorNumber()
-
-	// Extract properties using proper helper methods for kernel events
-	// These property names are based on the actual MOF schema for ISR events
-	if routineAddr, err := helper.GetPropertyUint("Routine"); err == nil {
-		routineAddress = routineAddr
+	routineAddress, err := helper.GetPropertyUint("Routine")
+	if err != nil {
+		return err
 	}
 
-	if vectorVal, err := helper.GetPropertyUint("Vector"); err == nil {
-		vector = uint16(vectorVal)
+	vector, err := helper.GetPropertyUint("Vector")
+	if err != nil {
+		return err
 	}
 
-	if init, err := helper.GetPropertyInt("InitialTime"); err == nil {
-		initialTime = helper.TimestampFromRaw(init)
+	initialTimeVal, err := helper.GetPropertyInt("InitialTime")
+	if err != nil {
+		return err
 	}
+	initialTime := helper.TimestampFrom(initialTimeVal)
 
 	// Process the ISR event
-	h.collector.ProcessISREvent(cpu, vector, initialTime, routineAddress)
+	h.collector.ProcessISREvent(cpu, uint16(vector), initialTime, routineAddress)
 
 	return nil
 }
+
+var times int64 // ! TESTING log lib crash
 
 // HandleDPCEvent processes DPC (Deferred Procedure Call) events
 // This handler processes ETW events for deferred procedure calls (DPCs).
@@ -145,7 +142,7 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 // [EventType{66, 68, 69}, EventTypeName{"ThreadDPC", "DPC", "TimerDPC"}]
 //
 //	class DPC : PerfInfo {
-//	  object InitialTime;   // WmiTime = UINT64 = FILETIME if Wnode.ClientContext == 1
+//	  object InitialTime;   // WmiTime = This changed based on Wnode.ClientContext (Tested)
 //	  uint32 Routine;
 //	};
 //
@@ -155,42 +152,53 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 //
 // This handler records DPC entry and routine mapping for driver analysis.
 func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
-	event := helper.EventRec
+	cpu := helper.EventRec.ProcessorNumber()
+	eventTime := helper.Timestamp()
 
-	// Extract DPC event properties using optimized methods
-	var cpu uint16
-	var routineAddress uint64
-	var initialTime time.Time
-
-	// Get CPU from the proper processor number field
-	cpu = event.ProcessorNumber()
-
-	// Extract properties using proper helper methods for kernel events
-	if routineAddr, err := helper.GetPropertyUint("Routine"); err == nil {
-		routineAddress = routineAddr
-	} else {
-		return nil // Cannot process without routine address
+	routineAddress, err := helper.GetPropertyUint("Routine")
+	if err != nil {
+		return nil // Cannot process without routine address.
 	}
 
-	if init, err := helper.GetPropertyInt("InitialTime"); err == nil {
-		initialTime = helper.TimestampFromRaw(init)
-	} else {
+	// NOTE: this will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
+	// Is usally ~30 nanoseconds earlier than eventTime
+	initialTimeTicks, err := helper.GetPropertyInt("InitialTime")
+	if err != nil {
 		return nil // Cannot process without a timestamp
 	}
+	// This prop will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
+	// We must use the dedicated TimestampFrom converter, which calculates the absolute
+	// time based on the session's BootTime.
+	initialTime := helper.TimestampFrom(initialTimeTicks)
 
+	// ! TESTING crash
+	// //initialTime := etw.FromFiletime(initialTimeTicks)
+	// fromq := helper.FromQPC(initialTimeTicks)
+	// times++
+	// if times%10 == 0 {
+	// 	log.Info().Int64("initialTimeTicks", initialTimeTicks).Msg("TEST")
+	// 	log.Info().Int64("EventRec.Timestamp", helper.EventRec.EventHeader.TimeStamp).Msg("TEST")
+	// 	log.Info().Time("event_time", eventTime).Msg("TEST")
+	// 	log.Info().Time("initialTime", initialTime).Msg("TEST")
+	// 	log.Info().Time("fromq", fromq).Msg("TEST")
+	// 	os.Exit(1)
+	// }
+
+	// The eventTime is the most accurate timestamp for when the DPC *started*.
+	// We use this for latency calculations.
 	h.dpcMutex.Lock()
 	defer h.dpcMutex.Unlock()
 
 	// A new DPC event marks the end of any previously pending DPC on the same CPU.
 	// We use the current event's timestamp as the end time for the previous one.
 	// If there was no previous DPC (e.g., after a context switch), this function does nothing.
-	h.finalizeAndClearPendingDPC(cpu, initialTime)
+	h.finalizeAndClearPendingDPC(cpu, eventTime)
 
 	// The current DPC is now stored as the new "pending" event. It is NOT lost.
 	// Its duration will be calculated and it will be counted when the *next*
 	// DPC or a context switch occurs on this CPU.
 	h.lastDPCPerCPU[cpu] = pendingDPCInfo{
-		initialTime:    initialTime,
+		initialTime:    initialTime, // Use the property's timestamp as the start time.
 		routineAddress: routineAddress,
 	}
 
@@ -242,6 +250,40 @@ func (h *PerfInfoHandler) HandleThreadStart(helper *etw.EventRecordHelper) error
 // HandleThreadEnd is a stub implementation to satisfy the ThreadNtEventHandler interface.
 func (h *PerfInfoHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	return nil // PerfInfoHandler does not process this event.
+}
+
+// HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
+// This is a high-performance "fast path" that reads directly from the UserData
+// buffer using known offsets, bypassing the creation of an EventRecordHelper and
+// the associated parsing overhead.
+//
+// CSwitch MOF Layout (V2-V4):
+// - NewThreadId (uint32): offset 0
+// - OldThreadId (uint32): offset 4
+// - NewThreadPriority (int8): offset 8
+// - OldThreadPriority (int8): offset 9
+// - PreviousCState (uint8): offset 10
+// - SpareByte (int8): offset 11
+// - OldThreadWaitReason (int8): offset 12
+// - OldThreadWaitMode (int8): offset 13
+// - OldThreadState (int8): offset 14
+// - OldThreadWaitIdealProcessor (int8): offset 15
+// - NewThreadWaitTime (uint32): offset 16
+// - Reserved (uint32): offset 20
+func (h *PerfInfoHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+	// The only properties we need from the CSwitch event are its timestamp and
+	// the CPU it occurred on, which are available in the event header.
+	cpu := er.ProcessorNumber()
+	eventTime := er.Timestamp()
+
+	h.dpcMutex.Lock()
+	defer h.dpcMutex.Unlock()
+
+	// A context switch signifies that the DPC queue is idle, marking the end
+	// of any pending DPC on that CPU.
+	h.finalizeAndClearPendingDPC(cpu, eventTime)
+
+	return nil
 }
 
 // HandleImageLoadEvent processes image load events for driver mapping
@@ -313,6 +355,11 @@ func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) 
 	}
 
 	h.collector.ProcessImageUnloadEvent(imageBase)
+	return nil
+}
+
+// HandleSampleProfileEvent processes SampledProfile events for SMI gap detection.
+func (h *PerfInfoHandler) HandleSampleProfileEvent(helper *etw.EventRecordHelper) error {
 	return nil
 }
 

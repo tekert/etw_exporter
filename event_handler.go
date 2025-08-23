@@ -21,6 +21,7 @@ type ProcessEventHandler interface {
 }
 
 type ThreadNtEventHandler interface {
+	HandleContextSwitchRaw(record *etw.EventRecord) error
 	HandleContextSwitch(helper *etw.EventRecordHelper) error
 	HandleReadyThread(helper *etw.EventRecordHelper) error
 	HandleThreadStart(helper *etw.EventRecordHelper) error
@@ -41,6 +42,7 @@ type PerfInfoNtEventHandler interface {
 	HandleImageLoadEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelImage handler.
 	HandleImageUnloadEvent(helper *etw.EventRecordHelper) error
 	HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelPageFault handler.
+	HandleSampleProfileEvent(helper *etw.EventRecordHelper) error
 }
 
 // EventHandler encapsulates state and logic for ETW event processing
@@ -164,27 +166,23 @@ func (h *EventHandler) RegisterPerfInfoEventHandler(handler PerfInfoNtEventHandl
 
 // EventRecordCallback is called for each EVENT_RECORD
 func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
-	// Perform any record-level processing here if needed
-	// Return true to continue processing, false to stop
+	// Fast-path for high-frequency events. We identify them here and route them
+	// to specialized raw handlers, bypassing the expensive EventRecordHelper creation.
+	// We return 'false' to prevent further processing by the goetw consumer.
 
-	// // From https://learn.microsoft.com/en-us/windows/win32/api/evntprov/ns-evntprov-event_descriptor
-	// // Channel values below 16 are reserved for use by Microsoft to enable special treatment
-	// // by the ETW runtime. Channel values 16 and above will be ignored by the ETW runtime
-	// // (treated the same as channel 0) and can be given user-defined semantics.
-	// //
-	// // But we still receive these events, we will ignore them here too.
-	// if record.EventHeader.EventDescriptor.Channel >= 16 {
-	// 	h.log.Trace().
-	// 		Uint8("channel", record.EventHeader.EventDescriptor.Channel).
-	// 		Str("provider_guid", record.EventHeader.ProviderId.String()).
-	// 		Uint16("event_id", record.EventHeader.EventDescriptor.Id).
-	// 		Msg("Received event with reserved channel value, skipping processing")
+	// CSwitch Event: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}, Opcode 36
+	if record.EventHeader.ProviderId.Equals(ThreadKernelGUID) &&
+		record.EventHeader.EventDescriptor.Opcode == 36 {
 
-	// 	return false // Skip non-applicable channels
-	// }
+		debugCounter.Inc(36, "CSwitch-Raw")
+		for _, handler := range h.threadEventHandlers {
+			// We ignore the error here for performance. The raw handler should log it.
+			_ = handler.HandleContextSwitchRaw(record)
+		}
+		return false // Stop processing, we've handled it.
+	}
 
-	// TODO: if event is mof and we dont need it, we can skip it here.
-
+	// For all other events, continue to the next callback stage.
 	return true
 }
 
@@ -210,7 +208,7 @@ func (h *EventHandler) EventPreparedCallback(helper *etw.EventRecordHelper) erro
 func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 	// Extract event information for routing
 	eventRecord := helper.EventRec
-	providerGUID := eventRecord.EventHeader.ProviderId
+	providerGUID := &eventRecord.EventHeader.ProviderId
 	var eventID uint16 = 0
 	if helper.EventRec.IsMof() {
 		eventID = uint16(eventRecord.EventHeader.EventDescriptor.Opcode)
@@ -392,6 +390,7 @@ func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID 
 
 	switch eventID {
 	case 36: // CSwitch
+		debugCounter.Inc(eventID, "CSwitch")
 		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleContextSwitch(helper); err != nil {
 				return err
@@ -433,15 +432,25 @@ func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventI
 	}
 
 	switch eventID {
-	case 67: // MOF
+	case 67: // ISR
+		debugCounter.Inc(eventID, "ISR")
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleISREvent(helper); err != nil {
 				return err
 			}
 		}
-	case 66, 68, 69: // MOF
+	case 66, 68, 69: // DPC
+		debugCounter.Inc(eventID, "DPC")
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleDPCEvent(helper); err != nil {
+				return err
+			}
+		}
+
+	case 46: // Sample Profile
+		debugCounter.Inc(eventID, "SampleProfile")
+		for _, handler := range h.perfinfoHandlers {
+			if err := handler.HandleSampleProfileEvent(helper); err != nil {
 				return err
 			}
 		}

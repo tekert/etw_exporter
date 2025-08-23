@@ -56,6 +56,14 @@ func (s *SessionManager) Start() error {
 		return fmt.Errorf("session manager already running")
 	}
 
+	// Ensure we have the necessary privileges for kernel sessions
+	// etw.EVENT_TRACE_FLAG_PROFILE provider.
+	// ! TESTING
+	if s.config.PerfInfo.Enabled {
+		etw.EnableProfilingPrivileges()
+		s.log.Warn().Msg("SE_SYSTEM_PROFILE_NAME Privilege enabled for profiling")
+	}
+
 	s.log.Info().Msg("Starting ETW session manager...")
 
 	// Get SystemConfig events first if using manifest providers
@@ -304,7 +312,6 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	return nil
 }
 
-
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.
 func (s *SessionManager) startStaleProcessCleanup() {
 	//	const cleanupInterval = 5 * time.Minute
@@ -338,7 +345,13 @@ func (s *SessionManager) startStaleProcessCleanup() {
 
 			// 2. Wait for a moment to allow the rundown events to be processed.
 			log.Debug().Dur("wait_time", rundownWait).Msg("Waiting for rundown events to be processed")
-			time.Sleep(rundownWait)
+			select {
+			case <-time.After(rundownWait):
+				// Wait finished, continue to cleanup.
+			case <-s.ctx.Done():
+				log.Debug().Msg("Shutdown signaled during rundown wait, stopping cleanup.")
+				return // Exit the goroutine immediately.
+			}
 
 			// 3. Clean up processes that were not "seen" during the rundown.
 			pc := GetGlobalProcessCollector()

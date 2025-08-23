@@ -80,6 +80,10 @@ type PerfInfoConfig struct {
 
 	// Enable per-CPU metrics (default: false, can be high cardinality)
 	EnablePerCPU bool `toml:"enable_per_cpu"`
+
+	// Enable SMI gap detection using SampledProfile events (default: false).
+	// This requires enabling the 'PROFILE' kernel group, which has a minor performance impact.
+	EnableSMIDetection bool `toml:"enable_smi_detection"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -230,9 +234,10 @@ func DefaultConfig() *AppConfig {
 				Enabled: false,
 			},
 			PerfInfo: PerfInfoConfig{
-				Enabled:         true,  // Core system-wide metrics enabled by default
-				EnablePerDriver: false, // Per-driver metrics disabled by default
-				EnablePerCPU:    false, // Disabled by default to reduce cardinality
+				Enabled:            true,  // Core system-wide metrics enabled by default
+				EnablePerDriver:    false, // Per-driver metrics disabled by default
+				EnablePerCPU:       false, // Disabled by default to reduce cardinality
+				EnableSMIDetection: false, // Disabled by default as it requires PROFILE kernel group
 			},
 		},
 		Logging: LoggingConfig{

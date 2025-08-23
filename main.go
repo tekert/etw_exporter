@@ -24,7 +24,10 @@ var (
 
 // TODO(tekert):
 //  - Memory collector
-//  - Interrupt to process latency
+//  - Interrupt to process latency (Almost done 75%)
+//  - Network collector
+//  - Skip MOF Opcodes we dont need, and also Manifest provider using IDFilter on EnableProvider.
+//
 // link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (exelent article)
 
 func main() {
@@ -85,14 +88,14 @@ func main() {
 		log.Fatal().Err(err).Msg("❌ Invalid configuration")
 	}
 
+	// TODO: automatically pick enabled groups and print them, no hardcoding.
 	log.Info().
 		Str("version", version).
 		Bool("disk_io_enabled", config.Collectors.DiskIO.Enabled).
 		Bool("disk_io_track_info", config.Collectors.DiskIO.TrackDiskInfo).
 		Bool("threadcs_enabled", config.Collectors.ThreadCS.Enabled).
-		Bool("interrupt_latency_enabled", config.Collectors.PerfInfo.Enabled).
-		Bool("interrupt_latency_per_cpu", config.Collectors.PerfInfo.EnablePerCPU).
-		Bool("interrupt_latency_counts", config.Collectors.PerfInfo.EnableCounts).
+		Bool("perfinfo_enabled", config.Collectors.PerfInfo.Enabled).
+		Bool("perfinfo_per_cpu", config.Collectors.PerfInfo.EnablePerCPU).
 		Str("listen_address", config.Server.ListenAddress).
 		Str("metrics_path", config.Server.MetricsPath).
 		Msg("Starting ETW Exporter")
@@ -100,6 +103,8 @@ func main() {
 	// Create context for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	debugCounter = NewDebugCounter(ctx) // ! testing
 
 	// Set up signal handling
 	sigChan := make(chan os.Signal, 1)
@@ -163,7 +168,7 @@ func main() {
 	log.Info().Msg("🛑 Received shutdown signal, shutting down gracefully...")
 
 	// Start graceful shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 
 	log.Debug().Msg("Shutting down HTTP server...")

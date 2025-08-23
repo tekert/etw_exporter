@@ -16,19 +16,21 @@ type ProviderGroup struct {
 // Pre-defined GUIDs for performance (no string comparisons)
 // https://learn.microsoft.com/en-us/windows/win32/etw/nt-kernel-logger-constants
 var (
-	// SystemConfig GUID for hardware configuration events
-	SystemConfigGUID = etw.MustParseGUID("{01853a65-418f-4f36-aefc-dc0f1d2fd235}") // SystemConfig
 
-	// Manifest provider GUIDs - Modern providers with better event parsing
+	// # Manifest provider GUIDs - Modern providers with better event parsing
+
 	MicrosoftWindowsKernelDiskGUID    = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
 	MicrosoftWindowsKernelProcessGUID = etw.MustParseGUID("{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}") // Microsoft-Windows-Kernel-Process
 	MicrosoftWindowsKernelFileGUID    = etw.MustParseGUID("{edd08927-9cc4-4e65-b970-c2560fb5c289}") // Microsoft-Windows-Kernel-File
 
-	// Kernel provider GUIDs for context switches (these require kernel session)
-	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread
+	// # MOF Providers (NT  Kernel Logger) - require kernel session
 
-	// Kernel session MOF class GUIDs for interrupt latency tracking
-	// Based on MOF documentation:
+	// SystemConfig GUID for hardware configuration events (MOF)
+	SystemConfigGUID = etw.MustParseGUID("{01853a65-418f-4f36-aefc-dc0f1d2fd235}") // SystemConfig
+
+	// Kernel provider GUIDs for context switches (these require kernel session)
+	// [Guid("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}"), EventVersion(2)]
+	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread V2
 
 	// PerfInfo MOF class - handles ISR, DPC, and system call events
 	// [Guid("{ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}"), EventVersion(2)]
@@ -108,7 +110,8 @@ var AllProviderGroups = []*ProviderGroup{
 			etw.EVENT_TRACE_FLAG_DPC | // PerfInfo
 			etw.EVENT_TRACE_FLAG_IMAGE_LOAD | // Image
 			etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // PageFault
-			etw.EVENT_TRACE_FLAG_CSWITCH, // Thread V2 (Used for DPC duration calculation)
+			etw.EVENT_TRACE_FLAG_CSWITCH,  // Thread V2 (Used for DPC duration calculation)
+			//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
 		ManifestProviders: []etw.Provider{}, // No manifest providers
 		IsEnabled: func(config *CollectorConfig) bool {
 			return config.PerfInfo.Enabled

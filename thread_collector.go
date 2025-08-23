@@ -1,6 +1,8 @@
 package main
 
 import (
+	"runtime"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,16 +29,19 @@ type ThreadStateKey struct {
 //
 // All metrics are designed for low cardinality to maintain performance at scale.
 type ThreadCSCollector struct {
-	// Atomic counters for high-frequency operations
-	contextSwitchesPerCPU     map[uint16]*int64         // CPU -> context switch count
-	contextSwitchesPerProcess map[uint32]*int64         // PID -> context switch count
-	threadStates              map[ThreadStateKey]*int64 // {state, waitReason} -> count
+	// Per-CPU data structures for lock-free access on the hot path.
+	// Slices are indexed by CPU number.
+	contextSwitchesPerCPU  []*int64
+	contextSwitchIntervals []*IntervalStats
 
-	// Context switch interval tracking
-	contextSwitchIntervals map[uint16][]float64 // CPU -> interval durations (seconds)
+	// Concurrent maps for shared data.
+	contextSwitchesPerProcess sync.Map // key: uint32 (PID), value: *int64
 
-	// Synchronization
-	mu  sync.RWMutex
+	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
+	threadStateCounters []*int64
+	stateKeyToIndex     map[ThreadStateKey]int
+	indexToStateKey     []ThreadStateKey
+
 	log log.Logger
 
 	// Metric Descriptors
@@ -51,7 +56,7 @@ type ThreadMetricsData struct {
 	ContextSwitchesPerCPU     map[uint16]int64
 	ContextSwitchesPerProcess map[uint32]ProcessContextSwitches
 	ThreadStates              map[ThreadStateKey]int64
-	ContextSwitchIntervals    map[uint16]IntervalStats
+	ContextSwitchIntervals    map[uint16]*IntervalStats // Use pointer to avoid copying the lock
 }
 
 // ProcessContextSwitches holds context switch data for a process
@@ -63,21 +68,74 @@ type ProcessContextSwitches struct {
 
 // IntervalStats holds statistical data for context switch intervals
 type IntervalStats struct {
+	mu      sync.Mutex // Protects access to the fields below
 	Count   int64
 	Sum     float64
-	Buckets map[float64]int64 // histogram buckets
+	Buckets []int64 // Use a slice for O(1) index access on the hot path
+}
+
+// Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
+var csIntervalBuckets = []float64{
+	0.001, 0.002, 0.004, 0.008, 0.016,
+	0.032, 0.064, 0.128, 0.256, 0.512,
+	1.024, 2.048, 4.096, 8.192, 16.384,
 }
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
 // This collector aggregates thread-related ETW events and exposes them as Prometheus metrics
-// following the custom collector pattern for optimal performance and correctness.
 func NewThreadCSCollector() *ThreadCSCollector {
+	numCPU := runtime.NumCPU()
+
+	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
+	csPerCPU := make([]*int64, numCPU)
+	csIntervals := make([]*IntervalStats, numCPU)
+	for i := range numCPU {
+		csPerCPU[i] = new(int64)
+		csIntervals[i] = &IntervalStats{
+			// Pre-allocate the slice to match the number of buckets
+			Buckets: make([]int64, len(csIntervalBuckets)),
+		}
+	}
+
+	// Pre-build structures for allocation-free thread state tracking.
+	// The set of states and wait reasons is small and fixed.
+	states := []string{"created", "running", "waiting", "terminated"}
+	waitReasons := GetAllWaitReasonStrings()
+	waitReasons = append(waitReasons, "none") // For non-waiting states
+
+	stateKeyToIndex := make(map[ThreadStateKey]int)
+	indexToStateKey := make([]ThreadStateKey, 0)
+	idx := 0
+	for _, state := range states {
+		if state == "waiting" {
+			for _, reason := range waitReasons {
+				if reason != "none" {
+					key := ThreadStateKey{State: state, WaitReason: reason}
+					stateKeyToIndex[key] = idx
+					indexToStateKey = append(indexToStateKey, key)
+					idx++
+				}
+			}
+		} else {
+			key := ThreadStateKey{State: state, WaitReason: "none"}
+			stateKeyToIndex[key] = idx
+			indexToStateKey = append(indexToStateKey, key)
+			idx++
+		}
+	}
+	threadStateCounters := make([]*int64, len(indexToStateKey))
+	for i := range threadStateCounters {
+		threadStateCounters[i] = new(int64)
+	}
+
 	return &ThreadCSCollector{
-		contextSwitchesPerCPU:     make(map[uint16]*int64),
-		contextSwitchesPerProcess: make(map[uint32]*int64),
-		threadStates:              make(map[ThreadStateKey]*int64),
-		contextSwitchIntervals:    make(map[uint16][]float64),
-		log:                       GetThreadLogger(),
+		contextSwitchesPerCPU:  csPerCPU,
+		contextSwitchIntervals: csIntervals,
+		threadStateCounters:    threadStateCounters,
+		stateKeyToIndex:        stateKeyToIndex,
+		indexToStateKey:        indexToStateKey,
+		// sync.Maps are ready to use from their zero value
+		log: GetThreadLogger(),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -117,10 +175,7 @@ func (c *ThreadCSCollector) Describe(ch chan<- *prometheus.Desc) {
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
 func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Collect current data snapshot
+	// Collect current data snapshot. No global lock is needed anymore.
 	data := c.collectData()
 
 	// Create context switches per CPU metrics
@@ -146,10 +201,10 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Create context switch interval histograms
 	for cpu, stats := range data.ContextSwitchIntervals {
-		// Convert buckets from int64 to uint64 for Prometheus
-		buckets := make(map[float64]uint64)
-		for bucket, count := range stats.Buckets {
-			buckets[bucket] = uint64(count)
+		// Convert the bucket slice to the map format required by Prometheus
+		buckets := make(map[float64]uint64, len(csIntervalBuckets))
+		for i, count := range stats.Buckets {
+			buckets[csIntervalBuckets[i]] = uint64(count)
 		}
 
 		// Create cumulative histogram
@@ -181,19 +236,21 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 		ContextSwitchesPerCPU:     make(map[uint16]int64),
 		ContextSwitchesPerProcess: make(map[uint32]ProcessContextSwitches),
 		ThreadStates:              make(map[ThreadStateKey]int64),
-		ContextSwitchIntervals:    make(map[uint16]IntervalStats),
+		ContextSwitchIntervals:    make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
 	}
 
 	// Collect CPU context switches
 	for cpu, countPtr := range c.contextSwitchesPerCPU {
 		if countPtr != nil {
-			data.ContextSwitchesPerCPU[cpu] = atomic.LoadInt64(countPtr)
+			data.ContextSwitchesPerCPU[uint16(cpu)] = atomic.LoadInt64(countPtr)
 		}
 	}
 
-	// Collect process context switches
+	// Collect process context switches using sync.Map.Range
 	processCollector := GetGlobalProcessCollector()
-	for pid, countPtr := range c.contextSwitchesPerProcess {
+	c.contextSwitchesPerProcess.Range(func(key, val any) bool {
+		pid := key.(uint32)
+		countPtr := val.(*int64)
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
 			if processName, isKnown := processCollector.GetProcessName(pid); isKnown {
@@ -205,60 +262,34 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 				}
 			}
 		}
-	}
+		return true
+	})
 
-	// Collect thread states
-	for stateKey, countPtr := range c.threadStates {
-		if countPtr != nil {
-			data.ThreadStates[stateKey] = atomic.LoadInt64(countPtr)
+	// Collect thread states from the pre-allocated slice
+	for i, key := range c.indexToStateKey {
+		count := atomic.LoadInt64(c.threadStateCounters[i])
+		if count > 0 {
+			data.ThreadStates[key] = count
 		}
 	}
 
-	// Collect and calculate context switch interval statistics
-	for cpu, intervals := range c.contextSwitchIntervals {
-		if len(intervals) > 0 {
-			stats := c.calculateIntervalStats(intervals)
-			data.ContextSwitchIntervals[cpu] = stats
+	// Collect context switch interval statistics
+	for cpu, stats := range c.contextSwitchIntervals {
+		if stats != nil {
+			stats.mu.Lock()
+			// Create a deep copy of the stats under the per-CPU lock
+			copiedStats := &IntervalStats{
+				Count:   stats.Count,
+				Sum:     stats.Sum,
+				Buckets: make([]int64, len(csIntervalBuckets)),
+			}
+			copy(copiedStats.Buckets, stats.Buckets)
+			stats.mu.Unlock()
+			data.ContextSwitchIntervals[uint16(cpu)] = copiedStats
 		}
 	}
 
 	return data
-}
-
-// calculateIntervalStats computes histogram statistics from interval data.
-// This includes count, sum, and histogram buckets for context switch intervals.
-func (c *ThreadCSCollector) calculateIntervalStats(intervals []float64) IntervalStats {
-	stats := IntervalStats{
-		Count:   int64(len(intervals)),
-		Sum:     0,
-		Buckets: make(map[float64]int64),
-	}
-
-	// Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
-	buckets := []float64{
-		0.001, 0.002, 0.004, 0.008, 0.016,
-		0.032, 0.064, 0.128, 0.256, 0.512,
-		1.024, 2.048, 4.096, 8.192, 16.384,
-	}
-
-	// Initialize all buckets to zero
-	for _, bucket := range buckets {
-		stats.Buckets[bucket] = 0
-	}
-
-	// Calculate sum and count observations in each bucket
-	for _, interval := range intervals {
-		stats.Sum += interval
-
-		// Count observations in each bucket (cumulative histogram)
-		for _, bucket := range buckets {
-			if interval <= bucket {
-				stats.Buckets[bucket]++
-			}
-		}
-	}
-
-	return stats
 }
 
 // RecordContextSwitch records a context switch event.
@@ -274,38 +305,43 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 	processID uint32,
 	interval time.Duration) {
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Record context switch per CPU
-	if c.contextSwitchesPerCPU[cpu] == nil {
-		c.contextSwitchesPerCPU[cpu] = new(int64)
+	// Record context switch per CPU (lock-free atomic operation)
+	// A bounds check is good practice, though ETW should provide valid CPU numbers.
+	if int(cpu) < len(c.contextSwitchesPerCPU) {
+		atomic.AddInt64(c.contextSwitchesPerCPU[cpu], 1)
 	}
-	atomic.AddInt64(c.contextSwitchesPerCPU[cpu], 1)
 
-	// Record context switch per process (only for known processes with valid names)
+	// Record context switch per process (using sync.Map)
 	if processID > 0 {
-		// Check if process is known by the global process collector
 		processCollector := GetGlobalProcessCollector()
 		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
-			if c.contextSwitchesPerProcess[processID] == nil {
-				c.contextSwitchesPerProcess[processID] = new(int64)
-			}
-			atomic.AddInt64(c.contextSwitchesPerProcess[processID], 1)
+			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
+			atomic.AddInt64(val.(*int64), 1)
 		}
 	}
 
 	// Record context switch interval, converted to milliseconds
-	if interval > 0 {
+	if interval > 0 && int(cpu) < len(c.contextSwitchIntervals) {
 		intervalMs := float64(interval.Nanoseconds()) / 1_000_000.0
-		c.contextSwitchIntervals[cpu] = append(c.contextSwitchIntervals[cpu], intervalMs)
 
-		// Limit interval history to prevent memory growth
-		if len(c.contextSwitchIntervals[cpu]) > 1000 {
-			// Keep the most recent 800 intervals
-			copy(c.contextSwitchIntervals[cpu], c.contextSwitchIntervals[cpu][200:])
-			c.contextSwitchIntervals[cpu] = c.contextSwitchIntervals[cpu][:800]
+		// Use a fine-grained lock for this specific CPU's histogram
+		stats := c.contextSwitchIntervals[cpu]
+		stats.mu.Lock()
+
+		// Increment cumulative counters
+		stats.Count++
+		stats.Sum += intervalMs
+
+		// Optimized bucket update using binary search.
+		// This is much faster than a linear scan for every event.
+		// Find the index of the first bucket that the interval fits into.
+		idx := sort.Search(len(csIntervalBuckets), func(i int) bool { return csIntervalBuckets[i] >= intervalMs })
+
+		// Increment all buckets from that index onwards using fast slice indexing.
+		for i := idx; i < len(csIntervalBuckets); i++ {
+			stats.Buckets[i]++
 		}
+		stats.mu.Unlock()
 	}
 }
 
@@ -315,14 +351,11 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 // - state: The thread state (e.g., "ready", "waiting", "running", "terminated")
 // - waitReason: The wait reason if state is "waiting", otherwise "none"
 func (c *ThreadCSCollector) RecordThreadStateTransition(state, waitReason string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
+	// This hot path is now allocation-free and lock-free.
 	stateKey := ThreadStateKey{State: state, WaitReason: waitReason}
-	if c.threadStates[stateKey] == nil {
-		c.threadStates[stateKey] = new(int64)
+	if idx, ok := c.stateKeyToIndex[stateKey]; ok {
+		atomic.AddInt64(c.threadStateCounters[idx], 1)
 	}
-	atomic.AddInt64(c.threadStates[stateKey], 1)
 }
 
 // RecordThreadCreation records a thread creation event.

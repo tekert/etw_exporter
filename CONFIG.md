@@ -91,6 +91,7 @@ enabled = true           # Default: true
 enabled = true               # Default: true
 enable_per_driver = false    # Default: false
 enable_per_cpu = false       # Default: false
+enable_smi_detection = false # Default: false
 ```
 
 **enabled**: Whether to collect interrupt latency metrics.
@@ -108,6 +109,9 @@ enable_per_cpu = false       # Default: false
 - Adds `cpu` labels to queue depth metrics.
 - Increases cardinality significantly on systems with many CPUs.
 - Only enable if per-CPU analysis is specifically needed.
+
+**enable_smi_detection**: Experimental, requieres profiling to be active.
+- TODO: explanation
 
 **Performance Impact**:
 - **Base metrics (enabled=true)**: Low. Suitable for continuous monitoring.

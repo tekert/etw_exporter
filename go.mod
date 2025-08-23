@@ -5,7 +5,7 @@ go 1.24.5
 
 require (
 	github.com/BurntSushi/toml v1.5.0
-	github.com/phuslu/log v1.0.119
+	github.com/phuslu/log v1.0.120-0.20250817074608-99590f16ff47
 	github.com/prometheus/client_golang v1.23.0
 	github.com/tekert/goetw v0.7.4
 )

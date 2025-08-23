@@ -145,7 +145,7 @@ func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
 			writer = consoleWriter
 		}
 	}
-
+	
 	// TODO: (report the author). see if can isolate the problem
 	// TODO: Delete this, not needed, is a problem with the library
 	// https://github.com/phuslu/log/issues/105
