@@ -66,16 +66,17 @@ type PerfInfoInterruptCollector struct {
 	driverNames   map[uint64]string    // Routine address -> driver name (cached)
 
 	// Performance metrics data
-	isrToDpcLatencyBuckets map[float64]int64                  // Histogram buckets for system-wide latency
-	dpcDurationBuckets     map[DPCDriverKey]map[float64]int64 // {driver} -> histogram buckets
+	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
+	isrToDpcLatencyCount   uint64
+	isrToDpcLatencySum     float64
+	dpcDurationHistograms  map[DPCDriverKey]*histogramData // {driver} -> histogram data
 
 	// DPC queue tracking
 	dpcQueuedCount   map[uint16]int64 // CPU -> queued count
 	dpcExecutedCount map[uint16]int64 // CPU -> executed count
 
-	// SMI gap detection
-	lastEventTime map[uint16]time.Time // CPU -> last event timestamp
-	smiGapBuckets map[float64]int64    // Histogram buckets for SMI gaps
+	// SMI gap detection (placeholder for future implementation)
+	smiGapsDesc *prometheus.Desc
 
 	// Hard page fault counter
 	hardPageFaultCount int64
@@ -93,7 +94,6 @@ type PerfInfoInterruptCollector struct {
 	dpcExecutedDesc     *prometheus.Desc
 	dpcQueuedCPUDesc    *prometheus.Desc
 	dpcExecutedCPUDesc  *prometheus.Desc
-	smiGapsDesc         *prometheus.Desc
 	hardPageFaultsDesc  *prometheus.Desc
 
 	// Driver last seen tracking for stale metric cleanup
@@ -116,20 +116,16 @@ type ISREvent struct {
 	Vector         uint16
 }
 
-// ISRDriverKey represents a key for ISR duration tracking by driver
-type ISRDriverKey struct {
-	ImageName string
-}
-
 // DPCDriverKey represents a key for DPC duration tracking by driver
 type DPCDriverKey struct {
 	ImageName string
 }
 
-// driverActivity is used for sorting drivers by event count during pruning.
-type driverActivity struct {
-	name  string
-	count int64
+// histogramData holds the data for a single Prometheus histogram.
+type histogramData struct {
+	buckets map[float64]int64
+	count   uint64
+	sum     float64
 }
 
 // ImageInfo holds driver image information for address resolution
@@ -137,19 +133,17 @@ type ImageInfo struct {
 	ImageBase uint64
 	ImageSize uint64
 	FileName  string // Full path
-	ImageName string // Extracted driver name (e.g., "tcpip")
+	ImageName string // Extracted driver name (e.g., "tcpip.sys")
 }
 
 // Histogram bucket definitions optimized for Windows latency ranges
 var (
 	// System-wide ISR to DPC latency buckets (microseconds)
 	ISRToDPCLatencyBuckets = []float64{1, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 5000}
-
 	// DPC execution time buckets (microseconds)
 	DPCDurationBuckets = []float64{1, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 4000, 10000}
-
-	// SMI gap detection buckets (microseconds)
-	SMIGapBuckets = []float64{50, 100, 200, 500, 1000, 2000, 5000}
+	// SMI gap detection buckets (microseconds) - for future use
+	SMIGapBuckets = []float64{5000, 10000, 20000, 50000, 100000, 200000, 500000}
 )
 
 // NewPerfInfoCollector creates a new interrupt latency collector
@@ -160,10 +154,10 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 		imageDatabase:          make(map[uint64]ImageInfo, 1000), // Pre-size for typical driver count
 		driverNames:            make(map[uint64]string, 2000),    // Cached driver name lookups
 		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
+		isrToDpcLatencyCount:   0,
+		isrToDpcLatencySum:     0.0,
 		dpcQueuedCount:         make(map[uint16]int64, 64), // Pre-size for max CPU count
 		dpcExecutedCount:       make(map[uint16]int64, 64),
-		lastEventTime:          make(map[uint16]time.Time, 64),
-		smiGapBuckets:          make(map[float64]int64, len(SMIGapBuckets)),
 		driverLastSeen:         make(map[string]time.Time, 100), // Track driver activity for bounded set
 		driverTimeout:          15 * time.Minute,                // Prune drivers inactive for 15 mins
 		log:                    GetPerfinfoLogger(),
@@ -175,15 +169,12 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 
 	// Initialize per-driver histogram buckets only if per-driver metrics are enabled
 	if config.EnablePerDriver {
-		collector.dpcDurationBuckets = make(map[DPCDriverKey]map[float64]int64, 50)
+		collector.dpcDurationHistograms = make(map[DPCDriverKey]*histogramData, 50)
 	}
 
 	// Initialize histogram buckets
 	for _, bucket := range ISRToDPCLatencyBuckets {
 		collector.isrToDpcLatencyBuckets[bucket] = 0
-	}
-	for _, bucket := range SMIGapBuckets {
-		collector.smiGapBuckets[bucket] = 0
 	}
 
 	// These two metrics isrToDpcLatencyDesc and dpcExecutedDesc
@@ -213,11 +204,13 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 			[]string{"image_name"}, nil)
 	}
 
-	// TODO: or delete.
-	collector.smiGapsDesc = prometheus.NewDesc(
-		"etw_smi_gaps_microseconds",
-		"SMI gap detection in microseconds",
-		nil, nil)
+	// TODO: Define SMI metric but do not collect data for it yet.
+	if config.EnableSMIDetection {
+		collector.smiGapsDesc = prometheus.NewDesc(
+			"etw_smi_gaps_microseconds",
+			"SMI gap detection in microseconds, based on SampledProfile event gaps.",
+			nil, nil)
+	}
 
 	collector.hardPageFaultsDesc = prometheus.NewDesc(
 		"etw_hard_pagefaults_total",
@@ -247,8 +240,12 @@ func (c *PerfInfoInterruptCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.isrToDpcLatencyDesc
 	ch <- c.dpcQueuedDesc
 	ch <- c.dpcExecutedDesc
-	ch <- c.smiGapsDesc
 	ch <- c.hardPageFaultsDesc
+
+	// Placeholder for SMI gap metric
+	if c.smiGapsDesc != nil {
+		ch <- c.smiGapsDesc
+	}
 
 	// Only include per-driver metrics if enabled
 	if c.config.EnablePerDriver && c.dpcDurationDesc != nil {
@@ -288,8 +285,10 @@ func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
 	// DPC queue counters (always enabled)
 	c.collectDPCCounters(ch)
 
-	// SMI gap histogram (always enabled for now)
-	c.collectSMIGaps(ch)
+	// SMI gap histogram (only if enabled)
+	if c.config.EnableSMIDetection {
+		c.collectSMIGaps(ch)
+	}
 
 	// Hard page fault counter (always enabled)
 	ch <- prometheus.MustNewConstMetric(
@@ -302,29 +301,20 @@ func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
 // collectISRToDPCLatencyHistogram creates the system-wide ISR to DPC latency histogram
 func (c *PerfInfoInterruptCollector) collectISRToDPCLatencyHistogram(ch chan<- prometheus.Metric) {
 	cumulativeBuckets := make(map[float64]uint64)
-	var sampleCount uint64
-	var sampleSum float64
 	var cumulativeCount uint64
 
 	// Iterate over the defined buckets in order to calculate cumulative counts
 	for _, bucketBound := range ISRToDPCLatencyBuckets {
 		count := uint64(c.isrToDpcLatencyBuckets[bucketBound])
-		if count > 0 {
-			// This approximation of sum is incorrect for a true histogram, but we'll
-			// keep it to only fix the cumulative count issue. A better approach
-			// would be to store and use the actual sum of observed values.
-			sampleSum += float64(bucketBound) * float64(count)
-			sampleCount += count
-		}
 		cumulativeCount += count
 		cumulativeBuckets[bucketBound] = cumulativeCount
 	}
 
-	// Create histogram metric
+	// Create histogram metric with accurate count and sum
 	histogram := prometheus.MustNewConstHistogram(
 		c.isrToDpcLatencyDesc,
-		sampleCount,
-		sampleSum,
+		c.isrToDpcLatencyCount,
+		c.isrToDpcLatencySum,
 		cumulativeBuckets,
 	)
 
@@ -333,28 +323,22 @@ func (c *PerfInfoInterruptCollector) collectISRToDPCLatencyHistogram(ch chan<- p
 
 // collectISRDurationHistograms creates ISR duration histograms by driver
 func (c *PerfInfoInterruptCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric) {
-	for driverKey, driverBuckets := range c.dpcDurationBuckets {
+	for driverKey, hd := range c.dpcDurationHistograms {
 		cumulativeBuckets := make(map[float64]uint64)
-		var sampleCount uint64
-		var sampleSum float64
 		var cumulativeCount uint64
 
 		// Iterate over the defined buckets in order to calculate cumulative counts
 		for _, bucketBound := range DPCDurationBuckets {
-			count := uint64(driverBuckets[bucketBound])
-			if count > 0 {
-				sampleSum += float64(bucketBound) * float64(count)
-				sampleCount += count
-			}
+			count := uint64(hd.buckets[bucketBound])
 			cumulativeCount += count
 			cumulativeBuckets[bucketBound] = cumulativeCount
 		}
 
-		if sampleCount > 0 {
+		if hd.count > 0 {
 			histogram := prometheus.MustNewConstHistogram(
 				c.dpcDurationDesc,
-				sampleCount,
-				sampleSum,
+				hd.count,
+				hd.sum,
 				cumulativeBuckets,
 				driverKey.ImageName,
 			)
@@ -412,32 +396,16 @@ func (c *PerfInfoInterruptCollector) collectDPCCounters(ch chan<- prometheus.Met
 	)
 }
 
-// collectSMIGaps creates SMI gap histogram.
+// collectSMIGaps returns a zero-value histogram as SMI detection is currently disabled.
 func (c *PerfInfoInterruptCollector) collectSMIGaps(ch chan<- prometheus.Metric) {
-	cumulativeBuckets := make(map[float64]uint64)
-	var sampleCount uint64
-	var sampleSum float64
-	var cumulativeCount uint64
-
-	// Iterate over the defined buckets in order to calculate cumulative counts
-	for _, bucketBound := range SMIGapBuckets {
-		count := uint64(c.smiGapBuckets[bucketBound])
-		if count > 0 {
-			// This is an approximation of the sum.
-			sampleSum += float64(bucketBound) * float64(count)
-			sampleCount += count
-		}
-		cumulativeCount += count
-		cumulativeBuckets[bucketBound] = cumulativeCount
-	}
-
+	// This is a placeholder. The SMI detection logic has been removed for now.
+	// We will return a zero-value histogram to maintain metric presence.
 	histogram := prometheus.MustNewConstHistogram(
 		c.smiGapsDesc,
-		sampleCount,
-		sampleSum,
-		cumulativeBuckets,
+		0,
+		0,
+		map[float64]uint64{},
 	)
-
 	ch <- histogram
 }
 
@@ -453,10 +421,7 @@ func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16, 
 
 	// Store pending ISR for later correlation with DPC (using a pooled object)
 	isr := isrEventPool.Get().(*ISREvent)
-	isr.InitialTime = initialTime
-	isr.RoutineAddress = routineAddress
-	isr.CPU = cpu
-	isr.Vector = vector
+	*isr = ISREvent{InitialTime: initialTime, RoutineAddress: routineAddress, CPU: cpu, Vector: vector}
 	c.pendingISRs[key] = isr
 
 	// Only track per-driver metrics if enabled
@@ -511,7 +476,7 @@ func (c *PerfInfoInterruptCollector) ProcessDPCEvent(cpu uint16, initialTime tim
 
 	// If we found a matching ISR, record the latency
 	if matchedISR != nil {
-		latencyMicros := float64(closestTime.Nanoseconds()) / 1000.0
+		latencyMicros := float64(closestTime.Microseconds())
 		c.recordISRToDPCLatency(latencyMicros)
 
 		// Remove the matched ISR to prevent duplicate matches
@@ -519,26 +484,6 @@ func (c *PerfInfoInterruptCollector) ProcessDPCEvent(cpu uint16, initialTime tim
 		// Return the ISREvent to the pool for reuse
 		isrEventPool.Put(matchedISR)
 	}
-}
-
-// ProcessTimelineEvent is called for high-frequency events to detect time gaps.
-func (c *PerfInfoInterruptCollector) ProcessTimelineEvent(cpu uint16, currentTime time.Time) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if lastTime, exists := c.lastEventTime[cpu]; exists && !lastTime.IsZero() {
-		gap := currentTime.Sub(lastTime)
-
-		// A threshold to filter out normal inter-event delays. Gaps below this
-		// are expected and not indicative of an SMI. 50us is a common starting point.
-		const minGapThreshold = 50 * time.Microsecond
-		if gap > minGapThreshold {
-			c.recordSMIGap(float64(gap.Microseconds()))
-		}
-	}
-
-	// Always update the last event time for this CPU.
-	c.lastEventTime[cpu] = currentTime
 }
 
 // ProcessImageLoadEvent processes image load events to build driver database
@@ -651,27 +596,19 @@ func (c *PerfInfoInterruptCollector) removeDriverMetrics(driverName string) {
 
 	// Remove from histogram data if per-driver metrics are enabled
 	if c.config.EnablePerDriver {
-		delete(c.dpcDurationBuckets, DPCDriverKey{ImageName: driverName})
-	}
-}
-
-// recordSMIGap records a detected SMI gap duration into the histogram buckets.
-func (c *PerfInfoInterruptCollector) recordSMIGap(durationMicros float64) {
-	for _, bucket := range SMIGapBuckets {
-		if durationMicros <= bucket {
-			c.smiGapBuckets[bucket]++
-			return
-		}
+		delete(c.dpcDurationHistograms, DPCDriverKey{ImageName: driverName})
 	}
 }
 
 // recordISRToDPCLatency records a system-wide ISR to DPC latency sample
 func (c *PerfInfoInterruptCollector) recordISRToDPCLatency(latencyMicros float64) {
+	c.isrToDpcLatencyCount++
+	c.isrToDpcLatencySum += latencyMicros
 	// Find appropriate bucket
 	for _, bucket := range ISRToDPCLatencyBuckets {
 		if latencyMicros <= bucket {
 			c.isrToDpcLatencyBuckets[bucket]++
-			break
+			return
 		}
 	}
 }
@@ -680,19 +617,26 @@ func (c *PerfInfoInterruptCollector) recordISRToDPCLatency(latencyMicros float64
 func (c *PerfInfoInterruptCollector) recordDPCDuration(driverName string, durationMicros float64) {
 	key := DPCDriverKey{ImageName: driverName}
 
-	// Initialize buckets for this driver if needed
-	if _, exists := c.dpcDurationBuckets[key]; !exists {
-		c.dpcDurationBuckets[key] = make(map[float64]int64)
-		for _, bucket := range DPCDurationBuckets {
-			c.dpcDurationBuckets[key][bucket] = 0
+	// Get or create histogram data for this driver
+	hd, exists := c.dpcDurationHistograms[key]
+	if !exists {
+		hd = &histogramData{
+			buckets: make(map[float64]int64, len(DPCDurationBuckets)),
+			count:   0,
+			sum:     0.0,
 		}
+		c.dpcDurationHistograms[key] = hd
 	}
+
+	// Update histogram data
+	hd.count++
+	hd.sum += durationMicros
 
 	// Find appropriate bucket
 	for _, bucket := range DPCDurationBuckets {
 		if durationMicros <= bucket {
-			c.dpcDurationBuckets[key][bucket]++
-			break
+			hd.buckets[bucket]++
+			return
 		}
 	}
 }
