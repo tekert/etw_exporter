@@ -174,7 +174,6 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	if record.EventHeader.ProviderId.Equals(ThreadKernelGUID) &&
 		record.EventHeader.EventDescriptor.Opcode == 36 {
 
-		debugCounter.Inc(36, "CSwitch-Raw")
 		for _, handler := range h.threadEventHandlers {
 			// We ignore the error here for performance. The raw handler should log it.
 			_ = handler.HandleContextSwitchRaw(record)
@@ -389,8 +388,7 @@ func (h *EventHandler) routeThreadEvents(helper *etw.EventRecordHelper, eventID 
 	}
 
 	switch eventID {
-	case 36: // CSwitch
-		debugCounter.Inc(eventID, "CSwitch")
+	case 36: // CSwitch (not used here, handled in raw path)
 		for _, handler := range h.threadEventHandlers {
 			if err := handler.HandleContextSwitch(helper); err != nil {
 				return err
@@ -433,14 +431,12 @@ func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventI
 
 	switch eventID {
 	case 67: // ISR
-		debugCounter.Inc(eventID, "ISR")
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleISREvent(helper); err != nil {
 				return err
 			}
 		}
 	case 66, 68, 69: // DPC
-		debugCounter.Inc(eventID, "DPC")
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleDPCEvent(helper); err != nil {
 				return err
@@ -448,7 +444,6 @@ func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventI
 		}
 
 	case 46: // Sample Profile
-		debugCounter.Inc(eventID, "SampleProfile")
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleSampleProfileEvent(helper); err != nil {
 				return err

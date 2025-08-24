@@ -139,11 +139,11 @@ type ImageInfo struct {
 // Histogram bucket definitions optimized for Windows latency ranges
 var (
 	// System-wide ISR to DPC latency buckets (microseconds)
-	ISRToDPCLatencyBuckets = []float64{1, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 5000}
+	ISRToDPCLatencyBuckets = prometheus.ExponentialBuckets(1.0, 5.0, 11)
 	// DPC execution time buckets (microseconds)
-	DPCDurationBuckets = []float64{1, 5, 10, 25, 50, 100, 200, 500, 1000, 2000, 4000, 10000}
+	DPCDurationBuckets = prometheus.ExponentialBuckets(1.0, 5.0, 12)
 	// SMI gap detection buckets (microseconds) - for future use
-	SMIGapBuckets = []float64{5000, 10000, 20000, 50000, 100000, 200000, 500000}
+	SMIGapBuckets = prometheus.ExponentialBucketsRange(5000.0, 500000.0, 7)
 )
 
 // NewPerfInfoCollector creates a new interrupt latency collector
@@ -274,23 +274,23 @@ func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
 		c.lastPruneTime = time.Now()
 	}
 
-	// System-wide interrupt latency histogram (always enabled)
+	// System-wide interrupt latency histogram
 	c.collectISRToDPCLatencyHistogram(ch)
 
-	// ISR/DPC duration histograms by driver (only if per-driver enabled)
+	// ISR/DPC duration histograms by driver
 	if c.config.EnablePerDriver {
 		c.collectDPCDurationHistograms(ch)
 	}
 
-	// DPC queue counters (always enabled)
+	// DPC queue counters
 	c.collectDPCCounters(ch)
 
-	// SMI gap histogram (only if enabled)
+	// SMI gap histogram (only if enabled) // TODO
 	if c.config.EnableSMIDetection {
 		c.collectSMIGaps(ch)
 	}
 
-	// Hard page fault counter (always enabled)
+	// Hard page fault counter
 	ch <- prometheus.MustNewConstMetric(
 		c.hardPageFaultsDesc,
 		prometheus.CounterValue,
@@ -410,7 +410,8 @@ func (c *PerfInfoInterruptCollector) collectSMIGaps(ch chan<- prometheus.Metric)
 }
 
 // ProcessISREvent processes an ISR event for latency tracking
-func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16, initialTime time.Time, routineAddress uint64) {
+func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16,
+	initialTime time.Time, routineAddress uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

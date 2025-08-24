@@ -19,6 +19,8 @@ var (
 	metricsOnce sync.Once
 )
 
+// TODO: move this to systemconfig collector
+
 // InitMetrics initializes all metrics with proper labels
 func InitMetrics() {
 	metricsOnce.Do(func() {

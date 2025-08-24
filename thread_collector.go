@@ -69,11 +69,7 @@ type IntervalStats struct {
 }
 
 // Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
-var csIntervalBuckets = []float64{
-	0.001, 0.002, 0.004, 0.008, 0.016,
-	0.032, 0.064, 0.128, 0.256, 0.512,
-	1.024, 2.048, 4.096, 8.192, 16.384,
-}
+var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
 func NewThreadCSCollector() *ThreadCSCollector {
