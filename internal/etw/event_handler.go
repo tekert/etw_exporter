@@ -120,8 +120,8 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		// Request the necessary metrics from the system config collector.
 		systemConfigCollector := ksystemconfig.GetGlobalSystemConfigCollector()
 		systemConfigCollector.RequestMetrics(
-			"etw_physical_disk_info",
-			"etw_logical_disk_info",
+			ksystemconfig.PhysicalDiskInfoMetricName,
+			ksystemconfig.LogicalDiskInfoMetricName,
 		)
 
 	}

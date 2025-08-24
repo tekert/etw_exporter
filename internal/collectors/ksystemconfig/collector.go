@@ -10,6 +10,12 @@ import (
 	"etw_exporter/internal/logger"
 )
 
+// Metric names exported by the SystemConfigCollector.
+const (
+	PhysicalDiskInfoMetricName = "etw_physical_disk_info"
+	LogicalDiskInfoMetricName  = "etw_logical_disk_info"
+)
+
 // PhysicalDiskInfo holds static physical disk information.
 type PhysicalDiskInfo struct {
 	DiskNumber   uint32
@@ -56,12 +62,12 @@ func GetGlobalSystemConfigCollector() *SystemConfigCollector {
 			requestedMetrics: make(map[string]bool),
 
 			physicalDiskInfoDesc: prometheus.NewDesc(
-				"etw_physical_disk_info",
+				PhysicalDiskInfoMetricName,
 				"Physical disk information",
 				[]string{"disk", "manufacturer"}, nil,
 			),
 			logicalDiskInfoDesc: prometheus.NewDesc(
-				"etw_logical_disk_info",
+				LogicalDiskInfoMetricName,
 				"Logical disk information",
 				[]string{"disk", "drive_letter", "file_system"}, nil,
 			),
@@ -75,19 +81,33 @@ func GetGlobalSystemConfigCollector() *SystemConfigCollector {
 // exactly once when the first metric is requested.
 func (sc *SystemConfigCollector) RequestMetrics(metricNames ...string) {
 	sc.mu.Lock()
-	defer sc.mu.Unlock()
 
 	metricsWereRequested := false
 	for _, name := range metricNames {
-		if !sc.requestedMetrics[name] {
-			sc.requestedMetrics[name] = true
+		var desc *prometheus.Desc
+		switch name {
+		case PhysicalDiskInfoMetricName:
+			desc = sc.physicalDiskInfoDesc
+		case LogicalDiskInfoMetricName:
+			desc = sc.logicalDiskInfoDesc
+		default:
+			sc.log.Warn().Str("metric", name).Msg("Unknown system config metric requested.")
+			continue
+		}
+
+		key := desc.String()
+		if !sc.requestedMetrics[key] {
+			sc.requestedMetrics[key] = true
 			metricsWereRequested = true
 			sc.log.Info().Str("metric", name).Msg("System config metric has been requested.")
 		}
 	}
 
+	needRegister := metricsWereRequested && len(sc.requestedMetrics) > 0
+	sc.mu.Unlock()
+
 	// If any new metrics were requested, ensure the collector is registered.
-	if metricsWereRequested && len(sc.requestedMetrics) > 0 {
+	if needRegister {
 		sc.registerOnce.Do(func() {
 			prometheus.MustRegister(sc)
 			sc.log.Info().Msg("SystemConfigCollector registered with Prometheus.")
