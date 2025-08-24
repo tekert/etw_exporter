@@ -8,15 +8,15 @@
 [server]
   listen_address = "localhost:9189"
   metrics_path = "/metrics"
+  pprof_enabled = true
 
 [collectors]
   [collectors.disk_io]
     enabled = true
-    track_disk_info = true
   [collectors.threadcs]
-    enabled = true
-  [collectors.perfinfo]
     enabled = false
+  [collectors.perfinfo]
+    enabled = true
     enable_per_cpu = false
     enable_per_driver = false
     enable_smi_detection = false
@@ -72,5 +72,5 @@
     [logging.outputs.eventlog]
       source = "ETW Exporter"
       id = 1000
-      host = "localhost"
+      host = ""
       async = false

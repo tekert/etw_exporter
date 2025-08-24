@@ -51,6 +51,11 @@ metrics_path = "/metrics"   # Default: "/metrics"
 - Must start with `/`
 - Example: `"/metrics"` serves metrics at `http://host:port/metrics`
 
+**pprof_enabled**: Whether to enable the Go pprof debugging endpoints.
+- Default: `true`
+- When enabled, the pprof server runs on `localhost:6060`.
+- This is useful for performance profiling and debugging. It is recommended to disable this in production environments if the port is exposed externally.
+
 ### Collectors Configuration
 
 The `[collectors]` section enables and configures different ETW event collectors.
@@ -60,23 +65,17 @@ The `[collectors]` section enables and configures different ETW event collectors
 ```toml
 [collectors.disk_io]
 enabled = true           # Default: true
-track_disk_info = true   # Default: true
 ```
 
 **enabled**: Whether to collect disk I/O events.
 - When enabled, tracks disk read/write operations with detailed metrics
 - Performance impact: Low to moderate depending on disk activity
 
-**track_disk_info**: Whether to collect additional disk information.
-- Includes disk model, size, partition information from SystemConfig events
-- Provides context for understanding disk topology
-- Minimal performance impact
-
 #### ThreadCS Collector
 
 ```toml
 [collectors.threadcs]
-enabled = true           # Default: true
+enabled = false           # Default: false
 ```
 
 **enabled**: Whether to collect thread context switch events.
@@ -323,7 +322,7 @@ type = "eventlog"
 enabled = false
 
 [logging.outputs.eventlog]
-source = "ETW_Exporter"       # Default: "ETW_Exporter"
+source = "ETW Exporter"       # Default: "ETW Exporter"
 id = 1000                     # Default: 1000
 host = ""                     # Default: local machine
 async = false                 # Default: false

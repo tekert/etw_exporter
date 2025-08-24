@@ -1,5 +1,5 @@
 // log.go
-package main
+package logger
 
 import (
 	"bytes"
@@ -9,18 +9,10 @@ import (
 	"path/filepath"
 	"time"
 
+	"etw_exporter/internal/config"
+
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
-)
-
-var (
-	// Module-specific loggers
-	modDiskIOLogger    log.Logger // Disk I/O collector logger
-	modThreadLogger    log.Logger // ThreadCS collector logger
-	modInterruptLogger log.Logger // Interrupt latency collector logger
-	modHandlerLogger   log.Logger // Event handler logger
-	modProcessLogger   log.Logger // Process tracker logger
-	modSessionLogger   log.Logger // ETW session manager logger
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -103,7 +95,7 @@ func (f GlogFormatter) Formatter(w io.Writer, a *log.FormatterArgs) (int, error)
 }
 
 // createConsoleWriter creates a console writer based on configuration
-func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
+func createConsoleWriter(config *config.ConsoleConfig) (log.Writer, error) {
 	var baseWriter io.Writer
 	switch config.Writer {
 	case "stdout":
@@ -145,7 +137,7 @@ func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
 			writer = consoleWriter
 		}
 	}
-	
+
 	// TODO: (report the author). see if can isolate the problem
 	// TODO: Delete this, not needed, is a problem with the library
 	// https://github.com/phuslu/log/issues/105
@@ -160,7 +152,7 @@ func createConsoleWriter(config *ConsoleConfig) (log.Writer, error) {
 }
 
 // createFileWriter creates a file writer based on configuration
-func createFileWriter(config *FileConfig) (log.Writer, error) {
+func createFileWriter(config *config.FileConfig) (log.Writer, error) {
 	// Ensure directory exists if requested
 	if config.EnsureFolder {
 		dir := filepath.Dir(config.Filename)
@@ -191,7 +183,7 @@ func createFileWriter(config *FileConfig) (log.Writer, error) {
 }
 
 // createSyslogWriter creates a syslog writer based on configuration
-func createSyslogWriter(config *SyslogConfig) (log.Writer, error) {
+func createSyslogWriter(config *config.SyslogConfig) (log.Writer, error) {
 	baseWriter := &log.SyslogWriter{
 		Network:  config.Network,
 		Address:  config.Address,
@@ -210,7 +202,7 @@ func createSyslogWriter(config *SyslogConfig) (log.Writer, error) {
 }
 
 // createEventlogWriter creates an eventlog writer based on configuration
-func createEventlogWriter(config *EventlogConfig) (log.Writer, error) {
+func createEventlogWriter(config *config.EventlogConfig) (log.Writer, error) {
 	baseWriter := &log.EventlogWriter{
 		Source: config.Source,
 		ID:     uintptr(config.ID),
@@ -227,7 +219,7 @@ func createEventlogWriter(config *EventlogConfig) (log.Writer, error) {
 }
 
 // createWriter creates a log.Writer based on the output configuration
-func createWriter(output LogOutput) (log.Writer, error) {
+func createWriter(output config.LogOutput) (log.Writer, error) {
 	if !output.Enabled {
 		return nil, nil
 	}
@@ -263,7 +255,7 @@ func createWriter(output LogOutput) (log.Writer, error) {
 }
 
 // createMultiWriter creates a multi-writer that outputs to multiple destinations
-func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
+func createMultiWriter(outputs []config.LogOutput) (log.Writer, error) {
 	var writers []log.Writer
 
 	for _, output := range outputs {
@@ -295,27 +287,15 @@ func createMultiWriter(outputs []LogOutput) (log.Writer, error) {
 	return &multiWriter, nil
 }
 
-func createLogger(config LoggingConfig, writer log.Writer, contextStr string) log.Logger {
-	return log.Logger{
-		Level:        parseLogLevel(config.Defaults.Level),
-		Caller:       0, // Disable caller for performance
-		TimeField:    config.Defaults.TimeField,
-		TimeFormat:   mapTimeFormat(config.Defaults.TimeFormat),
-		TimeLocation: parseTimeLocation(config.Defaults.TimeLocation),
-		Writer:       writer,
-		Context:      log.NewContext(nil).Str("module", contextStr).Value(),
-	}
-}
-
-// ConfigureLogging configures the global logger and module-specific loggers
-func ConfigureLogging(config LoggingConfig) error {
+// ConfigureLogging configures the global DefaultLogger with user configuration
+func ConfigureLogging(config config.LoggingConfig) error {
 	// Create a multi-writer that handles all configured outputs
 	multiWriter, err := createMultiWriter(config.Outputs)
 	if err != nil {
 		return err
 	}
 
-	// Configure the default logger (used by main application)
+	// Configure the default logger (used by main application and as base for component loggers)
 	log.DefaultLogger = log.Logger{
 		Level:        parseLogLevel(config.Defaults.Level),
 		Caller:       config.Defaults.Caller,
@@ -325,45 +305,36 @@ func ConfigureLogging(config LoggingConfig) error {
 		Writer:       multiWriter,
 	}
 
-	// Configure module-specific loggers using the same multi-writer
-	// This allows all modules to use configured console/file outputs
-	modDiskIOLogger = createLogger(config, multiWriter, "H-diskio")
-	modThreadLogger = createLogger(config, multiWriter, "H-threadcs")
-	modInterruptLogger = createLogger(config, multiWriter, "H-interrupt")
-	modHandlerLogger = createLogger(config, multiWriter, "eventhandler")
-	modProcessLogger = createLogger(config, multiWriter, "H-process")
-	modSessionLogger = createLogger(config, multiWriter, "etwsession")
-
 	// Configure ETW library logging
 	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
 		return fmt.Errorf("failed to configure ETW library logging: %w", err)
 	}
 
+	log.Info().
+		Str("app_level", config.Defaults.Level).
+		Str("lib_level", config.LibLevel).
+		Int("outputs", len(config.Outputs)).
+		Msg("Loggers configured")
+
 	return nil
 }
 
-func GetDiskIOLogger() log.Logger {
-	return modDiskIOLogger
-}
-
-func GetThreadLogger() log.Logger {
-	return modThreadLogger
-}
-
-func GetPerfinfoLogger() log.Logger {
-	return modInterruptLogger
-}
-
-func GetProcessLogger() log.Logger {
-	return modProcessLogger
-}
-
-func GetSessionLogger() log.Logger {
-	return modSessionLogger
-}
-
-func GetEventLogger() log.Logger {
-	return modHandlerLogger
+// NewLoggerWithContext creates a new logger by copying the global DefaultLogger
+// (which contains all user configuration) and adding component-specific context.
+// This should be called after ConfigureLogging has been called to ensure
+// the DefaultLogger is properly configured.
+func NewLoggerWithContext(component string) log.Logger {
+	// Create a copy to avoid modifying the original logger
+	baseLogger := log.DefaultLogger
+	return log.Logger{
+		Level:        baseLogger.Level,
+		Caller:       0, // Disable caller for component loggers to avoid confusion
+		TimeField:    baseLogger.TimeField,
+		TimeFormat:   baseLogger.TimeFormat,
+		TimeLocation: baseLogger.TimeLocation,
+		Writer:       baseLogger.Writer,
+		Context:      log.NewContext(baseLogger.Context).Str("component", component).Value(),
+	}
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration

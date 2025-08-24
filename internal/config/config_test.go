@@ -1,4 +1,4 @@
-package main
+package config
 
 import (
 	"os"
@@ -97,8 +97,10 @@ listen_address = ":8080"
 metrics_path = "/custom"
 
 [collectors.disk_io]
+enabled = true
+
+[collectors.perfinfo]
 enabled = false
-track_disk_info = false
 `,
 			validate: func(t *testing.T, c *AppConfig) {
 				if c.Server.ListenAddress != ":8080" {
@@ -107,8 +109,8 @@ track_disk_info = false
 				if c.Server.MetricsPath != "/custom" {
 					t.Errorf("Expected /custom, got %s", c.Server.MetricsPath)
 				}
-				if c.Collectors.DiskIO.Enabled {
-					t.Error("Expected DiskIO to be disabled")
+				if !c.Collectors.DiskIO.Enabled {
+					t.Error("Expected DiskIO to be enabled")
 				}
 			},
 		},

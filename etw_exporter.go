@@ -1,0 +1,143 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	_ "net/http/pprof" // For pprof server
+	"os/signal"
+	"syscall"
+	"time"
+
+	plog "github.com/phuslu/log"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"etw_exporter/internal/config"
+
+	etwmain "etw_exporter/internal/etw"
+)
+
+// ETWExporter encapsulates the core components of the application.
+type ETWExporter struct {
+	config       *config.AppConfig
+	etwSession   *etwmain.SessionManager
+	httpServer   *http.Server
+	eventHandler *etwmain.EventHandler
+	log          plog.Logger
+}
+
+// NewETWExporter creates and initializes a new ETWExporter instance.
+func NewETWExporter(config *config.AppConfig) (*ETWExporter, error) {
+	exporter := &ETWExporter{
+		config: config,
+	}
+
+	exporter.log = plog.DefaultLogger // main app uses default logger
+	exporter.log.Info().
+		Str("version", version).
+		Str("listen_address", config.Server.ListenAddress).
+		Str("metrics_path", config.Server.MetricsPath).
+		Msg("Starting ETW Exporter")
+
+	exporter.setupETW()
+	exporter.setupHTTPServer()
+
+	// Register ETW statistics collector
+	statsCollector := etwmain.NewETWStatsCollector(exporter.etwSession)
+	prometheus.MustRegister(statsCollector)
+	exporter.log.Info().Msg("ETW statistics collector enabled and registered with Prometheus")
+
+	return exporter, nil
+}
+
+// setupETW initializes the ETW session manager and event handlers.
+func (e *ETWExporter) setupETW() {
+	e.log.Debug().Msg("- Event handler creation started")
+	e.eventHandler = etwmain.NewEventHandler(&e.config.Collectors)
+	e.log.Debug().Msg("- Event handler created")
+
+	e.log.Debug().Msg("- ETW session manager creation started")
+	e.etwSession = etwmain.NewSessionManager(e.eventHandler, &e.config.Collectors)
+	e.log.Debug().Msg("- ETW session manager created")
+
+	// Log enabled providers in the config
+	enabledGroups := e.etwSession.GetEnabledProviderGroups()
+	e.log.Info().Strs("provider_groups", enabledGroups).Msg("Enabled provider groups")
+	e.log.Debug().Int("provider_count", len(enabledGroups)).Msg("Provider group count")
+}
+
+// setupHTTPServer configures the HTTP server for metrics and pprof.
+func (e *ETWExporter) setupHTTPServer() {
+	e.log.Debug().Str("metrics_path", e.config.Server.MetricsPath).Msg("Setting up HTTP handlers")
+	mux := http.NewServeMux()
+	mux.Handle(e.config.Server.MetricsPath, promhttp.Handler())
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`<html>
+            <head><title>ETW Exporter</title></head>
+            <body>
+            <h1>ETW Exporter v` + version + ` </h1>
+            <p><a href="` + e.config.Server.MetricsPath + `">Metrics</a></p>
+            </body>
+            </html>`))
+	})
+
+	e.httpServer = &http.Server{
+		Addr:    e.config.Server.ListenAddress,
+		Handler: mux,
+	}
+}
+
+// Run starts all services and waits for a shutdown signal.
+func (e *ETWExporter) Run() error {
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	debugCounter = NewDebugCounter(ctx) // ! testing
+
+	if e.config.Server.PprofEnabled {
+		go func() {
+			e.log.Info().Msg("Starting pprof HTTP server on localhost:6060")
+			// pprof registers its handlers on http.DefaultServeMux
+			if err := http.ListenAndServe("localhost:6060", nil); err != nil {
+				e.log.Error().Err(err).Msg("pprof server failed")
+			}
+		}()
+	}
+
+	e.log.Info().Msg("Starting ETW trace session...")
+	if err := e.etwSession.Start(); err != nil {
+		return fmt.Errorf("failed to start ETW session: %w", err)
+	}
+	defer func() {
+		if err := e.etwSession.Stop(); err != nil {
+			e.log.Error().Err(err).Msg("Error stopping ETW session")
+		}
+	}()
+	e.log.Info().Msg("ETW session started successfully")
+
+	go func() {
+		e.log.Info().Str("address", e.config.Server.ListenAddress).Msg("Starting HTTP server")
+		if err := e.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			e.log.Fatal().Err(err).Msg("❌ Failed to start HTTP server")
+		}
+	}()
+
+	e.log.Info().Msg("ETW Exporter is ready and collecting events...")
+
+	<-ctx.Done()
+	e.log.Info().Msg("! Received shutdown signal, shutting down gracefully...")
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := e.httpServer.Shutdown(shutdownCtx); err != nil {
+		e.log.Error().Err(err).Msg("❌ Error shutting down HTTP server")
+	} else {
+		e.log.Debug().Msg("HTTP server shut down cleanly")
+	}
+
+	e.log.Info().Msg("ETW Exporter stopped gracefully")
+	// defer e.etwSession.Stop()
+	return nil
+}

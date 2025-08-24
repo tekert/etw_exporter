@@ -20,7 +20,6 @@ metrics_path = "/metrics"
 
 [collectors.disk_io]
 enabled = true
-track_disk_info = true
 
 [logging.defaults]
 level = "info"

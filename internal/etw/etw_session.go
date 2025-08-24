@@ -1,4 +1,4 @@
-package main
+package etwmain
 
 import (
 	"context"
@@ -8,13 +8,18 @@ import (
 
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
+
+	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/config"
+	"etw_exporter/internal/logger"
 )
 
 // TODO(tekert): reopen NT Kernel Logger session if it closes, just a goroutine that checks every 5 seconds
 // TODO(tekert): If in windows 11, use System Config Provider instead of NT Kernel Logger
 // TODO(tekert): Explain that in Windows 10 only 1 NT Kernel Logger session can be active at a time.
 
-// SessionManager manages ETW sessions and event consumption
+// SessionManager orchestrates the entire lifecycle of ETW (Event Tracing for Windows)
+// data collection.
 type SessionManager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -25,14 +30,14 @@ type SessionManager struct {
 	manifestSession *etw.RealTimeSession
 	kernelSession   *etw.RealTimeSession
 	eventHandler    *EventHandler
-	config          *CollectorConfig
+	config          *config.CollectorConfig
 	log             log.Logger // Session manager logger
 
 	running bool
 }
 
-// NewSessionManager creates a new ETW session manager
-func NewSessionManager(eventHandler *EventHandler, config *CollectorConfig) *SessionManager {
+// NewSessionManager creates and initializes a new ETW session manager.
+func NewSessionManager(eventHandler *EventHandler, config *config.CollectorConfig) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &SessionManager{
@@ -40,7 +45,7 @@ func NewSessionManager(eventHandler *EventHandler, config *CollectorConfig) *Ses
 		cancel:       cancel,
 		eventHandler: eventHandler,
 		config:       config,
-		log:          GetSessionLogger(),
+		log:          logger.NewLoggerWithContext("etw_session"),
 	}
 
 	manager.log.Debug().Msg("SessionManager created")
@@ -71,13 +76,11 @@ func (s *SessionManager) Start() error {
 	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
 	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
 	// So we use this workaround to capture SystemConfig events
-	if s.config.DiskIO.TrackDiskInfo {
-		s.log.Debug().Msg("Capturing SystemConfig events...")
-		if err := s.captureNtSystemConfigEvents(); err != nil {
-			return fmt.Errorf("failed to capture SystemConfig events: %w", err)
-		}
-		s.log.Debug().Msg("SystemConfig events captured")
+	s.log.Debug().Msg("Capturing SystemConfig events...")
+	if err := s.captureNtSystemConfigEvents(); err != nil {
+		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
 	}
+	s.log.Debug().Msg("SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
 	s.log.Debug().Msg("Setting up ETW sessions...")
@@ -115,9 +118,11 @@ func (s *SessionManager) Start() error {
 	return nil
 }
 
-// captureNtSystemConfigEvents starts a temporary kernel session to capture SystemConfig events
-// These events are only emitted when a nt kernel session is stopped, so we need this special handling
-// This is a workaround for Windows 10 and below where System Config manifest Provider is not available
+// captureNtSystemConfigEvents starts and stops a temporary kernel session to capture
+// the initial state of system components like physical and logical disks.
+// These configuration events are only emitted when a kernel logger session stops.
+// This function is a workaround for older Windows versions where a dedicated
+// System Config provider is not available.
 func (s *SessionManager) captureNtSystemConfigEvents() error {
 	s.log.Trace().Msg("Creating temporary kernel session for SystemConfig events")
 
@@ -133,29 +138,9 @@ func (s *SessionManager) captureNtSystemConfigEvents() error {
 	tempConsumer := etw.NewConsumer(s.ctx).FromSessions(tempKernelSession)
 	s.log.Trace().Msg("Temporary consumer created")
 
-	// Set up callback to capture SystemConfig events
-	tempConsumer.EventPreparedCallback = func(helper *etw.EventRecordHelper) error {
-		defer helper.Skip()
-
-		eventRecord := helper.EventRec
-		providerGUID := eventRecord.EventHeader.ProviderId
-		eventType := eventRecord.EventHeader.EventDescriptor.Opcode
-
-		// Only process SystemConfig events
-		if providerGUID.Equals(SystemConfigGUID) {
-			switch eventType {
-			case 11: // EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK
-				if s.config.DiskIO.Enabled && s.eventHandler.diskHandler != nil {
-					return s.eventHandler.diskHandler.HandleSystemConfigPhyDisk(helper)
-				}
-			case 12: // EVENT_TRACE_TYPE_CONFIG_LOGICALDISK
-				if s.config.DiskIO.Enabled && s.eventHandler.diskHandler != nil {
-					return s.eventHandler.diskHandler.HandleSystemConfigLogDisk(helper)
-				}
-			}
-		}
-		return nil
-	}
+	// Set up callback to use the main event router, which will dispatch
+	// SystemConfig events to the registered SystemConfigHandler.
+	tempConsumer.EventPreparedCallback = s.eventHandler.EventPreparedCallback
 
 	// Start the temporary consumer
 	if err := tempConsumer.Start(); err != nil {
@@ -180,7 +165,9 @@ func (s *SessionManager) captureNtSystemConfigEvents() error {
 	return nil
 }
 
-// setupSessions creates the required ETW sessions
+// setupSessions creates and configures the required ETW sessions based on the
+// enabled collectors in the user's configuration. It sets up a manifest session
+// for user-space providers and a kernel session for kernel-mode providers.
 func (s *SessionManager) setupSessions() error {
 	var sessions []etw.Session
 
@@ -217,7 +204,8 @@ func (s *SessionManager) setupSessions() error {
 	return nil
 }
 
-// setupConsumer configures the consumer callbacks
+// setupConsumer configures the ETW consumer by wiring its callbacks to the central
+// EventHandler. This directs the flow of all captured events to the router.
 func (s *SessionManager) setupConsumer() error {
 	// Set up callbacks using the event handler
 	s.consumer.EventRecordCallback = s.eventHandler.EventRecordCallback
@@ -354,7 +342,7 @@ func (s *SessionManager) startStaleProcessCleanup() {
 			}
 
 			// 3. Clean up processes that were not "seen" during the rundown.
-			pc := GetGlobalProcessCollector()
+			pc := kprocess.GetGlobalProcessCollector()
 			cleanedCount := pc.CleanupStaleProcesses(processMaxAge)
 			if cleanedCount > 0 {
 				log.Info().Int("count", cleanedCount).Msg("Cleaned up stale processes")

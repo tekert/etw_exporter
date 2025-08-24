@@ -1,9 +1,17 @@
-package main
+package etwmain
 
 import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
+
+	"etw_exporter/internal/collectors/kdiskio"
+	"etw_exporter/internal/collectors/kernelthread"
+	"etw_exporter/internal/collectors/kperfinfo"
+	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/collectors/ksystemconfig"
+	"etw_exporter/internal/config"
+	"etw_exporter/internal/logger"
 )
 
 // Event handler interfaces for different event types
@@ -11,8 +19,6 @@ type DiskEventHandler interface {
 	HandleDiskRead(helper *etw.EventRecordHelper) error
 	HandleDiskWrite(helper *etw.EventRecordHelper) error
 	HandleDiskFlush(helper *etw.EventRecordHelper) error
-	HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error // TODO: move to SystemConfigHandler
-	HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error // TODO: move to SystemConfigHandler
 }
 
 type ProcessEventHandler interface {
@@ -45,14 +51,19 @@ type PerfInfoNtEventHandler interface {
 	HandleSampleProfileEvent(helper *etw.EventRecordHelper) error
 }
 
+type SystemConfigEventHandler interface {
+	HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error
+	HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error
+}
+
 // EventHandler encapsulates state and logic for ETW event processing
-// This struct-based approach allows reusability of eventID, helper, and other components
-// for better code organization and future extensibility
+// This handler routes events to specialized sub-handlers based on event type
+// and provider GUID.
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskHandler     *DiskIOHandler
-	threadCSHandler *ThreadHandler
-	perfinfoHandler *PerfInfoHandler
+	diskHandler     *kdiskio.DiskIOHandler
+	threadCSHandler *kernelthread.ThreadHandler
+	perfinfoHandler *kperfinfo.PerfInfoHandler
 
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
@@ -60,9 +71,8 @@ type EventHandler struct {
 	// cpuCollector     *CPUCollector
 
 	// Shared state and caches for callbacks
-	metrics *ETWMetrics
-	config  *CollectorConfig
-	log     log.Logger // Event handler logger
+	config *config.CollectorConfig
+	log    log.Logger // Event handler logger
 
 	// Routing tables for different event types - hot path optimized
 	diskEventHandlers    []DiskEventHandler
@@ -70,42 +80,54 @@ type EventHandler struct {
 	threadEventHandlers  []ThreadNtEventHandler
 	fileEventHandlers    []FileEventHandler
 	perfinfoHandlers     []PerfInfoNtEventHandler
+	systemConfigHandlers []SystemConfigEventHandler
 }
 
-// NewEventHandler creates a new handler with dependencies injected
-func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler {
+// NewEventHandler creates a new central event handler. It initializes all collectors
+// that are enabled in the provided configuration, registers them for Prometheus
+// metrics where applicable, and sets up the internal routing tables.
+func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	handler := &EventHandler{
-		metrics:              metrics,
 		config:               config,
-		log:                  GetEventLogger(),
+		log:                  logger.NewLoggerWithContext("event_handler"),
 		diskEventHandlers:    make([]DiskEventHandler, 0),
 		processEventHandlers: make([]ProcessEventHandler, 0),
 		threadEventHandlers:  make([]ThreadNtEventHandler, 0),
 		fileEventHandlers:    make([]FileEventHandler, 0),
 		perfinfoHandlers:     make([]PerfInfoNtEventHandler, 0),
+		systemConfigHandlers: make([]SystemConfigEventHandler, 0),
 	}
 
 	// Always register the global process handler for process events
 	// This ensures we have process name mappings available for all collectors
-	processHandler := NewProcessHandler()
+	processHandler := kprocess.NewProcessHandler()
 	handler.RegisterProcessEventHandler(processHandler)
 	handler.log.Debug().Msg("Registered global process handler")
 
+	// Always register the system config handler to collect data
+	systemConfigHandler := ksystemconfig.NewSystemConfigHandler()
+	handler.RegisterSystemConfigEventHandler(systemConfigHandler)
+	handler.log.Debug().Msg("Registered global system config handler")
+
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
-		handler.diskHandler = NewDiskIOHandler(&config.DiskIO)
-		// Register the disk handler with the event handler
+		handler.diskHandler = kdiskio.NewDiskIOHandler(&config.DiskIO)
 		handler.RegisterDiskEventHandler(handler.diskHandler)
-		// Register for file events for process correlation
 		handler.RegisterFileEventHandler(handler.diskHandler)
-		// Register the custom collector with Prometheus for high-performance metrics
 		prometheus.MustRegister(handler.diskHandler.GetCustomCollector())
-
 		handler.log.Info().Msg("Disk I/O collector enabled and registered with Prometheus")
+
+		// Request the necessary metrics from the system config collector.
+		systemConfigCollector := ksystemconfig.GetGlobalSystemConfigCollector()
+		systemConfigCollector.RequestMetrics(
+			"etw_physical_disk_info",
+			"etw_logical_disk_info",
+		)
+
 	}
 
 	if config.ThreadCS.Enabled {
-		handler.threadCSHandler = NewThreadHandler()
+		handler.threadCSHandler = kernelthread.NewThreadHandler()
 		// Register the thread collector with the handler
 		handler.RegisterThreadEventHandler(handler.threadCSHandler)
 		// Register the custom collector with Prometheus for high-performance metrics
@@ -114,7 +136,7 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 	}
 
 	if config.PerfInfo.Enabled {
-		handler.perfinfoHandler = NewPerfInfoHandler(&config.PerfInfo)
+		handler.perfinfoHandler = kperfinfo.NewPerfInfoHandler(&config.PerfInfo)
 		// Register the interrupt handler with the event handler
 		handler.RegisterPerfInfoEventHandler(handler.perfinfoHandler)
 		// Also register for thread events to finalize DPC durations with CSwitch events.
@@ -130,12 +152,12 @@ func NewEventHandler(metrics *ETWMetrics, config *CollectorConfig) *EventHandler
 		Int("thread_handlers", len(handler.threadEventHandlers)).
 		Int("file_handlers", len(handler.fileEventHandlers)).
 		Int("interrupt_handlers", len(handler.perfinfoHandlers)).
+		Int("systemconfig_handlers", len(handler.systemConfigHandlers)).
 		Msg("Event handlers initialized")
 
 	return handler
 }
 
-// Register methods for event handlers
 func (h *EventHandler) RegisterDiskEventHandler(handler DiskEventHandler) {
 	h.diskEventHandlers = append(h.diskEventHandlers, handler)
 	h.log.Debug().Int("total_disk_handlers", len(h.diskEventHandlers)).Msg("Disk event handler registered")
@@ -161,10 +183,18 @@ func (h *EventHandler) RegisterPerfInfoEventHandler(handler PerfInfoNtEventHandl
 	h.log.Debug().Int("total_perfinfo_handlers", len(h.perfinfoHandlers)).Msg("PerfInfo event handler registered")
 }
 
+func (h *EventHandler) RegisterSystemConfigEventHandler(handler SystemConfigEventHandler) {
+	h.systemConfigHandlers = append(h.systemConfigHandlers, handler)
+	h.log.Debug().Int("total_systemconfig_handlers", len(h.systemConfigHandlers)).Msg("SystemConfig event handler registered")
+}
+
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
 // Using struct methods allows us to share state and reduce parameter passing
 
-// EventRecordCallback is called for each EVENT_RECORD
+// EventRecordCallback is the first-stage, hot-path callback for every event record.
+// It performs fast-path filtering for extremely high-frequency events (like CSwitch)
+// and routes them to specialized raw handlers, bypassing more expensive processing stages.
+// It returns 'false' for handled events to prevent further processing by the consumer.
 func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// Fast-path for high-frequency events. We identify them here and route them
 	// to specialized raw handlers, bypassing the expensive EventRecordHelper creation.
@@ -185,14 +215,15 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	return true
 }
 
-// EventRecordHelperCallback is called as soon as the helper is created
+// EventRecordHelperCallback is a second-stage callback, invoked after a helper
+// object has been created for an event record. It is currently a placeholder.
 func (h *EventHandler) EventRecordHelperCallback(helper *etw.EventRecordHelper) error {
 	// Perform any helper-level processing here if needed
 	return nil
 }
 
-// EventPreparedCallback is called before we parse the metadata of the event and all the properties
-// This is where we route events to appropriate handlers based on provider GUID and event type
+// EventPreparedCallback is the third-stage callback, called just before event
+// properties are parsed. This is the main entry point to the event routing logic.
 func (h *EventHandler) EventPreparedCallback(helper *etw.EventRecordHelper) error {
 	defer helper.Skip() // Stop further processing
 
@@ -260,19 +291,19 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 
 // routeSystemConfigEvents routes SystemConfig events to disk handlers
 func (h *EventHandler) routeSystemConfigEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.diskEventHandlers) == 0 {
+	if len(h.systemConfigHandlers) == 0 {
 		return nil
 	}
 
 	switch eventID {
 	case etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK: // 11
-		for _, handler := range h.diskEventHandlers {
+		for _, handler := range h.systemConfigHandlers {
 			if err := handler.HandleSystemConfigPhyDisk(helper); err != nil {
 				return err
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK: // 12
-		for _, handler := range h.diskEventHandlers {
+		for _, handler := range h.systemConfigHandlers {
 			if err := handler.HandleSystemConfigLogDisk(helper); err != nil {
 				return err
 			}

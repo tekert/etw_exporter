@@ -1,4 +1,4 @@
-package main
+package kprocess
 
 import (
 	"strconv"
@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"github.com/phuslu/log"
+
+	"etw_exporter/internal/logger"
 )
 
 // ProcessInfo holds information about a process
@@ -38,7 +40,7 @@ var (
 func GetGlobalProcessCollector() *ProcessCollector {
 	initOnce.Do(func() {
 		globalProcessCollector = &ProcessCollector{
-			log: GetProcessLogger(),
+			log: logger.NewLoggerWithContext("process_collector"),
 		}
 	})
 	return globalProcessCollector
@@ -47,7 +49,7 @@ func GetGlobalProcessCollector() *ProcessCollector {
 // NewProcessCollector creates a new process collector instance (for testing or specialized use)
 func NewProcessCollector() *ProcessCollector {
 	return &ProcessCollector{
-		log: GetProcessLogger(),
+		log: logger.NewLoggerWithContext("process_collector"),
 	}
 }
 

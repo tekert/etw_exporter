@@ -1,13 +1,15 @@
-package main
+package kdiskio
 
 import (
-	"maps"
 	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/logger"
 )
 
 // DiskIOCustomCollector implements prometheus.Collector for disk I/O related metrics.
@@ -16,8 +18,6 @@ import (
 // It provides high-performance aggregated metrics for:
 // - Disk I/O operations (read/write/flush) per disk and per process
 // - Bytes transferred (read/written) per disk and per process
-// - Physical disk information (manufacturer, configuration)
-// - Logical disk information (drive letters, file systems)
 //
 // All metrics are designed for low cardinality to maintain performance at scale.
 type DiskIOCustomCollector struct {
@@ -30,10 +30,6 @@ type DiskIOCustomCollector struct {
 	processBytesRead    map[ProcessBytesKey]*int64 // {processID, diskNumber} -> bytes read
 	processBytesWritten map[ProcessBytesKey]*int64 // {processID, diskNumber} -> bytes written
 
-	// Physical and logical disk information
-	physicalDisks map[uint32]PhysicalDiskInfo // diskNumber -> disk info
-	logicalDisks  map[uint32]LogicalDiskInfo  // diskNumber -> logical disk info
-
 	// Synchronization
 	mu  sync.RWMutex
 	log log.Logger
@@ -45,8 +41,6 @@ type DiskIOCustomCollector struct {
 	processIOCountDesc      *prometheus.Desc
 	processReadBytesDesc    *prometheus.Desc
 	processWrittenBytesDesc *prometheus.Desc
-	physicalDiskInfoDesc    *prometheus.Desc
-	logicalDiskInfoDesc     *prometheus.Desc
 }
 
 // DiskIOKey represents a composite key for disk I/O operations.
@@ -76,8 +70,6 @@ type DiskIOMetricsData struct {
 	ProcessIOCount      map[ProcessIOKey]ProcessIOCountData  // {processID, diskNumber, operation} -> count data
 	ProcessBytesRead    map[ProcessBytesKey]ProcessBytesData // {processID, diskNumber} -> bytes read data
 	ProcessBytesWritten map[ProcessBytesKey]ProcessBytesData // {processID, diskNumber} -> bytes written data
-	PhysicalDisks       map[uint32]PhysicalDiskInfo          // diskNumber -> physical disk info
-	LogicalDisks        map[uint32]LogicalDiskInfo           // diskNumber -> logical disk info
 }
 
 // DiskIOCountData holds disk I/O count data with labels
@@ -104,24 +96,7 @@ type ProcessBytesData struct {
 	Bytes       int64
 }
 
-// PhysicalDiskInfo holds physical disk information
-type PhysicalDiskInfo struct {
-	DiskNumber   uint32
-	Manufacturer string
-}
-
-// LogicalDiskInfo holds logical disk information
-type LogicalDiskInfo struct {
-	DiskNumber        uint32
-	DriveLetterString string
-	FileSystem        string
-}
-
 // NewDiskIOCustomCollector creates a new disk I/O metrics custom collector.
-// This collector aggregates disk I/O related ETW events and exposes them as Prometheus metrics
-//
-// Returns:
-//   - *DiskIOCustomCollector: A new custom collector instance
 func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 	return &DiskIOCustomCollector{
 		diskIOCount:         make(map[DiskIOKey]*int64),
@@ -130,9 +105,7 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 		processIOCount:      make(map[ProcessIOKey]*int64),
 		processBytesRead:    make(map[ProcessBytesKey]*int64),
 		processBytesWritten: make(map[ProcessBytesKey]*int64),
-		physicalDisks:       make(map[uint32]PhysicalDiskInfo),
-		logicalDisks:        make(map[uint32]LogicalDiskInfo),
-		log:                 GetDiskIOLogger(),
+		log:                 logger.NewLoggerWithContext("diskio_collector"),
 
 		// Disk I/O metrics
 		diskIOCountDesc: prometheus.NewDesc(
@@ -165,16 +138,6 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 			"Total bytes written to disk per process",
 			[]string{"process_id", "process_name", "disk"}, nil,
 		),
-		physicalDiskInfoDesc: prometheus.NewDesc(
-			"etw_physical_disk_info",
-			"Physical disk information",
-			[]string{"disk", "manufacturer"}, nil,
-		),
-		logicalDiskInfoDesc: prometheus.NewDesc(
-			"etw_logical_disk_info",
-			"Logical disk information",
-			[]string{"disk", "drive_letter", "file_system"}, nil,
-		),
 	}
 }
 
@@ -191,8 +154,6 @@ func (c *DiskIOCustomCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.processIOCountDesc
 	ch <- c.processReadBytesDesc
 	ch <- c.processWrittenBytesDesc
-	ch <- c.physicalDiskInfoDesc
-	ch <- c.logicalDiskInfoDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -274,29 +235,6 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 			strconv.FormatUint(uint64(procData.DiskNumber), 10),
 		)
 	}
-
-	// Create physical disk information metrics
-	for _, physDisk := range data.PhysicalDisks {
-		ch <- prometheus.MustNewConstMetric(
-			c.physicalDiskInfoDesc,
-			prometheus.GaugeValue,
-			1,
-			strconv.FormatUint(uint64(physDisk.DiskNumber), 10),
-			physDisk.Manufacturer,
-		)
-	}
-
-	// Create logical disk information metrics
-	for _, logDisk := range data.LogicalDisks {
-		ch <- prometheus.MustNewConstMetric(
-			c.logicalDiskInfoDesc,
-			prometheus.GaugeValue,
-			1,
-			strconv.FormatUint(uint64(logDisk.DiskNumber), 10),
-			logDisk.DriveLetterString,
-			logDisk.FileSystem,
-		)
-	}
 }
 
 // collectData creates a snapshot of current metrics data.
@@ -312,8 +250,6 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 		ProcessIOCount:      make(map[ProcessIOKey]ProcessIOCountData),
 		ProcessBytesRead:    make(map[ProcessBytesKey]ProcessBytesData),
 		ProcessBytesWritten: make(map[ProcessBytesKey]ProcessBytesData),
-		PhysicalDisks:       make(map[uint32]PhysicalDiskInfo),
-		LogicalDisks:        make(map[uint32]LogicalDiskInfo),
 	}
 
 	// Collect disk I/O counts
@@ -342,7 +278,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	}
 
 	// Collect process I/O counts
-	processCollector := GetGlobalProcessCollector()
+	processCollector := kprocess.GetGlobalProcessCollector()
 	for key, countPtr := range c.processIOCount {
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
@@ -390,11 +326,6 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 			}
 		}
 	}
-
-	// Copy disk information
-	maps.Copy(data.PhysicalDisks, c.physicalDisks)
-
-	maps.Copy(data.LogicalDisks, c.logicalDisks)
 
 	return data
 }
@@ -444,7 +375,7 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 	// Record process-level metrics (only for known processes with valid names)
 	if processID > 0 {
 		// Check if process is known by the global process collector
-		processCollector := GetGlobalProcessCollector()
+		processCollector := kprocess.GetGlobalProcessCollector()
 		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
 			// Record process I/O count
 			processIOKey := ProcessIOKey{ProcessID: processID, DiskNumber: diskNumber, Operation: operation}
@@ -484,38 +415,4 @@ func (c *DiskIOCustomCollector) RecordDiskFlush(diskNumber uint32) {
 		c.diskIOCount[diskIOKey] = new(int64)
 	}
 	atomic.AddInt64(c.diskIOCount[diskIOKey], 1)
-}
-
-// RecordPhysicalDiskInfo records physical disk information.
-//
-// Parameters:
-//   - diskNumber: Physical disk number
-//   - manufacturer: Disk manufacturer name
-func (c *DiskIOCustomCollector) RecordPhysicalDiskInfo(diskNumber uint32, manufacturer string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Store physical disk information
-	c.physicalDisks[diskNumber] = PhysicalDiskInfo{
-		DiskNumber:   diskNumber,
-		Manufacturer: manufacturer,
-	}
-}
-
-// RecordLogicalDiskInfo records logical disk information.
-//
-// Parameters:
-//   - diskNumber: Physical disk number containing the logical disk
-//   - driveLetterString: Drive letter (e.g., "C:")
-//   - fileSystem: File system type (e.g., "NTFS", "FAT32")
-func (c *DiskIOCustomCollector) RecordLogicalDiskInfo(diskNumber uint32, driveLetterString, fileSystem string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Store logical disk information
-	c.logicalDisks[diskNumber] = LogicalDiskInfo{
-		DiskNumber:        diskNumber,
-		DriveLetterString: driveLetterString,
-		FileSystem:        fileSystem,
-	}
 }

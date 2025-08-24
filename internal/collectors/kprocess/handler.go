@@ -1,4 +1,4 @@
-package main
+package kprocess
 
 import (
 	"github.com/tekert/goetw/etw"

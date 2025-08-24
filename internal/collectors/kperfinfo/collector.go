@@ -1,10 +1,13 @@
 // filepath: e:\Sources\go\projects\etw_exporter\perfinfo_collector.go
-package main
+package kperfinfo
 
 import (
 	"strconv"
 	"sync"
 	"time"
+
+	"etw_exporter/internal/config"
+	"etw_exporter/internal/logger"
 
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,7 +59,7 @@ var isrEventPool = sync.Pool{
 // All metrics use the etw_ prefix and are designed for low cardinality.
 type PerfInfoInterruptCollector struct {
 	// Configuration options
-	config *PerfInfoConfig
+	config *config.PerfInfoConfig
 
 	// Pending ISR tracking for latency correlation
 	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
@@ -147,7 +150,7 @@ var (
 )
 
 // NewPerfInfoCollector creates a new interrupt latency collector
-func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
+func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptCollector {
 	collector := &PerfInfoInterruptCollector{
 		config:                 config,
 		pendingISRs:            make(map[ISRKey]*ISREvent, 256),  // Pre-size for performance
@@ -160,7 +163,7 @@ func NewPerfInfoCollector(config *PerfInfoConfig) *PerfInfoInterruptCollector {
 		dpcExecutedCount:       make(map[uint16]int64, 64),
 		driverLastSeen:         make(map[string]time.Time, 100), // Track driver activity for bounded set
 		driverTimeout:          15 * time.Minute,                // Prune drivers inactive for 15 mins
-		log:                    GetPerfinfoLogger(),
+		log:                    logger.NewLoggerWithContext("perfinfo_collector"),
 		lastPruneTime:          time.Now(),
 		pruneInterval:          5 * time.Minute,
 

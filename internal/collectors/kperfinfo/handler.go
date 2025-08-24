@@ -1,4 +1,4 @@
-package main
+package kperfinfo
 
 import (
 	"sync"
@@ -7,6 +7,9 @@ import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
+
+	"etw_exporter/internal/config"
+	"etw_exporter/internal/logger"
 )
 
 // pendingDPCInfo holds the data for a DPC event that is waiting for the next
@@ -20,7 +23,7 @@ type pendingDPCInfo struct {
 // It implements the event handler interfaces needed for interrupt latency tracking
 type PerfInfoHandler struct {
 	collector *PerfInfoInterruptCollector
-	config    *PerfInfoConfig
+	config    *config.PerfInfoConfig
 	log       log.Logger
 
 	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
@@ -44,11 +47,11 @@ type PerfInfoHandler struct {
 }
 
 // NewPerfInfoHandler creates a new interrupt event handler
-func NewPerfInfoHandler(config *PerfInfoConfig) *PerfInfoHandler {
+func NewPerfInfoHandler(config *config.PerfInfoConfig) *PerfInfoHandler {
 	return &PerfInfoHandler{
 		collector:     NewPerfInfoCollector(config),
 		config:        config,
-		log:           GetPerfinfoLogger(),
+		log:           logger.NewLoggerWithContext("perfinfo_handler"),
 		lastDPCPerCPU: make(map[uint16]pendingDPCInfo),
 	}
 }
@@ -74,33 +77,24 @@ func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Ti
 	}
 }
 
-// HandleISREvent processes ISR (Interrupt Service Routine) events
-// This handler processes ETW events for interrupt service routines (ISRs).
-// / It tracks ISR entry and routine address for latency analysis.
+// HandleISREvent processes Interrupt Service Routine (ISR) events to track interrupt latency.
 //
 // ETW Event Details:
-// - Provider: PerfInfo
-// - GUID: {ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}
-// - Event Type: 67 (ISR)
-// - Event Class: ISR : PerfInfo
+//   - Provider Name: NT Kernel Logger (PerfInfo)
+//   - Provider GUID: {ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}
+//   - Event ID(s): 67
+//   - Event Name(s): ISR
+//   - Event Version(s): 2
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// [EventType{67}, EventTypeName{"ISR"}]
+// Schema (from gen_mof_kerneldef.go):
+//   - InitialTime (object): ISR entry time. The format depends on the session's ClientContext.
+//   - Routine (uint32): Address of the ISR routine.
+//   - ReturnValue (uint8): Value returned by the ISR.
+//   - Vector (uint8): Interrupt vector number.
+//   - Reserved (uint16): Reserved field.
 //
-//	class ISR : PerfInfo {
-//	  object InitialTime; // WmiTime = FILETIME = UINT64
-//	  uint32 Routine;
-//	  uint8  ReturnValue;
-//	  uint8  Vector;
-//	  uint16 Reserved;
-//	};
-//
-// Key properties used:
-// - InitialTime (object): ISR entry time
-// - Routine (uint32): Address of ISR routine
-// - Vector (uint8): Interrupt vector number
-//
-// This handler records ISR entry and routine mapping for driver analysis.
+// This handler records ISR entry time and routine address for driver latency analysis.
 func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	cpu := helper.EventRec.ProcessorNumber()
 
@@ -118,7 +112,7 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	initialTime := helper.TimestampFrom(initialTimeVal)
+	initialTime := helper.TimestampFromProp(initialTimeVal)
 
 	// Process the ISR event
 	h.collector.ProcessISREvent(cpu, uint16(vector), initialTime, routineAddress)
@@ -128,29 +122,23 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 
 var times int64 // ! TESTING log lib crash
 
-// HandleDPCEvent processes DPC (Deferred Procedure Call) events
-// This handler processes ETW events for deferred procedure calls (DPCs).
-// It tracks DPC entry and routine address for latency analysis.
+// HandleDPCEvent processes Deferred Procedure Call (DPC) events to track DPC latency.
 //
 // ETW Event Details:
-// - Provider: PerfInfo
-// - GUID: {ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}
-// - Event Types: 66, 68, 69 (ThreadDPC, DPC, TimerDPC)
-// - Event Class: DPC : PerfInfo
+//   - Provider Name: NT Kernel Logger (PerfInfo)
+//   - Provider GUID: {ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}
+//   - Event ID(s): 66, 68, 69
+//   - Event Name(s): ThreadDPC, DPC, TimerDPC
+//   - Event Version(s): 2
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// [EventType{66, 68, 69}, EventTypeName{"ThreadDPC", "DPC", "TimerDPC"}]
+// Schema (from gen_mof_kerneldef.go):
+//   - InitialTime (object): DPC entry time.
+//   - Routine (uint32): Address of the DPC routine.
 //
-//	class DPC : PerfInfo {
-//	  object InitialTime;   // WmiTime = This changed based on Wnode.ClientContext (Tested)
-//	  uint32 Routine;
-//	};
-//
-// Key properties used:
-// - InitialTime (object): DPC entry time (NOT a property - this is the event timestamp itself)
-// - Routine (uint32): Address of DPC routine
-//
-// This handler records DPC entry and routine mapping for driver analysis.
+// This handler tracks the start of a DPC. The duration is calculated later when the
+// next DPC or a context switch occurs on the same CPU. The InitialTime property's
+// clock source (QPC, SystemTime, CPUTick) depends on the session's ClientContext.
 func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	cpu := helper.EventRec.ProcessorNumber()
 	eventTime := helper.Timestamp()
@@ -169,9 +157,9 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	// This prop will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
 	// We must use the dedicated TimestampFrom converter, which calculates the absolute
 	// time based on the session's BootTime.
-	initialTime := helper.TimestampFrom(initialTimeTicks)
+	initialTime := helper.TimestampFromProp(initialTimeTicks)
 
-	// ! TESTING crash
+	// ! TESTING crash log lib
 	// //initialTime := etw.FromFiletime(initialTimeTicks)
 	// fromq := helper.FromQPC(initialTimeTicks)
 	// times++
@@ -206,21 +194,33 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 }
 
 // HandleContextSwitch processes context switch events to finalize DPC durations.
-// When a context switch occurs on a CPU, it signifies the end of any pending DPC
-// execution on that core. This handler calculates the duration of the last DPC
-// in a chain.
 //
 // ETW Event Details:
-// - Provider: NT Kernel Logger (CSwitch)
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Event Type: 36
-// - Event Class: CSwitch
+//   - Provider Name: NT Kernel Logger (CSwitch)
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 36
+//   - Event Name(s): CSwitch
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
 //
-// The CSwitch event marks the point where the scheduler switches from one thread
-// to another. Since DPCs run at a high IRQL, they must complete before the
-// scheduler can run and perform a context switch. Therefore, the timestamp of a
-// CSwitch event on a given CPU provides a reliable end time for any DPC that
-// was running just before it.
+// Schema (from gen_mof_kerneldef.go, V2-V4):
+//   - NewThreadId (uint32): Thread ID being switched to.
+//   - OldThreadId (uint32): Thread ID being switched from.
+//   - NewThreadPriority (int8): Priority of the incoming thread.
+//   - OldThreadPriority (int8): Priority of the outgoing thread.
+//   - PreviousCState (uint8): Previous C-state of the processor.
+//   - SpareByte (int8): Reserved/spare byte.
+//   - OldThreadWaitReason (int8): Why the old thread was waiting.
+//   - OldThreadWaitMode (int8): Wait mode of the old thread.
+//   - OldThreadState (int8): State of the old thread.
+//   - OldThreadWaitIdealProcessor (int8): Ideal processor for the old thread.
+//   - NewThreadWaitTime (uint32): Wait time for the new thread.
+//   - Reserved (uint32): Reserved field.
+//
+// When a context switch occurs on a CPU, it signifies the end of any pending DPC
+// execution on that core. Since DPCs run at a high IRQL, they must complete before
+// the scheduler can run. Therefore, the timestamp of a CSwitch event provides a
+// reliable end time for any DPC that was running just before it.
 func (h *PerfInfoHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
@@ -252,24 +252,33 @@ func (h *PerfInfoHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	return nil // PerfInfoHandler does not process this event.
 }
 
-// HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
-// This is a high-performance "fast path" that reads directly from the UserData
-// buffer using known offsets, bypassing the creation of an EventRecordHelper and
-// the associated parsing overhead.
+// HandleContextSwitchRaw processes context switch events to finalize DPC durations.
 //
-// CSwitch MOF Layout (V2-V4):
-// - NewThreadId (uint32): offset 0
-// - OldThreadId (uint32): offset 4
-// - NewThreadPriority (int8): offset 8
-// - OldThreadPriority (int8): offset 9
-// - PreviousCState (uint8): offset 10
-// - SpareByte (int8): offset 11
-// - OldThreadWaitReason (int8): offset 12
-// - OldThreadWaitMode (int8): offset 13
-// - OldThreadState (int8): offset 14
-// - OldThreadWaitIdealProcessor (int8): offset 15
-// - NewThreadWaitTime (uint32): offset 16
-// - Reserved (uint32): offset 20
+// ETW Event Details:
+//   - Provider Name: NT Kernel Logger (CSwitch)
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 36
+//   - Event Name(s): CSwitch
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
+//
+// Schema (from gen_mof_kerneldef.go, V2-V4):
+//   - NewThreadId (uint32): Thread ID being switched to. [Offset: 0]
+//   - OldThreadId (uint32): Thread ID being switched from. [Offset: 4]
+//   - NewThreadPriority (int8): Priority of the incoming thread. [Offset: 8]
+//   - OldThreadPriority (int8): Priority of the outgoing thread. [Offset: 9]
+//   - PreviousCState (uint8): Previous C-state of the processor. [Offset: 10]
+//   - SpareByte (int8): Reserved/spare byte. [Offset: 11]
+//   - OldThreadWaitReason (int8): Why the old thread was waiting. [Offset: 12]
+//   - OldThreadWaitMode (int8): Wait mode of the old thread. [Offset: 13]
+//   - OldThreadState (int8): State of the old thread. [Offset: 14]
+//   - OldThreadWaitIdealProcessor (int8): Ideal processor for the old thread. [Offset: 15]
+//   - NewThreadWaitTime (uint32): Wait time for the new thread. [Offset: 16]
+//   - Reserved (uint32): Reserved field. [Offset: 20]
+//
+// This is a high-performance "fast path" that reads directly from the UserData
+// buffer using known offsets, bypassing parsing overhead. It uses the event's
+// timestamp to finalize the duration of a pending DPC on the same CPU.
 func (h *PerfInfoHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
@@ -286,40 +295,32 @@ func (h *PerfInfoHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	return nil
 }
 
-// HandleImageLoadEvent processes image load events for driver mapping
-// This handler processes ETW events for image load/unload and rundown.
-// It maps driver and module addresses for routine resolution.
+// HandleImageLoadEvent processes image load events to map routine addresses to drivers.
 //
 // ETW Event Details:
-// - Provider: Image
-// - GUID: {2cb15d1d-5fc1-11d2-abe1-00a0c911f518}
-// - Event Types: 10 (Load), 2 (Unload), 3 (DCStart), 4 (DCEnd)
-// - Event Class: Image_Load : Image
+//   - Provider Name: NT Kernel Logger (Image)
+//   - Provider GUID: {2cb15d1d-5fc1-11d2-abe1-00a0c911f518}
+//   - Event ID(s): 10, 3, 4
+//   - Event Name(s): Load, DCStart, DCEnd
+//   - Event Version(s): 2, 3
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// [EventType(10, 2, 3, 4), EventTypeName("Load", "Unload", "DCStart", "DCEnd")]
+// Schema (from gen_mof_kerneldef.go):
+//   - ImageBase (pointer): Base address of the loaded image.
+//   - ImageSize (uint32): Size of the loaded image in bytes.
+//   - ProcessId (uint32): ID of the process loading the image.
+//   - ImageChecksum (uint32): The checksum of the image.
+//   - TimeDateStamp (uint32): The timestamp from the image header.
+//   - Reserved0 (uint32): Reserved.
+//   - DefaultBase (pointer): The default base address of the image.
+//   - Reserved1 (uint32): Reserved.
+//   - Reserved2 (uint32): Reserved.
+//   - Reserved3 (uint32): Reserved.
+//   - Reserved4 (uint32): Reserved.
+//   - FileName (string): Full path to the image file.
 //
-//	class Image_Load : Image {
-//	  uint32 ImageBase;
-//	  uint32 ImageSize;
-//	  uint32 ProcessId;
-//	  uint32 ImageChecksum;
-//	  uint32 TimeDateStamp;
-//	  uint32 Reserved0;
-//	  uint32 DefaultBase;
-//	  uint32 Reserved1;
-//	  uint32 Reserved2;
-//	  uint32 Reserved3;
-//	  uint32 Reserved4;
-//	  string FileName;
-//	};
-//
-// Key properties used:
-// - ImageBase (uint32): Base address of loaded image
-// - ImageSize (uint32): Size of loaded image
-// - FileName (string): Full path to image file
-//
-// This handler records image mapping for routine address resolution.
+// This handler collects information about loaded modules (drivers, executables, DLLs)
+// to resolve routine addresses from DPC/ISR events to a driver name.
 func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 	// Extract image load properties using optimized methods
 	var imageBase uint64
@@ -345,7 +346,32 @@ func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) er
 	return nil
 }
 
-// HandleImageUnloadEvent processes image unload events to remove driver metrics.
+// HandleImageUnloadEvent processes image unload events to remove driver mappings.
+//
+// ETW Event Details:
+//   - Provider Name: NT Kernel Logger (Image)
+//   - Provider GUID: {2cb15d1d-5fc1-11d2-abe1-00a0c911f518}
+//   - Event ID(s): 2
+//   - Event Name(s): Unload
+//   - Event Version(s): 2, 3
+//   - Schema: MOF
+//
+// Schema (from gen_mof_kerneldef.go):
+//   - ImageBase (pointer): Base address of the unloaded image.
+//   - ImageSize (uint32): Size of the unloaded image in bytes.
+//   - ProcessId (uint32): ID of the process unloading the image.
+//   - ImageChecksum (uint32): The checksum of the image.
+//   - TimeDateStamp (uint32): The timestamp from the image header.
+//   - Reserved0 (uint32): Reserved.
+//   - DefaultBase (pointer): The default base address of the image.
+//   - Reserved1 (uint32): Reserved.
+//   - Reserved2 (uint32): Reserved.
+//   - Reserved3 (uint32): Reserved.
+//   - Reserved4 (uint32): Reserved.
+//   - FileName (string): Full path to the image file.
+//
+// This handler removes the address-to-driver mapping when a module is unloaded
+// to prevent stale data.
 func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 	var imageBase uint64
 	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
@@ -363,34 +389,26 @@ func (h *PerfInfoHandler) HandleSampleProfileEvent(helper *etw.EventRecordHelper
 	return nil
 }
 
-// HandleHardPageFaultEvent processes page fault events for hard page fault counting
-// This handler processes ETW events for hard page faults.
-// It counts and records hard page fault occurrences for memory analysis.
+// HandleHardPageFaultEvent processes hard page fault events to count memory faults.
 //
 // ETW Event Details:
-// - Provider: PageFault
-// - GUID: {2cb15d1d-5fc1-11d2-abe1-00a0c911f518}
-// - Event Type: 32 (HardFault)
-// - Event Class: PageFault_HardFault : PageFault_V2
+//   - Provider Name: NT Kernel Logger (PageFault)
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 32
+//   - Event Name(s): HardFault
+//   - Event Version(s): 2
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// [EventType{32}, EventTypeName{"HardFault"}]
+// Schema (from gen_mof_kerneldef.go):
+//   - InitialTime (object): Timestamp of the page fault. The format depends on the session's ClientContext.
+//   - ReadOffset (uint64): Read offset in the file.
+//   - VirtualAddress (pointer): Virtual address that caused the fault.
+//   - FileObject (pointer): Pointer to the file object.
+//   - TThreadId (uint32): Thread ID that encountered the fault.
+//   - ByteCount (uint32): Amount of data read.
 //
-//	class PageFault_HardFault : PageFault_V2 {
-//	  object InitialTime;  // WmiTime = UINT64 = FILETIME if Wnode.ClientContext == 1
-//	  uint64 ReadOffset;
-//	  uint32 VirtualAddress;
-//	  uint32 FileObject;
-//	  uint32 TThreadId;
-//	  uint32 ByteCount;
-//	};
-//
-// Key properties used:
-// - InitialTime (object): Time stamp of page fault
-// - TThreadId (uint32): Thread ID encountering the fault
-// - ByteCount (uint32): Amount of data read
-//
-// This handler counts hard page faults for memory performance metrics.
+// This handler increments a counter for each hard page fault, which is a key
+// indicator of memory pressure.
 func (h *PerfInfoHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 
 	h.collector.ProcessHardPageFaultEvent()

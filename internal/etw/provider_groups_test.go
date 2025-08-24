@@ -1,8 +1,10 @@
-package main
+package etwmain
 
 import (
 	"fmt"
 	"testing"
+
+	"etw_exporter/internal/config"
 
 	"github.com/tekert/goetw/etw"
 )
@@ -10,12 +12,11 @@ import (
 // TestProviderGroups tests the simplified provider groups functionality
 func TestProviderGroups(t *testing.T) {
 	// Create a sample config
-	config := &CollectorConfig{
-		DiskIO: DiskIOConfig{
-			Enabled:       true,
-			TrackDiskInfo: true,
+	config := &config.CollectorConfig{
+		DiskIO: config.DiskIOConfig{
+			Enabled: true,
 		},
-		ThreadCS: ThreadCSConfig{
+		ThreadCS: config.ThreadCSConfig{
 			Enabled: true,
 		},
 	}
@@ -59,7 +60,7 @@ func TestAddNewProvider(t *testing.T) {
 			},
 		},
 		// Simple enabled check function
-		IsEnabled: func(config *CollectorConfig) bool {
+		IsEnabled: func(config *config.CollectorConfig) bool {
 			// This would need a Network field in CollectorConfig
 			return false // Disabled for now since NetworkConfig doesn't exist
 		},
@@ -81,7 +82,7 @@ func TestComplexProvider(t *testing.T) {
 		ManifestProviders: []etw.Provider{
 			// ... providers would be defined here
 		},
-		IsEnabled: func(config *CollectorConfig) bool {
+		IsEnabled: func(config *config.CollectorConfig) bool {
 			// Complex logic: enabled only if both disk I/O and threadcs are enabled
 			return config.DiskIO.Enabled && config.ThreadCS.Enabled
 		},
@@ -95,10 +96,9 @@ func TestComplexProvider(t *testing.T) {
 // TestProviderCombining tests that providers with same GUID are properly combined
 func TestProviderCombining(t *testing.T) {
 	// Create a config with disk I/O enabled
-	config := &CollectorConfig{
-		DiskIO: DiskIOConfig{
-			Enabled:       true,
-			TrackDiskInfo: true,
+	config := &config.CollectorConfig{
+		DiskIO: config.DiskIOConfig{
+			Enabled: true,
 		},
 	}
 

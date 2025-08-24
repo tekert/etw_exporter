@@ -1,4 +1,4 @@
-package main
+package kernelthread
 
 import (
 	"math"
@@ -10,6 +10,9 @@ import (
 
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
+
+	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/logger"
 )
 
 // ThreadStateKey represents a composite key for thread state transitions.
@@ -123,7 +126,7 @@ func NewThreadCSCollector() *ThreadCSCollector {
 		threadStateCounters:    threadStateCounters,
 		stateKeyToIndex:        stateKeyToIndex,
 		indexToStateKey:        indexToStateKey,
-		log:                    GetThreadLogger(),
+		log:                    logger.NewLoggerWithContext("thread_collector"),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -233,7 +236,7 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 	}
 
 	// Collect process context switches
-	processCollector := GetGlobalProcessCollector()
+	processCollector := kprocess.GetGlobalProcessCollector()
 	c.contextSwitchesPerProcess.Range(func(key, val any) bool {
 		pid := key.(uint32)
 		countPtr := val.(*int64)
@@ -298,7 +301,7 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 
 	// Record context switch per process (concurrent map)
 	if processID > 0 {
-		processCollector := GetGlobalProcessCollector()
+		processCollector := kprocess.GetGlobalProcessCollector()
 		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)

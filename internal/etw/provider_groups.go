@@ -1,7 +1,8 @@
-package main
+package etwmain
 
 import (
 	"github.com/tekert/goetw/etw"
+	"etw_exporter/internal/config"
 )
 
 // ProviderGroup defines a group of related ETW providers for a specific metric category
@@ -10,7 +11,7 @@ type ProviderGroup struct {
 	KernelFlags       uint32 // if set, this provider will be used in a kernel session
 	ManifestProviders []etw.Provider
 	// Function to check if this provider group is enabled based on config
-	IsEnabled func(config *CollectorConfig) bool
+	IsEnabled func(config *config.CollectorConfig) bool
 }
 
 // Pre-defined GUIDs for performance (no string comparisons)
@@ -77,7 +78,7 @@ var AllProviderGroups = []*ProviderGroup{
 				MatchAllKeyword: 0x0,
 			},
 		},
-		IsEnabled: func(config *CollectorConfig) bool {
+		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.DiskIO.Enabled
 		},
 	},
@@ -98,7 +99,7 @@ var AllProviderGroups = []*ProviderGroup{
 				MatchAllKeyword: 0x0,
 			},
 		},
-		IsEnabled: func(config *CollectorConfig) bool {
+		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.ThreadCS.Enabled
 		},
 	},
@@ -113,14 +114,14 @@ var AllProviderGroups = []*ProviderGroup{
 			etw.EVENT_TRACE_FLAG_CSWITCH,  // Thread V2 (Used for DPC duration calculation)
 			//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
 		ManifestProviders: []etw.Provider{}, // No manifest providers
-		IsEnabled: func(config *CollectorConfig) bool {
+		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.PerfInfo.Enabled
 		},
 	},
 }
 
 // GetEnabledProviders returns all enabled provider groups
-func GetEnabledProviders(config *CollectorConfig) []*ProviderGroup {
+func GetEnabledProviders(config *config.CollectorConfig) []*ProviderGroup {
 	var enabled []*ProviderGroup
 
 	for _, group := range AllProviderGroups {
@@ -133,7 +134,7 @@ func GetEnabledProviders(config *CollectorConfig) []*ProviderGroup {
 }
 
 // GetEnabledKernelFlags returns combined kernel flags for all enabled groups
-func GetEnabledKernelFlags(config *CollectorConfig) uint32 {
+func GetEnabledKernelFlags(config *config.CollectorConfig) uint32 {
 	var flags uint32
 
 	for _, group := range AllProviderGroups {
@@ -147,7 +148,7 @@ func GetEnabledKernelFlags(config *CollectorConfig) uint32 {
 
 // GetEnabledManifestProviders returns all manifest providers for enabled groups
 // Combines providers with the same GUID by merging their keywords
-func GetEnabledManifestProviders(config *CollectorConfig) []etw.Provider {
+func GetEnabledManifestProviders(config *config.CollectorConfig) []etw.Provider {
 	// Map to combine providers with same GUID
 	providerMap := make(map[string]*etw.Provider)
 

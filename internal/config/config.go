@@ -1,14 +1,15 @@
-package main
+package config
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 
 	"github.com/BurntSushi/toml"
-	"github.com/phuslu/log"
 )
 
 // Configuration system:
@@ -35,6 +36,9 @@ type ServerConfig struct {
 
 	// Metrics endpoint path (default: "/metrics")
 	MetricsPath string `toml:"metrics_path"`
+
+	// Enable pprof endpoint for debugging (default: true)
+	PprofEnabled bool `toml:"pprof_enabled"`
 }
 
 // CollectorConfig defines which collectors are enabled and their settings
@@ -58,9 +62,6 @@ type CollectorConfig struct {
 type DiskIOConfig struct {
 	// Enable disk I/O event collection (default: true)
 	Enabled bool `toml:"enabled"`
-
-	// Track additional disk information (default: true)
-	TrackDiskInfo bool `toml:"track_disk_info"`
 }
 
 // ThreadCSConfig contains thread context switch collector settings
@@ -224,17 +225,17 @@ func DefaultConfig() *AppConfig {
 		Server: ServerConfig{
 			ListenAddress: "localhost:9189",
 			MetricsPath:   "/metrics",
+			PprofEnabled:  true,
 		},
 		Collectors: CollectorConfig{
 			DiskIO: DiskIOConfig{
-				Enabled:       true,
-				TrackDiskInfo: true,
+				Enabled: true,
 			},
 			ThreadCS: ThreadCSConfig{
 				Enabled: false,
 			},
 			PerfInfo: PerfInfoConfig{
-				Enabled:            true,  // Core system-wide metrics enabled by default
+				Enabled:            false,  // Core system-wide metrics enabled by default
 				EnablePerDriver:    false, // Per-driver metrics disabled by default
 				EnablePerCPU:       false, // Disabled by default to reduce cardinality
 				EnableSMIDetection: false, // Disabled by default as it requires PROFILE kernel group
@@ -294,7 +295,7 @@ func DefaultConfig() *AppConfig {
 					Eventlog: &EventlogConfig{
 						Source: "ETW Exporter",
 						ID:     1000,
-						Host:   "localhost",
+						Host:   "",    // localhost
 						Async:  false, // Event log is typically synchronous
 					},
 				},
@@ -389,9 +390,22 @@ func (c *AppConfig) Validate() error {
 		return fmt.Errorf("server.metrics_path cannot be empty")
 	}
 
-	// Validate that at least one collector is enabled
-	if !c.Collectors.DiskIO.Enabled && !c.Collectors.ThreadCS.Enabled && !c.Collectors.PerfInfo.Enabled {
-		return fmt.Errorf("at least one collector must be enabled")
+	// Validate that at least one collector is enabled using reflection.
+	// This automatically handles any new collectors added to CollectorConfig.
+	v := reflect.ValueOf(c.Collectors)
+	oneCollectorEnabled := false
+	for i := 0; i < v.NumField(); i++ {
+		// Get the 'Enabled' field from each collector's config struct
+		enabledField := v.Field(i).FieldByName("Enabled")
+		if enabledField.IsValid() && enabledField.Kind() == reflect.Bool {
+			if enabledField.Bool() {
+				oneCollectorEnabled = true
+				break
+			}
+		}
+	}
+	if !oneCollectorEnabled {
+		return fmt.Errorf("at least one collector must be enabled in the [collectors] section")
 	}
 
 	// Validate that at least one output is enabled
@@ -409,19 +423,82 @@ func (c *AppConfig) Validate() error {
 	return nil
 }
 
-// configureLoggers sets up the application and library loggers based on configuration
-func configureLoggers(config *AppConfig) error {
-	// Configure main application logging
-	if err := ConfigureLogging(config.Logging); err != nil {
-		return fmt.Errorf("failed to configure application logging: %w", err)
+// Flags holds the command-line flags
+type Flags struct {
+	ListenAddress  string
+	MetricsPath    string
+	ConfigPath     string
+	GenerateConfig string
+}
+
+// NewConfig creates a new configuration by parsing flags and loading the config file.
+func NewConfig() (*AppConfig, error) {
+	flags := &Flags{}
+
+	// Define flags and bind them to the Flags struct
+	flag.StringVar(&flags.ListenAddress,
+		"web.listen-address",
+		":9189",
+		"Address to listen on for web interface and telemetry.")
+	flag.StringVar(&flags.MetricsPath,
+		"web.telemetry-path",
+		"/metrics",
+		"Path under which to expose metrics.")
+	flag.StringVar(&flags.ConfigPath,
+		"config",
+		"",
+		"Path to configuration file (optional).")
+	flag.StringVar(&flags.GenerateConfig,
+		"generate-config",
+		"",
+		"Generate example config file to specified path and exit.")
+	flag.Parse()
+
+	// Handle config generation and exit.
+	// We return a special error to signal that the program should exit cleanly.
+	if flags.GenerateConfig != "" {
+		if err := GenerateExampleConfig(flags.GenerateConfig); err != nil {
+			return nil, fmt.Errorf("error generating example config: %w", err)
+		}
+		fmt.Printf("Generated %s successfully\n", flags.GenerateConfig)
+		return nil, nil // Signal clean exit
 	}
 
-	// Log configuration summary using the new logger
-	log.Info().
-		Str("app_level", config.Logging.Defaults.Level).
-		Str("lib_level", config.Logging.LibLevel).
-		Int("outputs", len(config.Logging.Outputs)).
-		Msg("🔧 Loggers configured")
+	// Start with default config
+	config := DefaultConfig()
 
-	return nil
+	// Load configuration from file if a path is provided
+	if flags.ConfigPath != "" {
+		var err error
+		config, err = LoadConfig(flags.ConfigPath)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	// Override config with command-line flags if they were set by the user
+	if isFlagPassed("web.listen-address") {
+		config.Server.ListenAddress = flags.ListenAddress
+	}
+	if isFlagPassed("web.telemetry-path") {
+		config.Server.MetricsPath = flags.MetricsPath
+	}
+
+	// Validate the final configuration
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return config, nil
+}
+
+// isFlagPassed checks if a flag was explicitly set on the command line.
+func isFlagPassed(name string) bool {
+	found := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }

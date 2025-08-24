@@ -1,4 +1,4 @@
-package main
+package kernelthread
 
 import (
 	"runtime"
@@ -8,6 +8,8 @@ import (
 
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
+
+	"etw_exporter/internal/logger"
 )
 
 // ThreadHandler handles thread events and metrics with low cardinality.
@@ -39,7 +41,7 @@ func NewThreadHandler() *ThreadHandler {
 	return &ThreadHandler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
 		customCollector: NewThreadCSCollector(),
-		log:             GetThreadLogger(),
+		log:             logger.NewLoggerWithContext("thread_handler"),
 	}
 }
 
