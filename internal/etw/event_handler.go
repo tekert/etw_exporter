@@ -67,8 +67,6 @@ type EventHandler struct {
 
 	// Future collectors will be added here:
 	// networkCollector *NetworkCollector
-	// memoryCollector  *MemoryCollector
-	// cpuCollector     *CPUCollector
 
 	// Shared state and caches for callbacks
 	config *config.CollectorConfig

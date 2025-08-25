@@ -7,7 +7,7 @@ require (
 	github.com/BurntSushi/toml v1.5.0
 	github.com/phuslu/log v1.0.120-0.20250817074608-99590f16ff47
 	github.com/prometheus/client_golang v1.23.0
-	github.com/tekert/goetw v0.7.4
+	github.com/tekert/goetw v0.7.9-beta1
 )
 
 require (
@@ -18,5 +18,5 @@ require (
 	github.com/prometheus/common v0.65.0 // indirect
 	github.com/prometheus/procfs v0.17.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
-	google.golang.org/protobuf v1.36.7 // indirect
+	google.golang.org/protobuf v1.36.8 // indirect
 )

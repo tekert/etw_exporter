@@ -60,22 +60,22 @@ func NewETWStatsCollector(sm *SessionManager) *ETWStatsCollector {
 
 		sessionBuffersInUseDesc: prometheus.NewDesc(
 			"etw_session_buffers_in_use",
-			"The current number of buffers in use by an ETW session.",
+			"The number of buffers allocated for the event tracing session's buffer pool",
 			[]string{"trace"}, nil,
 		),
 		sessionBuffersFreeDesc: prometheus.NewDesc(
 			"etw_session_buffers_free",
-			"The current number of free buffers available to an ETW session.",
+			"The number of buffers that are allocated but unused in the event tracing session's buffer pool.",
 			[]string{"trace"}, nil,
 		),
 		sessionEventsLostDesc: prometheus.NewDesc(
 			"etw_session_events_lost_total",
-			"Total number of events lost by an ETW session (provider-side).",
+			"Total number of events that where not recorded by an ETW session (provider-side).",
 			[]string{"trace"}, nil,
 		),
 		sessionRTBuffersLostDesc: prometheus.NewDesc(
 			"etw_session_realtime_buffers_lost_total",
-			"Total number of real-time buffers lost by an ETW session (provider-side).",
+			"The number of buffers that could not be delivered in real-time to the consumer (provider-side).",
 			[]string{"trace"}, nil,
 		),
 	}
