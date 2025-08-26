@@ -5,8 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tekert/goetw/logsampler/adapters"
 
 	"etw_exporter/internal/collectors/kprocess"
 	"etw_exporter/internal/logger"
@@ -32,7 +32,7 @@ type DiskIOCustomCollector struct {
 
 	// Synchronization
 	mu  sync.RWMutex
-	log log.Logger
+	log *adapters.SampledLogger
 
 	// Metric Descriptors
 	diskIOCountDesc         *prometheus.Desc
@@ -105,7 +105,7 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 		processIOCount:      make(map[ProcessIOKey]*int64),
 		processBytesRead:    make(map[ProcessBytesKey]*int64),
 		processBytesWritten: make(map[ProcessBytesKey]*int64),
-		log:                 logger.NewLoggerWithContext("diskio_collector"),
+		log:                 logger.NewSampledLoggerCtx("diskio_collector"),
 
 		// Disk I/O metrics
 		diskIOCountDesc: prometheus.NewDesc(

@@ -1,9 +1,11 @@
 package etwmain
 
 import (
-	"github.com/phuslu/log"
+	"sync/atomic"
+
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters"
 
 	"etw_exporter/internal/collectors/kdiskio"
 	"etw_exporter/internal/collectors/kernelthread"
@@ -70,7 +72,17 @@ type EventHandler struct {
 
 	// Shared state and caches for callbacks
 	config *config.CollectorConfig
-	log    log.Logger // Event handler logger
+	log    *adapters.SampledLogger // Event handler logger
+
+	// Event counters by provider - atomic counters for thread safety
+	diskEventCount         atomic.Uint64
+	processEventCount      atomic.Uint64
+	threadEventCount       atomic.Uint64
+	fileEventCount         atomic.Uint64
+	perfinfoEventCount     atomic.Uint64
+	systemConfigEventCount atomic.Uint64
+	imageEventCount        atomic.Uint64
+	pageFaultEventCount    atomic.Uint64
 
 	// Routing tables for different event types - hot path optimized
 	diskEventHandlers    []DiskEventHandler
@@ -87,7 +99,7 @@ type EventHandler struct {
 func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	handler := &EventHandler{
 		config:               config,
-		log:                  logger.NewLoggerWithContext("event_handler"),
+		log:                  logger.NewSampledLoggerCtx("event_handler"),
 		diskEventHandlers:    make([]DiskEventHandler, 0),
 		processEventHandlers: make([]ProcessEventHandler, 0),
 		threadEventHandlers:  make([]ThreadNtEventHandler, 0),
@@ -186,8 +198,18 @@ func (h *EventHandler) RegisterSystemConfigEventHandler(handler SystemConfigEven
 	h.log.Debug().Int("total_systemconfig_handlers", len(h.systemConfigHandlers)).Msg("SystemConfig event handler registered")
 }
 
+// GetEventCounts returns the current event counts for each provider.
+// These methods are used by the ETW stats collector to expose metrics.
+func (h *EventHandler) GetDiskEventCount() uint64         { return h.diskEventCount.Load() }
+func (h *EventHandler) GetProcessEventCount() uint64      { return h.processEventCount.Load() }
+func (h *EventHandler) GetThreadEventCount() uint64       { return h.threadEventCount.Load() }
+func (h *EventHandler) GetFileEventCount() uint64         { return h.fileEventCount.Load() }
+func (h *EventHandler) GetPerfInfoEventCount() uint64     { return h.perfinfoEventCount.Load() }
+func (h *EventHandler) GetSystemConfigEventCount() uint64 { return h.systemConfigEventCount.Load() }
+func (h *EventHandler) GetImageEventCount() uint64        { return h.imageEventCount.Load() }
+func (h *EventHandler) GetPageFaultEventCount() uint64    { return h.pageFaultEventCount.Load() }
+
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
-// Using struct methods allows us to share state and reduce parameter passing
 
 // EventRecordCallback is the first-stage, hot-path callback for every event record.
 // It performs fast-path filtering for extremely high-frequency events (like CSwitch)
@@ -201,6 +223,7 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// CSwitch Event: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}, Opcode 36
 	if record.EventHeader.ProviderId.Equals(ThreadKernelGUID) &&
 		record.EventHeader.EventDescriptor.Opcode == 36 {
+		h.threadEventCount.Add(1)
 
 		for _, handler := range h.threadEventHandlers {
 			// We ignore the error here for performance. The raw handler should log it.
@@ -246,41 +269,49 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 
 	// Route SystemConfig events
 	if providerGUID.Equals(SystemConfigGUID) {
+		h.systemConfigEventCount.Add(1)
 		return h.routeSystemConfigEvents(helper, eventID)
 	}
 
 	// Route disk events from Microsoft-Windows-Kernel-Disk
 	if providerGUID.Equals(MicrosoftWindowsKernelDiskGUID) {
+		h.diskEventCount.Add(1)
 		return h.routeDiskEvents(helper, eventID)
 	}
 
 	// Route process events from Microsoft-Windows-Kernel-Process
 	if providerGUID.Equals(MicrosoftWindowsKernelProcessGUID) {
+		h.processEventCount.Add(1)
 		return h.routeProcessEvents(helper, eventID)
 	}
 
 	// Route file events from Microsoft-Windows-Kernel-File
 	if providerGUID.Equals(MicrosoftWindowsKernelFileGUID) {
+		h.fileEventCount.Add(1)
 		return h.routeFileEvents(helper, eventID)
 	}
 
 	// Route thread events from Thread kernel provider
 	if providerGUID.Equals(ThreadKernelGUID) {
+		h.threadEventCount.Add(1)
 		return h.routeThreadEvents(helper, eventID)
 	}
 
 	// Route PerfInfo events (ISR, DPC)
 	if providerGUID.Equals(PerfInfoKernelGUID) {
+		h.perfinfoEventCount.Add(1)
 		return h.routePerfInfoEvents(helper, eventID)
 	}
 
 	// Route Image events (Image)
 	if providerGUID.Equals(ImageKernelGUID) {
+		h.imageEventCount.Add(1)
 		return h.routeImageEvents(helper, eventID)
 	}
 
 	// Route PageFault events
 	if providerGUID.Equals(PageFaultKernelGUID) {
+		h.pageFaultEventCount.Add(1)
 		return h.routePageFaultEvents(helper, eventID)
 	}
 

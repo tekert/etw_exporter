@@ -13,6 +13,15 @@ import (
 
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler"
+	"github.com/tekert/goetw/logsampler/adapters"
+)
+
+// NOTE: use example: log = logger.NewSampledLoggerWithContext("event-processor")
+
+var (
+	// mainSampler holds the global sampler for the application's hot-paths.
+	mainSampler logsampler.Sampler
 )
 
 // parseLogLevel converts string log level to log.Level
@@ -305,6 +314,18 @@ func ConfigureLogging(config config.LoggingConfig) error {
 		Writer:       multiWriter,
 	}
 
+	// Create and configure the application's main sampler.
+	backoffConfig := logsampler.BackoffConfig{
+		InitialInterval: 1 * time.Second,
+		MaxInterval:     1 * time.Hour,
+		Factor:          1.5,
+		ResetInterval:   10 * time.Minute,
+	}
+	// The sampler needs a logger to report summaries. We'll use the default logger.
+	reporter := &adapters.SummaryReporter{Logger: &log.DefaultLogger}
+	mainSampler = logsampler.NewDeduplicatingSampler(backoffConfig, reporter) // uses extra goroutine
+	//mainSampler = logsampler.NewEventDrivenSampler(backoffConfig, reporter) // no goroutines
+
 	// Configure ETW library logging
 	if err := ConfigureETWLibraryLogger(config.LibLevel, multiWriter); err != nil {
 		return fmt.Errorf("failed to configure ETW library logging: %w", err)
@@ -325,16 +346,35 @@ func ConfigureLogging(config config.LoggingConfig) error {
 // the DefaultLogger is properly configured.
 func NewLoggerWithContext(component string) log.Logger {
 	// Create a copy to avoid modifying the original logger
-	baseLogger := log.DefaultLogger
+	bl := &log.DefaultLogger
 	return log.Logger{
-		Level:        baseLogger.Level,
+		Level:        bl.Level,
 		Caller:       0, // Disable caller for component loggers to avoid confusion
-		TimeField:    baseLogger.TimeField,
-		TimeFormat:   baseLogger.TimeFormat,
-		TimeLocation: baseLogger.TimeLocation,
-		Writer:       baseLogger.Writer,
-		Context:      log.NewContext(baseLogger.Context).Str("component", component).Value(),
+		TimeField:    bl.TimeField,
+		TimeFormat:   bl.TimeFormat,
+		TimeLocation: bl.TimeLocation,
+		Writer:       bl.Writer,
+		Context:      log.NewContext(bl.Context).Str("component", component).Value(),
 	}
+}
+
+// NewSampledLoggerCtx creates a new sampled logger for a specific component.
+// It uses the globally configured sampler.
+func NewSampledLoggerCtx(component string) *adapters.SampledLogger {
+	// Create a base logger for the component, similar to NewLoggerWithContext.
+	bl := &log.DefaultLogger
+	componentLogger := &log.Logger{
+		Level:        bl.Level,
+		Caller:       0, // Disable caller for component loggers to avoid confusion
+		TimeField:    bl.TimeField,
+		TimeFormat:   bl.TimeFormat,
+		TimeLocation: bl.TimeLocation,
+		Writer:       bl.Writer,
+		Context:      log.NewContext(bl.Context).Str("component", component).Value(),
+	}
+
+	// Wrap the component logger with the sampler adapter.
+	return adapters.NewSampledLogger(componentLogger, mainSampler)
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration

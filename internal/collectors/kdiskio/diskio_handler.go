@@ -3,8 +3,8 @@ package kdiskio
 import (
 	"sync"
 
-	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters"
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
@@ -37,7 +37,7 @@ type DiskIOHandler struct {
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
 
-	log log.Logger // Disk I/O handler logger
+	log *adapters.SampledLogger // Disk I/O handler logger
 }
 
 // NewDiskIOHandler creates a new disk I/O handler instance with custom collector integration.
@@ -50,7 +50,8 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *DiskIOHandler {
 		customCollector: NewDiskIOCustomCollector(),
 		config:          config,
 		fileObjectMap:   make(map[uint64]uint32),
-		log:             logger.NewLoggerWithContext("diskio_handler"),
+		//log:             logger.NewLoggerWithContext("diskio_handler"),
+		log: logger.NewSampledLoggerCtx("diskio_handler"),
 	}
 }
 
@@ -79,13 +80,13 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *DiskIOHandler {
 func (d *DiskIOHandler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
-		d.log.Error().Err(err).Msg("Failed to get DiskNumber property for disk read")
+		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk read")
 		return err
 	}
 
 	transferSize, err := helper.GetPropertyUint("TransferSize")
 	if err != nil {
-		d.log.Error().Err(err).Msg("Failed to get TransferSize property for disk read")
+		d.log.SampledError("failed-transfersize").Err(err).Msg("Failed to get TransferSize property for disk read")
 		return err
 	}
 
@@ -157,13 +158,13 @@ func (d *DiskIOHandler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 func (d *DiskIOHandler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
-		d.log.Error().Err(err).Msg("Failed to get DiskNumber property for disk write")
+		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk write")
 		return err
 	}
 
 	transferSize, err := helper.GetPropertyUint("TransferSize")
 	if err != nil {
-		d.log.Error().Err(err).Msg("Failed to get TransferSize property for disk write")
+		d.log.SampledError("failed-transfersize").Err(err).Msg("Failed to get TransferSize property for disk write")
 		return err
 	}
 
@@ -230,7 +231,7 @@ func (d *DiskIOHandler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 func (d *DiskIOHandler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
-		d.log.Error().Err(err).Msg("Failed to get DiskNumber property for disk flush")
+		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk flush")
 		return err
 	}
 

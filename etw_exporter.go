@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	_ "net/http/pprof" // For pprof server
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -44,7 +45,7 @@ func NewETWExporter(config *config.AppConfig) (*ETWExporter, error) {
 	exporter.setupHTTPServer()
 
 	// Register ETW statistics collector
-	statsCollector := etwmain.NewETWStatsCollector(exporter.etwSession)
+	statsCollector := etwmain.NewETWStatsCollector(exporter.etwSession, exporter.eventHandler)
 	prometheus.MustRegister(statsCollector)
 	exporter.log.Info().Msg("ETW statistics collector enabled and registered with Prometheus")
 
@@ -90,13 +91,30 @@ func (e *ETWExporter) setupHTTPServer() {
 
 // Run starts all services and waits for a shutdown signal.
 func (e *ETWExporter) Run() error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	// Create a context that we can stop to trigger a graceful shutdown.
+	ctx, stop := context.WithCancel(context.Background())
 	defer stop()
+
+	// Listen for OS signals in a separate goroutine.
+	go func() {
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+		<-sigChan
+		e.log.Info().Msg("! Received OS shutdown signal, shutting down gracefully...")
+		stop()
+	}()
 
 	debugCounter = NewDebugCounter(ctx) // ! testing
 
 	if e.config.Server.PprofEnabled {
 		go func() {
+			// Recover from panics in this goroutine to trigger a graceful shutdown.
+			defer func() {
+				if r := recover(); r != nil {
+					e.log.Error().Interface("panic", r).Msg("Panic recovered in pprof server, initiating shutdown")
+					stop()
+				}
+			}()
 			e.log.Info().Msg("Starting pprof HTTP server on localhost:6060")
 			// pprof registers its handlers on http.DefaultServeMux
 			if err := http.ListenAndServe("localhost:6060", nil); err != nil {
@@ -109,35 +127,47 @@ func (e *ETWExporter) Run() error {
 	if err := e.etwSession.Start(); err != nil {
 		return fmt.Errorf("failed to start ETW session: %w", err)
 	}
-	defer func() {
-		if err := e.etwSession.Stop(); err != nil {
-			e.log.Error().Err(err).Msg("Error stopping ETW session")
-		}
-	}()
 	e.log.Info().Msg("ETW session started successfully")
 
 	go func() {
+		// Recover from panics in this goroutine to trigger a graceful shutdown.
+		defer func() {
+			if r := recover(); r != nil {
+				e.log.Error().Interface("panic", r).Msg("Panic recovered in HTTP server, initiating shutdown")
+				stop()
+			}
+		}()
 		e.log.Info().Str("address", e.config.Server.ListenAddress).Msg("Starting HTTP server")
 		if err := e.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			e.log.Fatal().Err(err).Msg("❌ Failed to start HTTP server")
+			e.log.Error().Err(err).Msg("❌ Failed to start HTTP server")
+			stop() // Trigger shutdown on server error
 		}
 	}()
 
 	e.log.Info().Msg("ETW Exporter is ready and collecting events...")
 
+	// Block until a shutdown is triggered (from OS signal, panic, or other error).
 	<-ctx.Done()
-	e.log.Info().Msg("! Received shutdown signal, shutting down gracefully...")
+	e.log.Info().Msg("! Shutdown initiated...")
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	// --- Graceful shutdown sequence ---
 
-	if err := e.httpServer.Shutdown(shutdownCtx); err != nil {
+	httpCtx, cancelhttp := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelhttp()
+
+	if err := e.httpServer.Shutdown(httpCtx); err != nil {
 		e.log.Error().Err(err).Msg("❌ Error shutting down HTTP server")
 	} else {
 		e.log.Debug().Msg("HTTP server shut down cleanly")
 	}
 
+	// Stop the ETW session as the final step.
+	if err := e.etwSession.Stop(); err != nil {
+		e.log.Error().Err(err).Msg("Error stopping ETW session")
+	} else {
+		e.log.Info().Msg("ETW session stopped successfully")
+	}
+
 	e.log.Info().Msg("ETW Exporter stopped gracefully")
-	// defer e.etwSession.Stop()
 	return nil
 }

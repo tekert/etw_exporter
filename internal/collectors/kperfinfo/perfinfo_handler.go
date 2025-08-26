@@ -112,6 +112,7 @@ func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
+	// is in QPC, SystemTime, or CPUTick depending on ClientContext
 	initialTime := helper.TimestampFromProp(initialTimeVal)
 
 	// Process the ISR event
@@ -160,15 +161,20 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	initialTime := helper.TimestampFromProp(initialTimeTicks)
 
 	// ! TESTING crash log lib
-	// //initialTime := etw.FromFiletime(initialTimeTicks)
-	// fromq := helper.FromQPC(initialTimeTicks)
 	// times++
 	// if times%10 == 0 {
 	// 	log.Info().Int64("initialTimeTicks", initialTimeTicks).Msg("TEST")
 	// 	log.Info().Int64("EventRec.Timestamp", helper.EventRec.EventHeader.TimeStamp).Msg("TEST")
 	// 	log.Info().Time("event_time", eventTime).Msg("TEST")
 	// 	log.Info().Time("initialTime", initialTime).Msg("TEST")
-	// 	log.Info().Time("fromq", fromq).Msg("TEST")
+	// 	log.Info().
+	// 		Str("event_time", eventTime.Format(time.RFC3339Nano)).
+	// 		Int64("event_time_ns", eventTime.UnixNano()).
+	// 		Msg("TEST")
+	// 	log.Info().
+	// 		Str("initialTime", initialTime.Format(time.RFC3339Nano)).
+	// 		Int64("initial_time_ns", initialTime.UnixNano()).
+	// 		Msg("TEST")
 	// 	os.Exit(1)
 	// }
 

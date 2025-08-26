@@ -216,15 +216,8 @@ func (s *SessionManager) setupConsumer() error {
 	return nil
 }
 
-// Stop gracefully stops the session manager
-func (s *SessionManager) Stop() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if !s.running {
-		return nil
-	}
-
+// StopSessions stops ONLY the ETW sessions without stopping the consumer.
+func (s *SessionManager) stopSessions() error {
 	// Stop sessions first
 	if s.manifestSession != nil {
 		if err := s.manifestSession.Stop(); err != nil {
@@ -237,10 +230,24 @@ func (s *SessionManager) Stop() error {
 			return fmt.Errorf("failed to stop kernel session: %w", err)
 		}
 	}
+	return nil
+}
+
+// Stop gracefully stops the session manager
+func (s *SessionManager) Stop() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.running {
+		return nil
+	}
+
+	// Stop sessions first
+	s.stopSessions()
 
 	// Stop consumer last
 	if s.consumer != nil {
-		if err := s.consumer.Stop(); err != nil {
+		if err := s.consumer.StopWithTimeout(2 * time.Second); err != nil {
 			return fmt.Errorf("failed to stop consumer: %w", err)
 		}
 	}

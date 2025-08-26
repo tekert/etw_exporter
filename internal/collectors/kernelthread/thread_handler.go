@@ -6,8 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters"
 
 	"etw_exporter/internal/logger"
 )
@@ -29,10 +29,10 @@ import (
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
 type ThreadHandler struct {
-	lastCpuSwitch   []atomic.Int64     // stores the last context switch timestamp (in ns) for each CPU
-	threadToProcess sync.Map           // key: threadID (uint32), value: processID (uint32)
-	customCollector *ThreadCSCollector // High-performance custom collector
-	log             log.Logger         // Thread collector logger
+	lastCpuSwitch   []atomic.Int64          // stores the last context switch timestamp (in ns) for each CPU
+	threadToProcess sync.Map                // key: threadID (uint32), value: processID (uint32)
+	customCollector *ThreadCSCollector      // High-performance custom collector
+	log             *adapters.SampledLogger // Thread collector logger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
@@ -41,7 +41,8 @@ func NewThreadHandler() *ThreadHandler {
 	return &ThreadHandler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
 		customCollector: NewThreadCSCollector(),
-		log:             logger.NewLoggerWithContext("thread_handler"),
+		log:             logger.NewSampledLoggerCtx("thread_handler"),
+		//log:             logger.NewLoggerWithContext("thread_handler"),
 	}
 }
 
@@ -67,23 +68,22 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// Read properties using direct offsets.
 	newThreadID, err := er.GetUint32At(0)
 	if err != nil {
-		// TODO: import sampler
-		c.log.Error().Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
+		c.log.SampledError("fail-newthreadid").
+			Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
 		return err
 	}
-	waitReason, err := er.GetInt8At(12)
+	oldThreadWaitReason, err := er.GetUint8At(12)
 	if err != nil {
-		// TODO: import sampler
-		c.log.Error().Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
+		c.log.SampledError("fail-waitreason").
+			Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
 		return err
 	}
 
 	// Get CPU number from processor index
 	cpu := er.ProcessorNumber()
 
-	// TODO: make the correct timestamp available to events.
-	// Timestamp from the event header. We must convert it from FILETIME.
-	eventTimeNano := etw.FromFiletime(er.EventHeader.TimeStamp).UnixNano()
+	// Timestamp (already converted from FILETIME by gotetw)
+	eventTimeNano := er.Timestamp().UnixNano()
 
 	// Calculate context switch interval using atomic operations.
 	var interval time.Duration
@@ -101,7 +101,7 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, interval)
 
 	// Track thread state transitions
-	waitReasonStr := GetWaitReasonString(uint8(waitReason))
+	waitReasonStr := GetWaitReasonString(oldThreadWaitReason)
 	c.customCollector.RecordThreadStateTransition("waiting", waitReasonStr)
 	c.customCollector.RecordThreadStateTransition("running", "none")
 
@@ -136,7 +136,7 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
 func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
-	// This is now the fallback/slower path. The primary logic has been moved to
+	// NOTE: This is now the fallback/slower path. The primary logic has been moved to
 	// HandleContextSwitchRaw for performance. This function will not be called
 	// for CSwitch events due to the routing logic in EventRecordCallback.
 

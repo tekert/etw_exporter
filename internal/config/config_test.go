@@ -202,8 +202,12 @@ func TestLoadConfig(t *testing.T) {
 listen_address = ":8080"
 metrics_path = "/test"
 
+[collectors]
 [collectors.disk_io]
 enabled = false
+
+[collectors.threadcs]
+enabled = true
 
 [logging.defaults]
 level = "debug"
@@ -354,7 +358,7 @@ func TestConfigGenerator(t *testing.T) {
 		tmpDir := t.TempDir()
 		configPath := filepath.Join(tmpDir, "cli_test.toml")
 
-		cmd := exec.Command("go", "run", ".", "-generate-config", configPath)
+		cmd := exec.Command("go", "run", "../../", "-generate-config", configPath)
 		output, err := cmd.CombinedOutput()
 		if err != nil {
 			t.Fatalf("CLI generator failed: %v, output: %s", err, output)

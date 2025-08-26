@@ -1,9 +1,9 @@
 package etwmain
 
 import (
-	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters"
 
 	"etw_exporter/internal/logger"
 )
@@ -12,7 +12,8 @@ import (
 // It provides metrics on the health and performance of the ETW data collection pipeline itself.
 type ETWStatsCollector struct {
 	sessionManager *SessionManager
-	log            log.Logger
+	eventHandler   *EventHandler
+	log            *adapters.SampledLogger
 
 	// Metric Descriptors
 	consumerEventsLostDesc *prometheus.Desc
@@ -25,15 +26,20 @@ type ETWStatsCollector struct {
 	sessionBuffersFreeDesc   *prometheus.Desc
 	sessionEventsLostDesc    *prometheus.Desc
 	sessionRTBuffersLostDesc *prometheus.Desc
+
+	// Event handler metrics - events received by provider
+	providerEventsReceivedDesc *prometheus.Desc
 }
 
 // NewETWStatsCollector creates a new ETW statistics collector.
-func NewETWStatsCollector(sm *SessionManager) *ETWStatsCollector {
+func NewETWStatsCollector(sm *SessionManager, eh *EventHandler) *ETWStatsCollector {
 	// Create a new logger instance with additional context for this collector.
-	statsLogger := logger.NewLoggerWithContext("etw_stats_collector")
+	//statsLogger := logger.NewLoggerWithContext("etw_stats_collector")
+	statsLogger := logger.NewSampledLoggerCtx("etw_stats_collector")
 
 	return &ETWStatsCollector{
 		sessionManager: sm,
+		eventHandler:   eh,
 		log:            statsLogger,
 
 		consumerEventsLostDesc: prometheus.NewDesc(
@@ -78,6 +84,12 @@ func NewETWStatsCollector(sm *SessionManager) *ETWStatsCollector {
 			"The number of buffers that could not be delivered in real-time to the consumer (provider-side).",
 			[]string{"trace"}, nil,
 		),
+
+		providerEventsReceivedDesc: prometheus.NewDesc(
+			"etw_provider_events_received_total",
+			"Total number of events received from each ETW provider by the event handler.",
+			[]string{"provider"}, nil,
+		),
 	}
 }
 
@@ -91,6 +103,7 @@ func (c *ETWStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.sessionBuffersFreeDesc
 	ch <- c.sessionEventsLostDesc
 	ch <- c.sessionRTBuffersLostDesc
+	ch <- c.providerEventsReceivedDesc
 }
 
 // Collect implements prometheus.Collector.
@@ -108,6 +121,9 @@ func (c *ETWStatsCollector) Collect(ch chan<- prometheus.Metric) {
 	// Collect session stats by querying the sessions directly
 	c.collectSessionStats(ch, c.sessionManager.manifestSession)
 	c.collectSessionStats(ch, c.sessionManager.kernelSession)
+
+	// Collect event handler provider stats
+	c.collectProviderEventStats(ch)
 }
 
 // collectConsumerStats gathers metrics from the ETW consumer and its traces.
@@ -180,5 +196,70 @@ func (c *ETWStatsCollector) collectSessionStats(ch chan<- prometheus.Metric, ses
 		prometheus.CounterValue,
 		float64(prop.RealTimeBuffersLost),
 		traceName,
+	)
+}
+
+// collectProviderEventStats gathers metrics from the event handler showing
+// how many events were received from each provider.
+func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metric) {
+	if c.eventHandler == nil {
+		return
+	}
+
+	// Collect event counts for each provider type
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetDiskEventCount()),
+		"microsoft-windows-kernel-disk",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetProcessEventCount()),
+		"microsoft-windows-kernel-process",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetThreadEventCount()),
+		"thread-kernel",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetFileEventCount()),
+		"microsoft-windows-kernel-file",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetPerfInfoEventCount()),
+		"perfinfo-kernel",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetSystemConfigEventCount()),
+		"system-config",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetImageEventCount()),
+		"image-kernel",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetPageFaultEventCount()),
+		"pagefault-kernel",
 	)
 }
