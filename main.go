@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	version = "0.2.0"
+	version = "0.2.5"
 )
 
 // pprof comments for reference

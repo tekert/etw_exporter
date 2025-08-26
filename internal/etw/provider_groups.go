@@ -1,8 +1,11 @@
 package etwmain
 
 import (
-	"github.com/tekert/goetw/etw"
 	"etw_exporter/internal/config"
+	"fmt"
+
+	"github.com/phuslu/log"
+	"github.com/tekert/goetw/etw"
 )
 
 // ProviderGroup defines a group of related ETW providers for a specific metric category
@@ -12,6 +15,7 @@ type ProviderGroup struct {
 	ManifestProviders []etw.Provider
 	// Function to check if this provider group is enabled based on config
 	IsEnabled func(config *config.CollectorConfig) bool
+	InitFunc  func(pg *ProviderGroup) error // Optional function to initialize any required privileges
 }
 
 // Pre-defined GUIDs for performance (no string comparisons)
@@ -111,13 +115,41 @@ var AllProviderGroups = []*ProviderGroup{
 			etw.EVENT_TRACE_FLAG_DPC | // PerfInfo
 			etw.EVENT_TRACE_FLAG_IMAGE_LOAD | // Image
 			etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // PageFault
-			etw.EVENT_TRACE_FLAG_CSWITCH,  // Thread V2 (Used for DPC duration calculation)
-			//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
+			etw.EVENT_TRACE_FLAG_CSWITCH, // Thread V2 (Used for DPC duration calculation)
+		//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
 		ManifestProviders: []etw.Provider{}, // No manifest providers
 		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.PerfInfo.Enabled
 		},
 	},
+}
+
+// init initializes the provider group, calling any InitFunc if defined
+func (pg *ProviderGroup) init() error {
+	if pg.InitFunc != nil {
+		return pg.InitFunc(pg)
+	}
+	return nil
+}
+
+// InitProviders initializes all enabled provider groups based on the config
+// and ensures necessary privileges are set
+func InitProviders(config *config.CollectorConfig) error {
+	// Initialize all enabled provider groups
+	var once bool = false
+	for _, group := range GetEnabledProviders(config) {
+		// Ensure we have the necessary privileges for kernel sessions if PROFILE flag is set
+		if group.KernelFlags&etw.EVENT_TRACE_FLAG_PROFILE != 0 && !once {
+			etw.EnableProfilingPrivileges()
+			log.Warn().Msg("SE_SYSTEM_PROFILE_NAME Privilege enabled for profiling")
+			once = true
+		}
+		if err := group.init(); err != nil {
+			log.Error().Err(err).Str("group", group.Name).Msg("ProviderGroup Init failed")
+			return fmt.Errorf("failed to initialize provider group %s: %w", group.Name, err)
+		}
+	}
+	return nil
 }
 
 // GetEnabledProviders returns all enabled provider groups

@@ -61,15 +61,14 @@ func (s *SessionManager) Start() error {
 		return fmt.Errorf("session manager already running")
 	}
 
-	// Ensure we have the necessary privileges for kernel sessions
-	// etw.EVENT_TRACE_FLAG_PROFILE provider.
-	// ! TESTING
-	if s.config.PerfInfo.Enabled {
-		etw.EnableProfilingPrivileges()
-		s.log.Warn().Msg("SE_SYSTEM_PROFILE_NAME Privilege enabled for profiling")
-	}
-
 	s.log.Info().Msg("Starting ETW session manager...")
+
+	// Initialize all enabled provider groups first (calling Init on each)
+	if err := InitProviders(s.config); err != nil {
+		err = fmt.Errorf("failed to initialize provider groups: %w", err)
+		s.log.Error().Err(err).Msg("Error when initializing provider groups")
+	}
+	s.log.Debug().Msg("Provider groups initialized")
 
 	// Get SystemConfig events first if using manifest providers
 	// SystemConfig events only arrive when kernel sessions are stopped
@@ -198,7 +197,7 @@ func (s *SessionManager) setupSessions() error {
 		sessions = append(sessions, s.kernelSession)
 	}
 
-	// Create consumer from sessions
+	// Create consumer from sessions names
 	s.consumer = etw.NewConsumer(s.ctx).FromSessions(sessions...)
 
 	return nil
