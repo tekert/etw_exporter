@@ -246,7 +246,7 @@ func (s *SessionManager) Stop() error {
 
 	// Stop consumer last
 	if s.consumer != nil {
-		if err := s.consumer.StopWithTimeout(2 * time.Second); err != nil {
+		if err := s.consumer.StopWithTimeout(30 * time.Second); err != nil {
 			return fmt.Errorf("failed to stop consumer: %w", err)
 		}
 	}
@@ -309,7 +309,7 @@ func (s *SessionManager) TriggerProcessRundown() error {
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.
 func (s *SessionManager) startStaleProcessCleanup() {
 	//	const cleanupInterval = 5 * time.Minute
-	const cleanupInterval = 5 * time.Second
+	const cleanupInterval = 5 * time.Minute
 	// max age must be slightly longer than the interval to avoid race conditions
 	const processMaxAge = cleanupInterval + 10*time.Second
 	// Time to wait for the OS to process the rundown request and emit events
