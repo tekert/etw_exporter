@@ -18,9 +18,10 @@ type ETWStatsCollector struct {
 	// Metric Descriptors
 	consumerEventsLostDesc *prometheus.Desc
 
-	traceRTEventsLostDesc  *prometheus.Desc
-	traceRTBuffersLostDesc *prometheus.Desc
-	traceParseErrorsDesc   *prometheus.Desc
+	traceRTEventsLostDesc    *prometheus.Desc
+	traceRTBuffersLostDesc   *prometheus.Desc
+	traceParseErrorsDesc     *prometheus.Desc
+	tracePropParseErrorsDesc *prometheus.Desc
 
 	sessionBuffersInUseDesc  *prometheus.Desc
 	sessionBuffersFreeDesc   *prometheus.Desc
@@ -43,50 +44,55 @@ func NewETWStatsCollector(sm *SessionManager, eh *EventHandler) *ETWStatsCollect
 		log:            statsLogger,
 
 		consumerEventsLostDesc: prometheus.NewDesc(
-			"etw_consumer_events_lost_total",
+			"etw_stat_consumer_events_lost_total",
 			"Total number of events lost across all trace sessions, as reported by the consumer.",
 			nil, nil,
 		),
-
 		traceRTEventsLostDesc: prometheus.NewDesc(
-			"etw_consumer_trace_rt_events_lost_total",
+			"etw_stat_consumer_rt_events_lost_total",
 			"Total number of real-time events lost for a specific trace, reported by the consumer's RT_LostEvent handler.",
 			[]string{"trace"}, nil,
 		),
 		traceRTBuffersLostDesc: prometheus.NewDesc(
-			"etw_consumer_trace_rt_buffers_lost_total",
+			"etw_stat_consumer_rt_buffers_lost_total",
 			"Total number of real-time buffers lost for a specific trace, reported by the consumer's RT_LostEvent handler.",
 			[]string{"trace"}, nil,
 		),
+
 		traceParseErrorsDesc: prometheus.NewDesc(
-			"etw_consumer_trace_parse_errors_total",
+			"etw_stat_consumer_event_parse_errors_total",
 			"Total number of events that failed to parse for a specific trace.",
+			[]string{"trace"}, nil,
+		),
+		tracePropParseErrorsDesc: prometheus.NewDesc(
+			"etw_stat_consumer_property_parse_errors_total",
+			"Total number of event properties that failed to parse for a specific trace.",
 			[]string{"trace"}, nil,
 		),
 
 		sessionBuffersInUseDesc: prometheus.NewDesc(
-			"etw_session_buffers_in_use",
+			"etw_stat_session_buffers_in_use",
 			"The number of buffers allocated for the event tracing session's buffer pool",
 			[]string{"trace"}, nil,
 		),
 		sessionBuffersFreeDesc: prometheus.NewDesc(
-			"etw_session_buffers_free",
+			"etw_stat_session_buffers_free",
 			"The number of buffers that are allocated but unused in the event tracing session's buffer pool.",
 			[]string{"trace"}, nil,
 		),
 		sessionEventsLostDesc: prometheus.NewDesc(
-			"etw_session_events_lost_total",
+			"etw_stat_session_events_lost_total",
 			"Total number of events that where not recorded by an ETW session (provider-side).",
 			[]string{"trace"}, nil,
 		),
 		sessionRTBuffersLostDesc: prometheus.NewDesc(
-			"etw_session_realtime_buffers_lost_total",
+			"etw_stat_session_realtime_buffers_lost_total",
 			"The number of buffers that could not be delivered in real-time to the consumer (provider-side).",
 			[]string{"trace"}, nil,
 		),
 
 		providerEventsReceivedDesc: prometheus.NewDesc(
-			"etw_provider_events_received_total",
+			"etw_stat_handler_events_received_total",
 			"Total number of events received from each ETW provider by the event handler.",
 			[]string{"provider"}, nil,
 		),
@@ -99,6 +105,7 @@ func (c *ETWStatsCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.traceRTEventsLostDesc
 	ch <- c.traceRTBuffersLostDesc
 	ch <- c.traceParseErrorsDesc
+	ch <- c.tracePropParseErrorsDesc
 	ch <- c.sessionBuffersInUseDesc
 	ch <- c.sessionBuffersFreeDesc
 	ch <- c.sessionEventsLostDesc
@@ -154,6 +161,12 @@ func (c *ETWStatsCollector) collectConsumerStats(ch chan<- prometheus.Metric, co
 			c.traceParseErrorsDesc,
 			prometheus.CounterValue,
 			float64(trace.ErrorEvents.Load()),
+			traceName,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			c.tracePropParseErrorsDesc,
+			prometheus.CounterValue,
+			float64(trace.ErrorPropsParse.Load()),
 			traceName,
 		)
 	}
@@ -261,5 +274,12 @@ func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metri
 		prometheus.CounterValue,
 		float64(c.eventHandler.GetPageFaultEventCount()),
 		"pagefault-kernel",
+	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetNetworkEventCount()),
+		"microsoft-windows-kernel-network",
 	)
 }
