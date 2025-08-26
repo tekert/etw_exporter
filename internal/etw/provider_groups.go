@@ -27,6 +27,7 @@ var (
 	MicrosoftWindowsKernelDiskGUID    = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
 	MicrosoftWindowsKernelProcessGUID = etw.MustParseGUID("{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}") // Microsoft-Windows-Kernel-Process
 	MicrosoftWindowsKernelFileGUID    = etw.MustParseGUID("{edd08927-9cc4-4e65-b970-c2560fb5c289}") // Microsoft-Windows-Kernel-File
+	MicrosoftWindowsKernelNetworkGUID = etw.MustParseGUID("{7dd42a49-5329-4832-8dfd-43d979153a88}") // Microsoft-Windows-Kernel-Network
 
 	// # MOF Providers (NT  Kernel Logger) - require kernel session
 
@@ -120,6 +121,33 @@ var AllProviderGroups = []*ProviderGroup{
 		ManifestProviders: []etw.Provider{}, // No manifest providers
 		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.PerfInfo.Enabled
+		},
+	},
+
+	// NetworkGroup uses manifest providers for network I/O events
+	{
+		Name:        "network",
+		KernelFlags: 0, // No kernel flags - using manifest providers only
+		ManifestProviders: []etw.Provider{
+			{
+				Name: "Microsoft-Windows-Kernel-Network",
+				GUID: *MicrosoftWindowsKernelNetworkGUID,
+				// Enable network events: TCP/UDP data sent/received, connections
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x30, // KERNEL_NETWORK_KEYWORD_IPV4 | KERNEL_NETWORK_KEYWORD_IPV6
+				MatchAllKeyword: 0x0,
+			},
+			{
+				Name: "Microsoft-Windows-Kernel-Process", // For network process name correlation
+				GUID: *MicrosoftWindowsKernelProcessGUID,
+				// Enable process events: Start (1), Stop (2), Rundown (15)
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x10, // WINEVENT_KEYWORD_PROCESS
+				MatchAllKeyword: 0x0,
+			},
+		},
+		IsEnabled: func(config *config.CollectorConfig) bool {
+			return config.Network.Enabled
 		},
 	},
 }

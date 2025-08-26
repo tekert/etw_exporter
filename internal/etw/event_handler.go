@@ -9,6 +9,7 @@ import (
 
 	"etw_exporter/internal/collectors/kdiskio"
 	"etw_exporter/internal/collectors/kernelthread"
+	"etw_exporter/internal/collectors/knetwork"
 	"etw_exporter/internal/collectors/kperfinfo"
 	"etw_exporter/internal/collectors/kprocess"
 	"etw_exporter/internal/collectors/ksystemconfig"
@@ -58,6 +59,18 @@ type SystemConfigEventHandler interface {
 	HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error
 }
 
+type NetworkEventHandler interface {
+	HandleTCPDataSent(helper *etw.EventRecordHelper) error
+	HandleTCPDataReceived(helper *etw.EventRecordHelper) error
+	HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) error
+	HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) error
+	HandleTCPDataRetransmitted(helper *etw.EventRecordHelper) error
+	HandleTCPConnectionFailed(helper *etw.EventRecordHelper) error
+	HandleUDPDataSent(helper *etw.EventRecordHelper) error
+	HandleUDPDataReceived(helper *etw.EventRecordHelper) error
+	HandleUDPConnectionFailed(helper *etw.EventRecordHelper) error
+}
+
 // EventHandler encapsulates state and logic for ETW event processing
 // This handler routes events to specialized sub-handlers based on event type
 // and provider GUID.
@@ -66,9 +79,9 @@ type EventHandler struct {
 	diskHandler     *kdiskio.DiskIOHandler
 	threadCSHandler *kernelthread.ThreadHandler
 	perfinfoHandler *kperfinfo.PerfInfoHandler
+	networkHandler  *knetwork.NetworkHandler
 
 	// Future collectors will be added here:
-	// networkCollector *NetworkCollector
 
 	// Shared state and caches for callbacks
 	config *config.CollectorConfig
@@ -83,6 +96,7 @@ type EventHandler struct {
 	systemConfigEventCount atomic.Uint64
 	imageEventCount        atomic.Uint64
 	pageFaultEventCount    atomic.Uint64
+	networkEventCount      atomic.Uint64
 
 	// Routing tables for different event types - hot path optimized
 	diskEventHandlers    []DiskEventHandler
@@ -91,6 +105,7 @@ type EventHandler struct {
 	fileEventHandlers    []FileEventHandler
 	perfinfoHandlers     []PerfInfoNtEventHandler
 	systemConfigHandlers []SystemConfigEventHandler
+	networkEventHandlers []NetworkEventHandler
 }
 
 // NewEventHandler creates a new central event handler. It initializes all collectors
@@ -106,6 +121,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		fileEventHandlers:    make([]FileEventHandler, 0),
 		perfinfoHandlers:     make([]PerfInfoNtEventHandler, 0),
 		systemConfigHandlers: make([]SystemConfigEventHandler, 0),
+		networkEventHandlers: make([]NetworkEventHandler, 0),
 	}
 
 	// Always register the global process handler for process events
@@ -156,6 +172,20 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.log.Info().Msg("PerfInfo collector enabled and registered with Prometheus")
 	}
 
+	if config.Network.Enabled {
+		networkCollector := knetwork.NewNetworkCollector(&config.Network)
+		handler.networkHandler = knetwork.NewNetworkHandler(networkCollector)
+		// Register the network handler with the event handler
+		handler.RegisterNetworkEventHandler(handler.networkHandler)
+		// Register the network metrics with Prometheus
+		err := networkCollector.RegisterMetrics(prometheus.DefaultRegisterer)
+		if err != nil {
+			handler.log.Error().Err(err).Msg("Failed to register network metrics with Prometheus")
+		} else {
+			handler.log.Info().Msg("Network collector enabled and registered with Prometheus")
+		}
+	}
+
 	handler.log.Info().
 		Int("disk_handlers", len(handler.diskEventHandlers)).
 		Int("process_handlers", len(handler.processEventHandlers)).
@@ -163,6 +193,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		Int("file_handlers", len(handler.fileEventHandlers)).
 		Int("interrupt_handlers", len(handler.perfinfoHandlers)).
 		Int("systemconfig_handlers", len(handler.systemConfigHandlers)).
+		Int("network_handlers", len(handler.networkEventHandlers)).
 		Msg("Event handlers initialized")
 
 	return handler
@@ -198,6 +229,11 @@ func (h *EventHandler) RegisterSystemConfigEventHandler(handler SystemConfigEven
 	h.log.Debug().Int("total_systemconfig_handlers", len(h.systemConfigHandlers)).Msg("SystemConfig event handler registered")
 }
 
+func (h *EventHandler) RegisterNetworkEventHandler(handler NetworkEventHandler) {
+	h.networkEventHandlers = append(h.networkEventHandlers, handler)
+	h.log.Debug().Int("total_network_handlers", len(h.networkEventHandlers)).Msg("Network event handler registered")
+}
+
 // GetEventCounts returns the current event counts for each provider.
 // These methods are used by the ETW stats collector to expose metrics.
 func (h *EventHandler) GetDiskEventCount() uint64         { return h.diskEventCount.Load() }
@@ -208,6 +244,7 @@ func (h *EventHandler) GetPerfInfoEventCount() uint64     { return h.perfinfoEve
 func (h *EventHandler) GetSystemConfigEventCount() uint64 { return h.systemConfigEventCount.Load() }
 func (h *EventHandler) GetImageEventCount() uint64        { return h.imageEventCount.Load() }
 func (h *EventHandler) GetPageFaultEventCount() uint64    { return h.pageFaultEventCount.Load() }
+func (h *EventHandler) GetNetworkEventCount() uint64      { return h.networkEventCount.Load() }
 
 // ETW Callback Methods - these satisfy the ETW consumer callback interface
 
@@ -313,6 +350,12 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 	if providerGUID.Equals(PageFaultKernelGUID) {
 		h.pageFaultEventCount.Add(1)
 		return h.routePageFaultEvents(helper, eventID)
+	}
+
+	// Route network events from Microsoft-Windows-Kernel-Network
+	if providerGUID.Equals(MicrosoftWindowsKernelNetworkGUID) {
+		h.networkEventCount.Add(1)
+		return h.routeNetworkEvents(helper, eventID)
 	}
 
 	return nil
@@ -551,6 +594,72 @@ func (h *EventHandler) routePageFaultEvents(helper *etw.EventRecordHelper, event
 	case 32: // 32 - Hard page fault
 		for _, handler := range h.perfinfoHandlers {
 			if err := handler.HandleHardPageFaultEvent(helper); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// routeNetworkEvents routes network events to all registered network handlers
+func (h *EventHandler) routeNetworkEvents(helper *etw.EventRecordHelper, eventID uint16) error {
+	if len(h.networkEventHandlers) == 0 {
+		return nil
+	}
+
+	switch eventID {
+	case 10, 26: // TCP Data Sent (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPDataSent(helper); err != nil {
+				return err
+			}
+		}
+	case 11, 27: // TCP Data Received (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPDataReceived(helper); err != nil {
+				return err
+			}
+		}
+	case 12, 28: // TCP Connection Attempted (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPConnectionAttempted(helper); err != nil {
+				return err
+			}
+		}
+	case 15, 31: // TCP Connection Accepted (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPConnectionAccepted(helper); err != nil {
+				return err
+			}
+		}
+	case 14, 30: // TCP Data Retransmitted (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPDataRetransmitted(helper); err != nil {
+				return err
+			}
+		}
+	case 17: // TCP Connection Failed
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleTCPConnectionFailed(helper); err != nil {
+				return err
+			}
+		}
+	case 42, 58: // UDP Data Sent (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleUDPDataSent(helper); err != nil {
+				return err
+			}
+		}
+	case 43, 59: // UDP Data Received (IPv4/IPv6)
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleUDPDataReceived(helper); err != nil {
+				return err
+			}
+		}
+	case 49: // UDP Connection Failed
+		for _, handler := range h.networkEventHandlers {
+			if err := handler.HandleUDPConnectionFailed(helper); err != nil {
 				return err
 			}
 		}

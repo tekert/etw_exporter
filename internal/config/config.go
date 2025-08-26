@@ -52,8 +52,10 @@ type CollectorConfig struct {
 	// PerfInfo collector configuration
 	PerfInfo PerfInfoConfig `toml:"perfinfo"`
 
+	// Network collector configuration
+	Network NetworkConfig `toml:"network"`
+
 	// TODO(tekert): Future collector configs can be added here:
-	// Network NetworkConfig `toml:"network"`
 	// Memory  MemoryConfig  `toml:"memory"`
 	// CPU     CPUConfig     `toml:"cpu"`
 }
@@ -85,6 +87,21 @@ type PerfInfoConfig struct {
 	// Enable SMI gap detection using SampledProfile events (default: false).
 	// This requires enabling the 'PROFILE' kernel group, which has a minor performance impact.
 	EnableSMIDetection bool `toml:"enable_smi_detection"`
+}
+
+// NetworkConfig contains network collector settings
+type NetworkConfig struct {
+	// Enable network event collection (default: false)
+	Enabled bool `toml:"enabled"`
+
+	// Enable connection health metrics (default: false, adds connection tracking)
+	ConnectionHealth bool `toml:"enable_connection_stats"`
+
+	// Enable protocol-specific metrics (default: false, adds protocol labels)
+	ByProtocol bool `toml:"enable_by_protocol"`
+
+	// Enable retransmission rate tracking (default: false, adds retransmission metrics)
+	RetransmissionRate bool `toml:"enable_retrasmission_rate"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -235,10 +252,16 @@ func DefaultConfig() *AppConfig {
 				Enabled: false,
 			},
 			PerfInfo: PerfInfoConfig{
-				Enabled:            false,  // Core system-wide metrics enabled by default
+				Enabled:            false, // Core system-wide metrics enabled by default
 				EnablePerDriver:    false, // Per-driver metrics disabled by default
 				EnablePerCPU:       false, // Disabled by default to reduce cardinality
 				EnableSMIDetection: false, // Disabled by default as it requires PROFILE kernel group
+			},
+			Network: NetworkConfig{
+				Enabled:            false, // Network event collection disabled by default
+				ConnectionHealth:   false, // Connection health metrics disabled by default
+				ByProtocol:         false, // Protocol-specific metrics disabled by default
+				RetransmissionRate: false, // Retransmission rate tracking disabled by default
 			},
 		},
 		Logging: LoggingConfig{

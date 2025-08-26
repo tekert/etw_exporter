@@ -69,7 +69,7 @@ enabled = true           # Default: true
 
 **enabled**: Whether to collect disk I/O events.
 - When enabled, tracks disk read/write operations with detailed metrics
-- Performance impact: Low to moderate depending on disk activity
+- Performance impact: Low depending on disk activity
 
 #### ThreadCS Collector
 
@@ -110,11 +110,46 @@ enable_smi_detection = false # Default: false
 - Only enable if per-CPU analysis is specifically needed.
 
 **enable_smi_detection**: Experimental, requieres profiling to be active.
-- TODO: explanation
+- TODO: Not easy with only ETW.
+
+#### Network Collector
+
+```toml
+[collectors.network]
+enabled = false              # Default: false
+enable_connection_stats = false    # Default: false
+enable_by_protocol = false          # Default: false
+enable_retrasmission_rate = false  # Default: false
+```
+
+**enabled**: Whether to collect network events.
+- Tracks TCP/UDP data transfer, connection attempts, and failures
+- Provides insights into network usage by process and protocol
+- Performance impact: Low to medium depending on network activity
+
+**enable_connection_stats**: Whether to collect connection health metrics.
+- Tracks connection attempts, acceptances, and failures with failure codes
+- Useful for diagnosing network connectivity issues
+- Adds metrics: `etw_network_connections_attempted_total`, `etw_network_connections_accepted_total`, `etw_network_connections_failed_total`
+
+**enable_by_protocol**: Whether to include protocol-specific traffic metrics.
+- Adds protocol distribution metrics aggregated across all processes
+- Provides `etw_network_traffic_bytes_total` with protocol and direction labels
+- Useful for understanding overall network traffic patterns
+
+**enable_retrasmission_rate**: Whether to track TCP retransmission metrics.
+- Monitors TCP reliability by tracking retransmission events
+- Calculates retransmission ratios for each process
+- Adds metrics: `etw_network_retransmissions_total`, `etw_network_retransmission_ratio`
+- Useful for identifying network quality issues
+
+**Core Metrics** (always available when enabled):
+- `etw_network_bytes_sent_total{process_name, protocol}`: Bytes sent by process and protocol
+- `etw_network_bytes_received_total{process_name, protocol}`: Bytes received by process and protocol
 
 **Performance Impact**:
-- **Base metrics (enabled=true)**: Low. Suitable for continuous monitoring.
-- **High-cardinality metrics (per_driver, per_cpu, counts)**: Medium. Enable these when investigating specific latency issues to avoid excessive metric cardinality.
+- **Base metrics (enabled=true)**: Low. Suitable for most environments.
+- **Additional metrics**: Low to medium. Enable based on monitoring requirements.
 
 ### Logging Configuration
 

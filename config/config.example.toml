@@ -6,71 +6,76 @@
 # Format: TOML (Tom's Obvious, Minimal Language)
 
 [server]
-  listen_address = "localhost:9189"
-  metrics_path = "/metrics"
-  pprof_enabled = true
+listen_address = "localhost:9189"
+metrics_path = "/metrics"
+pprof_enabled = true
 
 [collectors]
-  [collectors.disk_io]
-    enabled = true
-  [collectors.threadcs]
-    enabled = false
-  [collectors.perfinfo]
-    enabled = true
-    enable_per_cpu = false
-    enable_per_driver = false
-    enable_smi_detection = false
+[collectors.disk_io]
+enabled = true
+[collectors.threadcs]
+enabled = false
+[collectors.perfinfo]
+enabled = true
+enable_per_cpu = false
+enable_per_driver = false
+enable_smi_detection = false
+[collectors.network]
+enabled = false
+enable_connection_stats = false
+enable_by_protocol = false
+enable_retrasmission_rate = false
 
 [logging]
-  lib_level = "warn"
-  [logging.defaults]
-    level = "info"
-    caller = 0
-    time_field = "time"
-    time_format = ""
-    time_location = "Local"
+lib_level = "warn"
+[logging.defaults]
+level = "info"
+caller = 0
+time_field = "time"
+time_format = ""
+time_location = "Local"
 
-  [[logging.outputs]]
-    type = "console"
-    enabled = true
-    [logging.outputs.console]
-      fast_io = false
-      format = "auto"
-      color_output = true
-      quote_string = true
-      writer = "stderr"
-      async = false
+[[logging.outputs]]
+type = "console"
+enabled = true
+[logging.outputs.console]
+fast_io = false
+format = "auto"
+color_output = true
+quote_string = true
+writer = "stderr"
+async = false
 
-  [[logging.outputs]]
-    type = "file"
-    enabled = false
-    [logging.outputs.file]
-      filename = "logs/app.log"
-      max_size = 10
-      max_backups = 7
-      time_format = "2006-01-02T15-04-05"
-      local_time = true
-      host_name = true
-      process_id = true
-      ensure_folder = true
-      async = true
+[[logging.outputs]]
+type = "file"
+enabled = false
+[logging.outputs.file]
+filename = "logs/app.log"
+max_size = 10
+max_backups = 7
+time_format = "2006-01-02T15-04-05"
+local_time = true
+host_name = true
+process_id = true
+ensure_folder = true
+async = true
 
-  [[logging.outputs]]
-    type = "syslog"
-    enabled = false
-    [logging.outputs.syslog]
-      network = "udp"
-      address = "localhost:514"
-      hostname = ""
-      tag = "etw_exporter"
-      marker = "@cee:"
-      async = true
+[[logging.outputs]]
+type = "syslog"
+enabled = false
+[logging.outputs.syslog]
+network = "udp"
+address = "localhost:514"
+hostname = ""
+tag = "etw_exporter"
+marker = "@cee:"
+async = true
 
-  [[logging.outputs]]
-    type = "eventlog"
-    enabled = false
-    [logging.outputs.eventlog]
-      source = "ETW Exporter"
-      id = 1000
-      host = ""
-      async = false
+[[logging.outputs]]
+type = "eventlog"
+enabled = false
+[logging.outputs.eventlog]
+source = "ETW Exporter"
+id = 1000
+host = ""
+async = false
