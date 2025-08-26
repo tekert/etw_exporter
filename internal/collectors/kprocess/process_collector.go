@@ -5,9 +5,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/phuslu/log"
-
 	"etw_exporter/internal/logger"
+
+	"github.com/tekert/goetw/logsampler/adapters"
 )
 
 // ProcessInfo holds information about a process
@@ -17,7 +17,6 @@ type ProcessInfo struct {
 	StartTime time.Time
 	LastSeen  time.Time // Last seen timestamp for cleanup
 	ParentPID uint32
-	ImagePath string
 
 	// Remember to update the Clone() method if you add new fields
 	mu sync.Mutex
@@ -27,7 +26,7 @@ type ProcessInfo struct {
 // This is the single source of truth for all process data across the application
 type ProcessCollector struct {
 	processes sync.Map // key: uint32 (PID), value: *ProcessInfo
-	log       log.Logger
+	log       *adapters.SampledLogger
 }
 
 // Global process collector instance and a sync.Once to ensure thread-safe initialization
@@ -40,7 +39,8 @@ var (
 func GetGlobalProcessCollector() *ProcessCollector {
 	initOnce.Do(func() {
 		globalProcessCollector = &ProcessCollector{
-			log: logger.NewLoggerWithContext("process_collector"),
+			//log: logger.NewLoggerWithContext("process_collector"),
+			log: logger.NewSampledLoggerCtx("process_collector"),
 		}
 	})
 	return globalProcessCollector
@@ -49,13 +49,14 @@ func GetGlobalProcessCollector() *ProcessCollector {
 // NewProcessCollector creates a new process collector instance (for testing or specialized use)
 func NewProcessCollector() *ProcessCollector {
 	return &ProcessCollector{
-		log: logger.NewLoggerWithContext("process_collector"),
+		//log: logger.NewLoggerWithContext("process_collector"),
+		log: logger.NewSampledLoggerCtx("process_collector"),
 	}
 }
 
 // AddProcess adds or updates process information. If the process already exists,
 // it updates its details and refreshes its LastSeen timestamp.
-func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32, imagePath string, eventTimestamp time.Time) {
+func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32, eventTimestamp time.Time) {
 	// Check if we're updating an existing process
 	if existingInfo, existed := pc.processes.Load(pid); existed {
 		processInfo := existingInfo.(*ProcessInfo)
@@ -65,7 +66,6 @@ func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32
 		oldName := processInfo.Name
 		processInfo.Name = name
 		processInfo.ParentPID = parentPID
-		processInfo.ImagePath = imagePath
 		processInfo.LastSeen = eventTimestamp
 		processInfo.mu.Unlock()
 
@@ -85,7 +85,6 @@ func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32
 		StartTime: eventTimestamp,
 		LastSeen:  eventTimestamp,
 		ParentPID: parentPID,
-		ImagePath: imagePath,
 	}
 	pc.processes.Store(pid, processInfo)
 
@@ -93,7 +92,6 @@ func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32
 		Uint32("pid", pid).
 		Str("name", name).
 		Uint32("parent_pid", parentPID).
-		Str("image_path", imagePath).
 		Msg("Process added to collector")
 }
 
@@ -113,6 +111,7 @@ func (pc *ProcessCollector) RemoveProcess(pid uint32) {
 	}
 }
 
+// TODO: optmize this, no clones. get specific data directly.
 // GetProcessInfo returns a safe copy of process information for a given PID.
 // It returns a copy instead of a pointer to prevent race conditions in calling code.
 func (pc *ProcessCollector) GetProcessInfo(pid uint32) (ProcessInfo, bool) {
@@ -139,7 +138,6 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 		StartTime: pi.StartTime,
 		LastSeen:  pi.LastSeen,
 		ParentPID: pi.ParentPID,
-		ImagePath: pi.ImagePath,
 	}
 }
 

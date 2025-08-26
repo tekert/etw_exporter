@@ -1,18 +1,23 @@
 package kprocess
 
 import (
+	"etw_exporter/internal/logger"
+
 	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters"
 )
 
 // ProcessHandler processes ETW process events and delegates to the process collector
 type ProcessHandler struct {
 	processCollector *ProcessCollector
+	log              *adapters.SampledLogger
 }
 
 // NewProcessHandler creates a new process handler instance
 func NewProcessHandler() *ProcessHandler {
 	return &ProcessHandler{
 		processCollector: GetGlobalProcessCollector(),
+		log:              logger.NewSampledLoggerCtx("process_handler"),
 	}
 }
 
@@ -41,37 +46,23 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 	var processName string
 	if name, err := helper.GetPropertyString("ImageName"); err == nil {
 		processName = name
-		ph.processCollector.log.Trace().
+		ph.log.Trace().
 			Uint32("pid", uint32(processID)).
 			Str("property", "ImageName").
 			Str("name", processName).
 			Msg("Retrieved process name from ImageName")
 	} else {
 		processName = "unknown"
-		ph.processCollector.log.Warn().
+		ph.log.SampledWarn("unknown_process").
 			Uint32("pid", uint32(processID)).
 			Err(err).
 			Msg("Failed to get process name from ImageName property")
 	}
 
-	// TODO: processName already has the full path name
-	// Try to get full image path
-	var imagePath string
-	if path, err := helper.GetPropertyString("ImagePathName"); err == nil {
-		imagePath = path
-	} else if path, err := helper.GetPropertyString("CommandLine"); err == nil {
-		imagePath = path
-	} else {
-		imagePath = ""
-		ph.processCollector.log.Trace().
-			Uint32("pid", uint32(processID)).
-			Msg("No image path available for process")
-	}
-
 	// use the timestamp of the event as LastSeen
 	timestamp := helper.Timestamp()
 
-	ph.processCollector.AddProcess(uint32(processID), processName, uint32(parentProcessID), imagePath, timestamp)
+	ph.processCollector.AddProcess(uint32(processID), processName, uint32(parentProcessID), timestamp)
 	return nil
 }
 
