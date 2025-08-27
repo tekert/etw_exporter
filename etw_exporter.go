@@ -15,6 +15,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/debug"
 
 	etwmain "etw_exporter/internal/etw"
 )
@@ -104,7 +105,7 @@ func (e *ETWExporter) Run() error {
 		stop()
 	}()
 
-	debugCounter = NewDebugCounter(ctx) // ! testing
+	debug.DCounter = debug.NewDebugCounter(ctx) // ! testing
 
 	if e.config.Server.PprofEnabled {
 		go func() {

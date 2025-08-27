@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	version = "0.3.2-dev"
+	version = "0.3.3"
 )
 
 // pprof comments for reference
@@ -33,6 +33,9 @@ var (
 //  - Security provider? and that's it for now.
 //  - reformat CONFIG.md explanations, more compact, less text.
 //  - Reopen NT Kernel Logger if closed by another app, do config.
+//  - user suplied exe names to expand metric to per process. ( Use: EventRecord.ExtProcessStartKey works on mof?)
+//      for example the thread collector wait states.
+//      that would filter the per process of the other metrics.
 //
 // link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (good article)
 
