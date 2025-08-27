@@ -62,10 +62,10 @@ enabled = false
 - **enabled**: Set to `true` to enable this collector. This is a high-frequency collector and may have a performance impact.
 
 **Metrics Provided:**
-- `etw_context_switches_per_cpu_total{cpu}`: Total number of context switches per CPU.
-- `etw_context_switches_per_process_total{process_id, process_name}`: Total number of context switches per process.
-- `etw_context_switch_interval_milliseconds{cpu}`: A histogram of the time between context switches on each CPU.
-- `etw_thread_states_total{state, wait_reason}`: A count of thread state transitions (e.g., `running`, `waiting`).
+- `etw_thread_context_switches_cpu_total{cpu}`: Total number of context switches per CPU.
+- `etw_thread_context_switches_process_total{process_id, process_name}`: Total number of context switches per process.
+- `etw_thread_context_switch_interval_milliseconds{cpu}`: A histogram of the time between context switches on each CPU.
+- `etw_thread_thread_states_total{state, wait_reason}`: A count of thread state transitions (e.g., `running`, `waiting`).
 
 ### Performance Info Collector
 
@@ -85,15 +85,15 @@ enable_smi_detection = false
 - **enable_smi_detection**: (Experimental) Enables detection of System Management Interrupts (SMI).
 
 **Metrics Provided:**
-- `etw_isr_to_dpc_latency_microseconds`: Histogram of the time from an interrupt request (ISR) to the start of its corresponding DPC.
-- `etw_dpc_queued_total`: Total number of DPCs queued for execution.
-- `etw_dpc_executed_total`: Total number of DPCs that began execution.
-- `etw_hard_pagefaults_total`: Total number of hard page faults system-wide.
+- `etw_perfinfo_isr_to_dpc_latency_microseconds`: Histogram of the time from an interrupt request (ISR) to the start of its corresponding DPC.
+- `etw_perfinfo_dpc_queued_total`: Total number of DPCs queued for execution.
+- `etw_perfinfo_dpc_executed_total`: Total number of DPCs that began execution.
+- `etw_memory_hard_pagefaults_total`: Total number of hard page faults system-wide.
 - With `enable_per_cpu`:
-    - `etw_dpc_queued_cpu_total{cpu}`
-    - `etw_dpc_executed_cpu_total{cpu}`
+    - `etw_perfinfo_dpc_queued_cpu_total{cpu}`
+    - `etw_perfinfo_dpc_executed_cpu_total{cpu}`
 - With `enable_per_driver`:
-    - `etw_dpc_execution_time_microseconds{image_name}`: Histogram of DPC execution time per driver.
+    - `etw_perfinfo_dpc_execution_time_microseconds{image_name}`: Histogram of DPC execution time per driver.
 
 ### Network Collector
 
