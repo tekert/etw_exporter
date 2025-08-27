@@ -79,8 +79,11 @@ var AllProviderGroups = []*ProviderGroup{
 				GUID: *MicrosoftWindowsKernelFileGUID,
 				// Enable file I/O events for process correlation
 				EnableLevel:     0xFF,  // All levels
-				MatchAnyKeyword: 0x120, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
+				MatchAnyKeyword: 0x300, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
 				MatchAllKeyword: 0x0,
+				Filters: []etw.ProviderFilter{ // NOTE: comment this when doing profiling for pgo, causes lots of events.
+					etw.NewEventIDFilter(true, 12, 14, 15, 16, 26),
+				},
 			},
 		},
 		IsEnabled: func(config *config.CollectorConfig) bool {
