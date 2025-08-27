@@ -4,10 +4,11 @@ import (
 	"sync"
 
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/logadapters"
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
+
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
 // DiskIOHandler handles disk I/O events from ETW providers.
@@ -37,7 +38,7 @@ type DiskIOHandler struct {
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]uint32 // FileObject -> ProcessID mapping
 
-	log *logadapters.SampledLogger // Disk I/O handler logger
+	log *phusluadapter.SampledLogger // Disk I/O handler logger
 }
 
 // NewDiskIOHandler creates a new disk I/O handler instance with custom collector integration.

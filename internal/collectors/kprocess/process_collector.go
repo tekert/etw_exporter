@@ -7,7 +7,7 @@ import (
 
 	"etw_exporter/internal/logger"
 
-	"github.com/tekert/goetw/logsampler/logadapters"
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
 // ProcessInfo holds information about a process
@@ -26,7 +26,7 @@ type ProcessInfo struct {
 // This is the single source of truth for all process data across the application
 type ProcessCollector struct {
 	processes sync.Map // key: uint32 (PID), value: *ProcessInfo
-	log       *logadapters.SampledLogger
+	log       *phusluadapter.SampledLogger
 }
 
 // Global process collector instance and a sync.Once to ensure thread-safe initialization

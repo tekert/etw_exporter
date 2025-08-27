@@ -3,9 +3,10 @@ package etwmain
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/logadapters"
 
 	"etw_exporter/internal/logger"
+
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
 // ETWStatsCollector implements prometheus.Collector for ETW session and consumer statistics.
@@ -13,7 +14,7 @@ import (
 type ETWStatsCollector struct {
 	sessionManager *SessionManager
 	eventHandler   *EventHandler
-	log            *logadapters.SampledLogger
+	log            *phusluadapter.SampledLogger
 
 	// Metric Descriptors
 	consumerEventsLostDesc *prometheus.Desc

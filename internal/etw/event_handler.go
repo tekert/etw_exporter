@@ -5,7 +5,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
 	"etw_exporter/internal/collectors/kdiskio"
 	"etw_exporter/internal/collectors/kernelthread"
@@ -14,6 +14,7 @@ import (
 	"etw_exporter/internal/collectors/kprocess"
 	"etw_exporter/internal/collectors/ksystemconfig"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/debug"
 	"etw_exporter/internal/logger"
 )
 
@@ -85,7 +86,7 @@ type EventHandler struct {
 
 	// Shared state and caches for callbacks
 	config *config.CollectorConfig
-	log    *adapters.SampledLogger // Event handler logger
+	log    *phusluadapter.SampledLogger // Event handler logger
 
 	// Event counters by provider - atomic counters for thread safety
 	diskEventCount         atomic.Uint64
@@ -304,6 +305,8 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 		eventID = eventRecord.EventHeader.EventDescriptor.Id
 	}
 
+	debug.DCounter.Inc(1, "total_events")
+
 	// Route SystemConfig events
 	if providerGUID.Equals(SystemConfigGUID) {
 		h.systemConfigEventCount.Add(1)
@@ -391,8 +394,11 @@ func (h *EventHandler) routeDiskEvents(helper *etw.EventRecordHelper, eventID ui
 		return nil
 	}
 
+	debug.DCounter.Inc(1, "disk_events_total")
+
 	switch eventID {
 	case etw.EVENT_TRACE_TYPE_IO_READ: // 10 - DiskIo Read completion
+		debug.DCounter.Inc(1, "disk_read_events")
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskRead(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk read event")
@@ -400,6 +406,7 @@ func (h *EventHandler) routeDiskEvents(helper *etw.EventRecordHelper, eventID ui
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_IO_WRITE: // 11 - DiskIo Write completion
+		debug.DCounter.Inc(1, "disk_write_events")
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskWrite(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk write event")
@@ -407,6 +414,7 @@ func (h *EventHandler) routeDiskEvents(helper *etw.EventRecordHelper, eventID ui
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_IO_FLUSH: // 14 - DiskIo Flush
+		debug.DCounter.Inc(1, "disk_flush_events")
 		for _, handler := range h.diskEventHandlers {
 			if err := handler.HandleDiskFlush(helper); err != nil {
 				h.log.Error().Err(err).Uint16("event_id", eventID).Msg("Error handling disk flush event")
@@ -448,32 +456,39 @@ func (h *EventHandler) routeFileEvents(helper *etw.EventRecordHelper, eventID ui
 		return nil
 	}
 
+	debug.DCounter.Inc(1, "file_events_total")
+
 	switch eventID {
 	case 15: // File Read
+		debug.DCounter.Inc(1, "file_read_events")
 		for _, handler := range h.fileEventHandlers {
 			if err := handler.HandleFileRead(helper); err != nil {
 				return err
 			}
 		}
 	case 16: // File Write
+		debug.DCounter.Inc(1, "file_write_events")
 		for _, handler := range h.fileEventHandlers {
 			if err := handler.HandleFileWrite(helper); err != nil {
 				return err
 			}
 		}
 	case 12: // File Create
+		debug.DCounter.Inc(1, "file_create_events")
 		for _, handler := range h.fileEventHandlers {
 			if err := handler.HandleFileCreate(helper); err != nil {
 				return err
 			}
 		}
 	case 14: // File Close
+		debug.DCounter.Inc(1, "file_close_events")
 		for _, handler := range h.fileEventHandlers {
 			if err := handler.HandleFileClose(helper); err != nil {
 				return err
 			}
 		}
 	case 26: // File Delete
+		debug.DCounter.Inc(1, "file_delete_events")
 		for _, handler := range h.fileEventHandlers {
 			if err := handler.HandleFileDelete(helper); err != nil {
 				return err
