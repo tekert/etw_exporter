@@ -183,26 +183,26 @@ func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptColle
 	// These two metrics isrToDpcLatencyDesc and dpcExecutedDesc
 	// Measure total interrupt to process latency, an aproximation.
 	collector.isrToDpcLatencyDesc = prometheus.NewDesc(
-		"etw_isr_to_dpc_latency_microseconds",
+		"etw_perfinfo_isr_to_dpc_latency_microseconds",
 		"Latency from ISR entry to DPC entry in microseconds. This measures DPC queue time.",
 		nil, nil)
 
 	collector.dpcExecutedDesc = prometheus.NewDesc(
-		"etw_dpc_executed_total",
+		"etw_perfinfo_dpc_executed_total",
 		"Total number of DPCs that began execution system-wide.",
 		nil, nil)
 
 	// Count number of DPCs queued system-wide over time this can be
 	// used to infer DPC queue pressure.
 	collector.dpcQueuedDesc = prometheus.NewDesc(
-		"etw_dpc_queued_total",
+		"etw_perfinfo_dpc_queued_total",
 		"Total number of DPCs queued for execution system-wide.",
 		nil, nil)
 
 	// Create per-driver descriptors only if enabled
 	if config.EnablePerDriver {
 		collector.dpcDurationDesc = prometheus.NewDesc(
-			"etw_dpc_execution_time_microseconds",
+			"etw_perfinfo_dpc_execution_time_microseconds",
 			"DPC execution time by driver in microseconds",
 			[]string{"image_name"}, nil)
 	}
@@ -210,25 +210,25 @@ func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptColle
 	// TODO: Define SMI metric but do not collect data for it yet.
 	if config.EnableSMIDetection {
 		collector.smiGapsDesc = prometheus.NewDesc(
-			"etw_smi_gaps_microseconds",
+			"etw_perfinfo_smi_gaps_microseconds",
 			"SMI gap detection in microseconds, based on SampledProfile event gaps.",
 			nil, nil)
 	}
 
 	collector.hardPageFaultsDesc = prometheus.NewDesc(
-		"etw_hard_pagefaults_total",
+		"etw_memory_hard_pagefaults_total",
 		"Total hard page faults system-wide",
 		nil, nil)
 
 	// Create per-CPU descriptor only if enabled
 	if config.EnablePerCPU {
 		collector.dpcQueuedCPUDesc = prometheus.NewDesc(
-			"etw_dpc_queued_cpu_total",
+			"etw_perfinfo_dpc_queued_cpu_total",
 			"Total number of DPCs queued for execution by CPU.",
 			[]string{"cpu"}, nil)
 
 		collector.dpcExecutedCPUDesc = prometheus.NewDesc(
-			"etw_dpc_executed_cpu_total",
+			"etw_perfinfo_dpc_executed_cpu_total",
 			"Total number of DPCs that began execution by CPU.",
 			[]string{"cpu"}, nil)
 	}

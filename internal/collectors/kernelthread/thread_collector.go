@@ -130,17 +130,17 @@ func NewThreadCSCollector() *ThreadCSCollector {
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
-			"etw_context_switches_per_cpu_total",
+			"etw_thread_context_switches_cpu_total",
 			"Total number of context switches per CPU",
 			[]string{"cpu"}, nil,
 		),
 		contextSwitchesPerProcessDesc: prometheus.NewDesc(
-			"etw_context_switches_per_process_total",
+			"etw_thread_context_switches_process_total",
 			"Total number of context switches per process",
 			[]string{"process_id", "process_name"}, nil,
 		),
 		contextSwitchIntervalsDesc: prometheus.NewDesc(
-			"etw_context_switch_interval_milliseconds",
+			"etw_thread_context_switch_interval_milliseconds",
 			"Histogram of context switch intervals per CPU (time between consecutive switches) in milliseconds.",
 			[]string{"cpu"}, nil,
 		),
