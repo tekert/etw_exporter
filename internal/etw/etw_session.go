@@ -242,7 +242,9 @@ func (s *SessionManager) Stop() error {
 	}
 
 	// Stop sessions first
-	s.stopSessions()
+	if err := s.stopSessions() ; err != nil {
+		return fmt.Errorf("failed to stop sessions: %w", err)
+	}
 
 	// Stop consumer last
 	if s.consumer != nil {
