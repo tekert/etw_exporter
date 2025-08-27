@@ -111,7 +111,47 @@ func (pc *ProcessCollector) RemoveProcess(pid uint32) {
 	}
 }
 
-// TODO: optmize this, no clones. get specific data directly.
+// IsKnownProcess checks if a process with the given PID is being tracked.
+// This is a fast, allocation-free check.
+func (pc *ProcessCollector) IsKnownProcess(pid uint32) bool {
+	_, exists := pc.processes.Load(pid)
+	return exists
+}
+
+// GetProcessName returns the process name for a given PID.
+// It safely accesses the name without cloning the entire ProcessInfo struct.
+func (pc *ProcessCollector) GetProcessName(pid uint32) (string, bool) {
+	if info, exists := pc.processes.Load(pid); exists {
+		processInfo := info.(*ProcessInfo)
+		processInfo.mu.Lock()
+		name := processInfo.Name
+		processInfo.mu.Unlock()
+		return name, true
+	}
+	return "unknown_" + strconv.FormatUint(uint64(pid), 10), false
+}
+
+// GetProcessStartTime returns the start time for a given PID.
+func (pc *ProcessCollector) GetProcessStartTime(pid uint32) (time.Time, bool) {
+	if info, exists := pc.processes.Load(pid); exists {
+		processInfo := info.(*ProcessInfo)
+		processInfo.mu.Lock()
+		startTime := processInfo.StartTime
+		processInfo.mu.Unlock()
+		return startTime, true
+	}
+	return time.Time{}, false
+}
+
+// GetProcessNameWithFallback returns process name with a fallback to PID string
+func (pc *ProcessCollector) GetProcessNameWithFallback(pid uint32) string {
+	if name, exists := pc.GetProcessName(pid); exists {
+		return name
+	}
+	// Fallback to PID as string if process name is not available
+	return "pid_" + strconv.FormatUint(uint64(pid), 10)
+}
+
 // GetProcessInfo returns a safe copy of process information for a given PID.
 // It returns a copy instead of a pointer to prevent race conditions in calling code.
 func (pc *ProcessCollector) GetProcessInfo(pid uint32) (ProcessInfo, bool) {
@@ -139,23 +179,6 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 		LastSeen:  pi.LastSeen,
 		ParentPID: pi.ParentPID,
 	}
-}
-
-// GetProcessName returns the process name for a given PID and a flag indicating if it was found
-func (pc *ProcessCollector) GetProcessName(pid uint32) (string, bool) {
-	if info, exists := pc.GetProcessInfo(pid); exists {
-		return info.Name, true
-	}
-	return "unknown_" + strconv.FormatUint(uint64(pid), 10), false
-}
-
-// GetProcessNameWithFallback returns process name with a fallback to PID string
-func (pc *ProcessCollector) GetProcessNameWithFallback(pid uint32) string {
-	if info, exists := pc.GetProcessInfo(pid); exists {
-		return info.Name
-	}
-	// Fallback to PID as string if process name is not available
-	return "pid_" + strconv.FormatUint(uint64(pid), 10)
 }
 
 // GetAllProcesses returns a snapshot copy of all currently tracked processes
@@ -207,8 +230,8 @@ func (pc *ProcessCollector) CleanupStaleProcesses(lastSeenIn time.Duration) int 
 
 	var deletedDetails []string
 	for _, pid := range pidsToDelete {
-		if info, exists := pc.GetProcessInfo(pid); exists {
-			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":"+info.Name)
+		if name, exists := pc.GetProcessName(pid); exists {
+			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":"+name)
 		} else {
 			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":<unknown>")
 		}

@@ -302,7 +302,7 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 	// Record context switch per process (concurrent map)
 	if processID > 0 {
 		processCollector := kprocess.GetGlobalProcessCollector()
-		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
+		if processCollector.IsKnownProcess(processID) {
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)
 		}

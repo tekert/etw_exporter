@@ -377,7 +377,7 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 	if processID > 0 {
 		// Check if process is known by the global process collector
 		processCollector := kprocess.GetGlobalProcessCollector()
-		if _, isKnown := processCollector.GetProcessName(processID); isKnown {
+		if processCollector.IsKnownProcess(processID) {
 			// Record process I/O count
 			processIOKey := ProcessIOKey{ProcessID: processID, DiskNumber: diskNumber, Operation: operation}
 			if c.processIOCount[processIOKey] == nil {
