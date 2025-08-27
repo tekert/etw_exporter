@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/logadapters"
 
 	"etw_exporter/internal/collectors/kprocess"
 	"etw_exporter/internal/logger"
@@ -32,7 +32,7 @@ type DiskIOCustomCollector struct {
 
 	// Synchronization
 	mu  sync.RWMutex
-	log *adapters.SampledLogger
+	log *logadapters.SampledLogger
 
 	// Metric Descriptors
 	diskIOCountDesc         *prometheus.Desc

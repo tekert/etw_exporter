@@ -14,7 +14,7 @@ import (
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 	"github.com/tekert/goetw/logsampler"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/logadapters"
 )
 
 // NOTE: use example: log = logger.NewSampledLoggerWithContext("event-processor")
@@ -322,7 +322,7 @@ func ConfigureLogging(config config.LoggingConfig) error {
 		ResetInterval:   10 * time.Minute,
 	}
 	// The sampler needs a logger to report summaries. We'll use the default logger.
-	reporter := &adapters.SummaryReporter{Logger: &log.DefaultLogger}
+	reporter := &logadapters.SummaryReporter{Logger: &log.DefaultLogger}
 	mainSampler = logsampler.NewDeduplicatingSampler(backoffConfig, reporter) // uses extra goroutine
 	//mainSampler = logsampler.NewEventDrivenSampler(backoffConfig, reporter) // no goroutines
 
@@ -360,7 +360,7 @@ func NewLoggerWithContext(component string) log.Logger {
 
 // NewSampledLoggerCtx creates a new sampled logger for a specific component.
 // It uses the globally configured sampler.
-func NewSampledLoggerCtx(component string) *adapters.SampledLogger {
+func NewSampledLoggerCtx(component string) *logadapters.SampledLogger {
 	// Create a base logger for the component, similar to NewLoggerWithContext.
 	bl := &log.DefaultLogger
 	componentLogger := &log.Logger{
@@ -374,7 +374,7 @@ func NewSampledLoggerCtx(component string) *adapters.SampledLogger {
 	}
 
 	// Wrap the component logger with the sampler adapter.
-	return adapters.NewSampledLogger(componentLogger, mainSampler)
+	return logadapters.NewSampledLogger(componentLogger, mainSampler)
 }
 
 // ConfigureETWLibraryLogger configures the ETW library logger with a separate configuration

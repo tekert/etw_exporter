@@ -12,8 +12,8 @@ import (
 
 // Metric names exported by the SystemConfigCollector.
 const (
-	PhysicalDiskInfoMetricName = "etw_physical_disk_info"
-	LogicalDiskInfoMetricName  = "etw_logical_disk_info"
+	PhysicalDiskInfoMetricName = "etw_system_disk_physical_info"
+	LogicalDiskInfoMetricName  = "etw_system_disk_logical_info"
 )
 
 // PhysicalDiskInfo holds static physical disk information.

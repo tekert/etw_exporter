@@ -3,7 +3,7 @@ package etwmain
 import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/logadapters"
 
 	"etw_exporter/internal/logger"
 )
@@ -13,7 +13,7 @@ import (
 type ETWStatsCollector struct {
 	sessionManager *SessionManager
 	eventHandler   *EventHandler
-	log            *adapters.SampledLogger
+	log            *logadapters.SampledLogger
 
 	// Metric Descriptors
 	consumerEventsLostDesc *prometheus.Desc

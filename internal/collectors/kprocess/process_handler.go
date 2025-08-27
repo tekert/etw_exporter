@@ -4,13 +4,13 @@ import (
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/logadapters"
 )
 
 // ProcessHandler processes ETW process events and delegates to the process collector
 type ProcessHandler struct {
 	processCollector *ProcessCollector
-	log              *adapters.SampledLogger
+	log              *logadapters.SampledLogger
 }
 
 // NewProcessHandler creates a new process handler instance

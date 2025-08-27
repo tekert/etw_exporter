@@ -14,7 +14,7 @@ import (
 )
 
 var (
-	version = "0.2.5"
+	version = "0.3.2-dev"
 )
 
 // pprof comments for reference
@@ -28,8 +28,11 @@ var (
 
 // TODO(tekert):
 //  - Memory collector
-//  - Network collector
-//  - Skip MOF Opcodes we dont need, and also Manifest provider using IDFilter on EnableProvider.
+//  - Skip MOF Opcodes we dont need,
+//      and also Manifest provider using IDFilter on EnableProvider [DONE].
+//  - Security provider? and that's it for now.
+//  - reformat CONFIG.md explanations, more compact, less text.
+//  - Reopen NT Kernel Logger if closed by another app, do config.
 //
 // link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (good article)
 

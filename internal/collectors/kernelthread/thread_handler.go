@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/tekert/goetw/etw"
-	"github.com/tekert/goetw/logsampler/adapters"
+	"github.com/tekert/goetw/logsampler/logadapters"
 
 	"etw_exporter/internal/logger"
 )
@@ -32,7 +32,7 @@ type ThreadHandler struct {
 	lastCpuSwitch   []atomic.Int64          // stores the last context switch timestamp (in ns) for each CPU
 	threadToProcess sync.Map                // key: threadID (uint32), value: processID (uint32)
 	customCollector *ThreadCSCollector      // High-performance custom collector
-	log             *adapters.SampledLogger // Thread collector logger
+	log             *logadapters.SampledLogger // Thread collector logger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
