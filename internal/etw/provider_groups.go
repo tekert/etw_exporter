@@ -118,7 +118,6 @@ var AllProviderGroups = []*ProviderGroup{
 		KernelFlags: etw.EVENT_TRACE_FLAG_INTERRUPT | // PerfInfo
 			etw.EVENT_TRACE_FLAG_DPC | // PerfInfo
 			etw.EVENT_TRACE_FLAG_IMAGE_LOAD | // Image
-			etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // PageFault
 			etw.EVENT_TRACE_FLAG_CSWITCH, // Thread V2 (Used for DPC duration calculation)
 		//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
 		ManifestProviders: []etw.Provider{}, // No manifest providers
@@ -151,6 +150,25 @@ var AllProviderGroups = []*ProviderGroup{
 		},
 		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.Network.Enabled
+		},
+	},
+
+	// MemoryGroup uses kernel session for memory-related events like hard page faults.
+	{
+		Name: "memory",
+		KernelFlags: etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // For HardFault events
+			etw.EVENT_TRACE_FLAG_THREAD, // For TID->PID mapping
+		ManifestProviders: []etw.Provider{
+			{
+				Name: "Microsoft-Windows-Kernel-Process", // For process name correlation
+				GUID: *MicrosoftWindowsKernelProcessGUID,
+				EnableLevel:     0xFF,
+				MatchAnyKeyword: 0x10, // WINEVENT_KEYWORD_PROCESS
+				MatchAllKeyword: 0x0,
+			},
+		},
+		IsEnabled: func(config *config.CollectorConfig) bool {
+			return config.Memory.Enabled
 		},
 	},
 }

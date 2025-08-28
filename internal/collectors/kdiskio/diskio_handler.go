@@ -56,6 +56,21 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *DiskIOHandler {
 	}
 }
 
+// GetCustomCollector returns the custom Prometheus collector for disk I/O metrics.
+// This method provides access to the DiskIOCustomCollector for registration
+// with the Prometheus registry, enabling high-performance metric collection.
+//
+// Usage Example:
+//
+//	diskIOHandler := NewDiskIOHandler()
+//	prometheus.MustRegister(diskIOHandler.GetCustomCollector())
+//
+// Returns:
+//   - *DiskIOCustomCollector: The custom collector instance for registration
+func (d *DiskIOHandler) GetCustomCollector() *DiskIOCustomCollector {
+	return d.customCollector
+}
+
 // HandleDiskRead processes disk read completion events to track disk read I/O.
 //
 // ETW Event Details:
@@ -446,25 +461,4 @@ func (d *DiskIOHandler) HandleFileDelete(helper *etw.EventRecordHelper) error {
 		Msg("File delete - removed FileObject mapping")
 
 	return nil
-}
-
-// GetCustomCollector returns the custom Prometheus collector for disk I/O metrics.
-// This method provides access to the DiskIOCustomCollector for registration
-// with the Prometheus registry, enabling high-performance metric collection.
-//
-// Usage Example:
-//
-//	diskIOHandler := NewDiskIOHandler()
-//	prometheus.MustRegister(diskIOHandler.GetCustomCollector())
-//
-// The custom collector follows Prometheus best practices:
-// - Implements prometheus.Collector interface
-// - Uses atomic operations for high-frequency updates
-// - Provides thread-safe metric aggregation
-// - Maintains low cardinality for performance
-//
-// Returns:
-//   - *DiskIOCustomCollector: The custom collector instance for registration
-func (d *DiskIOHandler) GetCustomCollector() *DiskIOCustomCollector {
-	return d.customCollector
 }

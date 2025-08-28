@@ -1,4 +1,4 @@
-package kprocess
+package kernelprocess
 
 import (
 	"etw_exporter/internal/logger"
@@ -83,8 +83,8 @@ func (ph *ProcessHandler) HandleProcessEnd(helper *etw.EventRecordHelper) error 
 
 	ph.processCollector.log.Trace().
 		Uint32("pid", uint32(processID)).
-		Msg("Process end event received")
+		Msg("Process end event received, marking for deletion")
 
-	ph.processCollector.RemoveProcess(uint32(processID))
+	ph.processCollector.MarkProcessForDeletion(uint32(processID))
 	return nil
 }

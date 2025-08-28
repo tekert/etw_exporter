@@ -1,4 +1,4 @@
-package ksystemconfig
+package kernelsysconfig
 
 import (
 	"strconv"

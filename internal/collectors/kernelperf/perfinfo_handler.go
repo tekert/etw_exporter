@@ -1,15 +1,15 @@
-package kperfinfo
+package kernelperf
 
 import (
 	"sync"
 	"time"
 
-	"github.com/phuslu/log"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/tekert/goetw/etw"
-
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
+
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tekert/goetw/etw"
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
 // pendingDPCInfo holds the data for a DPC event that is waiting for the next
@@ -24,7 +24,7 @@ type pendingDPCInfo struct {
 type PerfInfoHandler struct {
 	collector *PerfInfoInterruptCollector
 	config    *config.PerfInfoConfig
-	log       log.Logger
+	log       *phusluadapter.SampledLogger
 
 	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
 	// of our DPC duration calculation logic.
@@ -51,7 +51,7 @@ func NewPerfInfoHandler(config *config.PerfInfoConfig) *PerfInfoHandler {
 	return &PerfInfoHandler{
 		collector:     NewPerfInfoCollector(config),
 		config:        config,
-		log:           logger.NewLoggerWithContext("perfinfo_handler"),
+		log:           logger.NewSampledLoggerCtx("perfinfo_handler"),
 		lastDPCPerCPU: make(map[uint16]pendingDPCInfo),
 	}
 }
@@ -392,32 +392,5 @@ func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) 
 
 // HandleSampleProfileEvent processes SampledProfile events for SMI gap detection.
 func (h *PerfInfoHandler) HandleSampleProfileEvent(helper *etw.EventRecordHelper) error {
-	return nil
-}
-
-// HandleHardPageFaultEvent processes hard page fault events to count memory faults.
-//
-// ETW Event Details:
-//   - Provider Name: NT Kernel Logger (PageFault)
-//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-//   - Event ID(s): 32
-//   - Event Name(s): HardFault
-//   - Event Version(s): 2
-//   - Schema: MOF
-//
-// Schema (from gen_mof_kerneldef.go):
-//   - InitialTime (object): Timestamp of the page fault. The format depends on the session's ClientContext.
-//   - ReadOffset (uint64): Read offset in the file.
-//   - VirtualAddress (pointer): Virtual address that caused the fault.
-//   - FileObject (pointer): Pointer to the file object.
-//   - TThreadId (uint32): Thread ID that encountered the fault.
-//   - ByteCount (uint32): Amount of data read.
-//
-// This handler increments a counter for each hard page fault, which is a key
-// indicator of memory pressure.
-func (h *PerfInfoHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error {
-
-	h.collector.ProcessHardPageFaultEvent()
-
 	return nil
 }

@@ -5,16 +5,15 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
-
-	"github.com/phuslu/log"
 )
 
 var (
-	version = "0.3.3"
+	version = "0.3.9"
 )
 
 // pprof comments for reference
@@ -25,13 +24,16 @@ var (
 // or
 // cpu> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
 // mem> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
+//
+// pgo> go tool pprof -proto -output=default.pgo etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=300
+//
+// builds flags: -gcflags="all=-B" (bound check elimation) "-s -w" (strip symbols)
 
 // TODO(tekert):
-//  - Memory collector
+//  - Add win11 support with the new provider system. (goetw already supports it)
 //  - Skip MOF Opcodes we dont need,
 //      and also Manifest provider using IDFilter on EnableProvider [DONE].
 //  - Security provider? and that's it for now.
-//  - reformat CONFIG.md explanations, more compact, less text.
 //  - Reopen NT Kernel Logger if closed by another app, do config.
 //  - user suplied exe names to expand metric to per process. ( Use: EventRecord.ExtProcessStartKey works on mof?)
 //      for example the thread collector wait states.
@@ -58,12 +60,12 @@ func main() {
 	// Create and run the application
 	exporter, err := NewETWExporter(config)
 	if err != nil {
-		log.Fatal().Err(err).Msg("❌ Failed to initialize application")
+		log.Fatal("Failed to initialize application: ", err)
 		os.Exit(1)
 	}
 
 	if err := exporter.Run(); err != nil {
-		log.Fatal().Err(err).Msg("❌ Application run failed")
+		log.Fatal("Application run failed: ", err)
 		os.Exit(1)
 	}
 }

@@ -1,4 +1,4 @@
-package kprocess
+package kernelprocess
 
 import (
 	"strconv"
@@ -7,6 +7,7 @@ import (
 
 	"etw_exporter/internal/logger"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
@@ -22,11 +23,15 @@ type ProcessInfo struct {
 	mu sync.Mutex
 }
 
-// ProcessCollector maintains the centralized mapping of process IDs to process information
-// This is the single source of truth for all process data across the application
+// ProcessCollector maintains the centralized mapping of process IDs to process information.
+// It is the single source of truth for all process data and manages the lifecycle
+// of process information, including a delayed cleanup mechanism to prevent race
+// conditions with Prometheus scrapes.
 type ProcessCollector struct {
-	processes sync.Map // key: uint32 (PID), value: *ProcessInfo
-	log       *phusluadapter.SampledLogger
+	processes           sync.Map // key: uint32 (PID), value: *ProcessInfo
+	terminatedProcesses sync.Map // key: uint32 (PID), value: time.Time (when marked for deletion)
+	log                 *phusluadapter.SampledLogger
+	mu                  sync.Mutex // Protects the cleanup logic
 }
 
 // Global process collector instance and a sync.Once to ensure thread-safe initialization
@@ -46,17 +51,35 @@ func GetGlobalProcessCollector() *ProcessCollector {
 	return globalProcessCollector
 }
 
-// NewProcessCollector creates a new process collector instance (for testing or specialized use)
-func NewProcessCollector() *ProcessCollector {
-	return &ProcessCollector{
-		//log: logger.NewLoggerWithContext("process_collector"),
-		log: logger.NewSampledLoggerCtx("process_collector"),
+// ProcessCleanupCollector is a sentinel collector that triggers cleanup after a scrape.
+type ProcessCleanupCollector struct {
+	pc *ProcessCollector
+}
+
+// NewProcessCleanupCollector creates a new sentinel collector.
+func NewProcessCleanupCollector() *ProcessCleanupCollector {
+	return &ProcessCleanupCollector{
+		pc: GetGlobalProcessCollector(),
 	}
+}
+
+// Describe does nothing. It's a sentinel collector.
+func (c *ProcessCleanupCollector) Describe(ch chan<- *prometheus.Desc) {}
+
+// Collect triggers the post-scrape cleanup in the ProcessCollector.
+// This method is called by Prometheus during a scrape. By registering this
+// collector last, we ensure cleanup happens after all other collectors are done.
+func (c *ProcessCleanupCollector) Collect(ch chan<- prometheus.Metric) {
+	c.pc.PostScrapeCleanup()
 }
 
 // AddProcess adds or updates process information. If the process already exists,
 // it updates its details and refreshes its LastSeen timestamp.
 func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32, eventTimestamp time.Time) {
+	// If the process was recently terminated, remove it from the terminated list
+	// as it might be a PID reuse scenario.
+	pc.terminatedProcesses.Delete(pid)
+
 	// Check if we're updating an existing process
 	if existingInfo, existed := pc.processes.Load(pid); existed {
 		processInfo := existingInfo.(*ProcessInfo)
@@ -95,19 +118,13 @@ func (pc *ProcessCollector) AddProcess(pid uint32, name string, parentPID uint32
 		Msg("Process added to collector")
 }
 
-// RemoveProcess removes a process from tracking
-func (pc *ProcessCollector) RemoveProcess(pid uint32) {
-	if info, exists := pc.processes.LoadAndDelete(pid); exists {
-		processInfo := info.(*ProcessInfo)
-
-		processInfo.mu.Lock()
-		name := processInfo.Name
-		processInfo.mu.Unlock()
-
-		pc.log.Debug().
-			Uint32("pid", pid).
-			Str("name", name).
-			Msg("Process removed from collector")
+// MarkProcessForDeletion moves a process to the terminated list for delayed cleanup.
+// It does NOT immediately delete the process info, allowing in-flight scrapes to
+// complete successfully.
+func (pc *ProcessCollector) MarkProcessForDeletion(pid uint32) {
+	if _, exists := pc.processes.Load(pid); exists {
+		pc.terminatedProcesses.Store(pid, time.Now())
+		pc.log.Trace().Uint32("pid", pid).Msg("Process marked for deletion post-scrape")
 	}
 }
 
@@ -119,7 +136,7 @@ func (pc *ProcessCollector) IsKnownProcess(pid uint32) bool {
 }
 
 // GetProcessName returns the process name for a given PID.
-// It safely accesses the name without cloning the entire ProcessInfo struct.
+// It can resolve names for active and recently terminated processes.
 func (pc *ProcessCollector) GetProcessName(pid uint32) (string, bool) {
 	if info, exists := pc.processes.Load(pid); exists {
 		processInfo := info.(*ProcessInfo)
@@ -164,14 +181,10 @@ func (pc *ProcessCollector) GetProcessInfo(pid uint32) (ProcessInfo, bool) {
 }
 
 // Clone creates a safe, deep copy of the ProcessInfo struct.
-// It locks the original struct during the copy and returns a new
-// struct with its own, fresh mutex.
 func (pi *ProcessInfo) Clone() ProcessInfo {
 	pi.mu.Lock()
 	defer pi.mu.Unlock()
 
-	// Return a copy of the data. The 'mu' field in the new struct
-	// will be its default zero-value, which is correct.
 	return ProcessInfo{
 		PID:       pi.PID,
 		Name:      pi.Name,
@@ -181,34 +194,30 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 	}
 }
 
-// GetAllProcesses returns a snapshot copy of all currently tracked processes
-func (pc *ProcessCollector) GetAllProcesses() map[uint32]*ProcessInfo {
-	processes := make(map[uint32]*ProcessInfo)
-	pc.processes.Range(func(key, value any) bool {
+// PostScrapeCleanup performs the actual deletion of processes that were marked.
+// This should be called by the sentinel collector AFTER a Prometheus scrape is complete.
+func (pc *ProcessCollector) PostScrapeCleanup() {
+	pc.mu.Lock()
+	defer pc.mu.Unlock()
+
+	var cleanedCount int
+	pc.terminatedProcesses.Range(func(key, value any) bool {
 		pid := key.(uint32)
-		info := value.(*ProcessInfo)
-		clone := info.Clone()
-		processes[pid] = &clone // safe copy
+		pc.processes.Delete(pid)
+		pc.terminatedProcesses.Delete(pid)
+		cleanedCount++
 		return true
 	})
-	return processes
+
+	if cleanedCount > 0 {
+		pc.log.Debug().Int("count", cleanedCount).Msg("Post-scrape cleanup of terminated processes complete")
+	}
 }
 
-// GetProcessCount returns the number of currently tracked processes
-func (pc *ProcessCollector) GetProcessCount() int {
-	count := 0
-	pc.processes.Range(func(key, value any) bool {
-		count++
-		return true
-	})
-	return count
-}
-
-// CleanupStaleProcesses removes processes that have not been seen for a specified duration.
-// This should be called after a process rundown has been triggered and processed.
+// CleanupStaleProcesses marks processes that have not been seen for a specified duration for deletion.
 func (pc *ProcessCollector) CleanupStaleProcesses(lastSeenIn time.Duration) int {
 	cutoff := time.Now().Add(-lastSeenIn)
-	var pidsToDelete []uint32
+	var pidsToMark []uint32
 
 	pc.processes.Range(func(key, value any) bool {
 		pid := key.(uint32)
@@ -219,29 +228,22 @@ func (pc *ProcessCollector) CleanupStaleProcesses(lastSeenIn time.Duration) int 
 		info.mu.Unlock()
 
 		if lastSeen.Before(cutoff) {
-			pidsToDelete = append(pidsToDelete, pid)
+			pidsToMark = append(pidsToMark, pid)
 		}
 		return true
 	})
 
-	if len(pidsToDelete) == 0 {
+	if len(pidsToMark) == 0 {
 		return 0
 	}
 
-	var deletedDetails []string
-	for _, pid := range pidsToDelete {
-		if name, exists := pc.GetProcessName(pid); exists {
-			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":"+name)
-		} else {
-			deletedDetails = append(deletedDetails, strconv.FormatUint(uint64(pid), 10)+":<unknown>")
-		}
-		pc.RemoveProcess(pid)
+	for _, pid := range pidsToMark {
+		pc.MarkProcessForDeletion(pid)
 	}
 	pc.log.Debug().
-		Int("stale_count", len(pidsToDelete)).
+		Int("stale_count", len(pidsToMark)).
 		Dur("max_age", lastSeenIn).
-		Strs("deleted", deletedDetails).
-		Msg("Cleaning up stale processes not seen in rundown")
+		Msg("Marked stale processes for cleanup post-scrape")
 
-	return len(pidsToDelete)
+	return len(pidsToMark)
 }

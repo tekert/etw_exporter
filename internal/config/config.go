@@ -55,9 +55,8 @@ type CollectorConfig struct {
 	// Network collector configuration
 	Network NetworkConfig `toml:"network"`
 
-	// TODO(tekert): Future collector configs can be added here:
-	// Memory  MemoryConfig  `toml:"memory"`
-	// CPU     CPUConfig     `toml:"cpu"`
+	// Memory collector configuration
+	Memory MemoryConfig `toml:"memory"`
 }
 
 // DiskIOConfig contains disk I/O collector settings
@@ -102,6 +101,15 @@ type NetworkConfig struct {
 
 	// Enable retransmission rate tracking (default: false, adds retransmission metrics)
 	RetransmissionRate bool `toml:"enable_retrasmission_rate"`
+}
+
+// MemoryConfig contains memory collector settings
+type MemoryConfig struct {
+	// Enable memory event collection (default: true)
+	Enabled bool `toml:"enabled"`
+
+	// Enable per-process hard page fault metrics (default: true)
+	EnablePerProcess bool `toml:"enable_per_process"`
 }
 
 // LoggingConfig contains the complete logging configuration
@@ -262,6 +270,10 @@ func DefaultConfig() *AppConfig {
 				ConnectionHealth:   false, // Connection health metrics disabled by default
 				ByProtocol:         false, // Protocol-specific metrics disabled by default
 				RetransmissionRate: false, // Retransmission rate tracking disabled by default
+			},
+			Memory: MemoryConfig{
+				Enabled:          true,
+				EnablePerProcess: true,
 			},
 		},
 		Logging: LoggingConfig{

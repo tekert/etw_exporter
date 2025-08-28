@@ -2,7 +2,6 @@ package kernelthread
 
 import (
 	"runtime"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,21 +30,44 @@ import (
 // custom collector pattern.
 type ThreadHandler struct {
 	lastCpuSwitch   []atomic.Int64               // stores the last context switch timestamp (in ns) for each CPU
-	threadToProcess sync.Map                     // key: threadID (uint32), value: processID (uint32)
+	threadMapping   *ThreadMapping               // TID -> PID mapping
 	customCollector *ThreadCSCollector           // High-performance custom collector
 	log             *phusluadapter.SampledLogger // Thread collector logger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
 // The custom collector provides high-performance metrics aggregation
-func NewThreadHandler() *ThreadHandler {
+func NewThreadHandler(threadMapping *ThreadMapping) *ThreadHandler {
 	return &ThreadHandler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
 		customCollector: NewThreadCSCollector(),
+		threadMapping:   threadMapping,
 		log:             logger.NewSampledLoggerCtx("thread_handler"),
 		//log:             logger.NewLoggerWithContext("thread_handler"),
 	}
 }
+
+// GetCustomCollector returns the custom Prometheus collector for thread metrics.
+// This method provides access to the ThreadMetricsCustomCollector for registration
+// with the Prometheus registry, enabling high-performance metric collection.
+//
+// Usage Example:
+//
+//	threadCollector := NewThreadCSCollector()
+//	prometheus.MustRegister(threadCollector.GetCustomCollector())
+func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector {
+	return c.customCollector
+}
+
+// // GetProcessID resolves a thread ID to its parent process ID.
+// // It returns the process ID and a boolean indicating if the mapping was found.
+// func (c *ThreadHandler) GetProcessID(threadID uint32) (uint32, bool) {
+// 	pid, exists := c.threadToProcess.Load(threadID)
+// 	if !exists {
+// 		return 0, false
+// 	}
+// 	return pid.(uint32), true
+// }
 
 // HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
 // This is a high-performance "fast path" that reads directly from the UserData
@@ -94,8 +116,8 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
-	if pid, exists := c.threadToProcess.Load(newThreadID); exists {
-		processID = pid.(uint32)
+	if pid, exists := c.threadMapping.GetProcessID(uint32(newThreadID)); exists {
+		processID = pid
 	}
 
 	// Record context switch in custom collector
@@ -160,8 +182,8 @@ func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
-	if pid, exists := c.threadToProcess.Load(uint32(newThreadID)); exists {
-		processID = pid.(uint32)
+	if pid, exists := c.threadMapping.GetProcessID(uint32(newThreadID)); exists {
+		processID = pid
 	}
 
 	// Record context switch in custom collector (handles process name lookup internally)
@@ -235,7 +257,7 @@ func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessId")
 
 	// Store thread to process mapping for context switch metrics
-	c.threadToProcess.Store(uint32(threadID), uint32(processID))
+	c.threadMapping.AddThread(uint32(threadID), uint32(processID)) // TODO: delete stale threads?
 
 	// Track thread creation
 	c.customCollector.RecordThreadCreation()
@@ -263,7 +285,7 @@ func (c *ThreadHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 
 	// Clean up thread to process mapping
-	c.threadToProcess.Delete(uint32(threadID))
+	c.threadMapping.RemoveThread(uint32(threadID))  // TODO: delete stale threads?
 
 	// Track thread termination
 	c.customCollector.RecordThreadTermination()
@@ -380,22 +402,4 @@ func GetAllWaitReasonStrings() []string {
 		"WrPushLock", "WrMutex", "WrQuantumEnd", "WrDispatchInt", "WrPreempted",
 		"WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown",
 	}
-}
-
-// GetCustomCollector returns the custom Prometheus collector for thread metrics.
-// This method provides access to the ThreadMetricsCustomCollector for registration
-// with the Prometheus registry, enabling high-performance metric collection.
-//
-// Usage Example:
-//
-//	threadCollector := NewThreadCSCollector()
-//	prometheus.MustRegister(threadCollector.GetCustomCollector())
-//
-// The custom collector follows Prometheus best practices:
-// - Implements prometheus.Collector interface
-// - Uses atomic operations for high-frequency updates
-// - Provides thread-safe metric aggregation
-// - Maintains low cardinality for performance
-func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector {
-	return c.customCollector
 }

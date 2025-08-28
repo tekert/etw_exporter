@@ -8,11 +8,12 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
 	"etw_exporter/internal/collectors/kdiskio"
+	"etw_exporter/internal/collectors/kernelmemory"
+	"etw_exporter/internal/collectors/kernelnetwork"
+	"etw_exporter/internal/collectors/kernelperf"
+	"etw_exporter/internal/collectors/kernelprocess"
+	"etw_exporter/internal/collectors/kernelsysconfig"
 	"etw_exporter/internal/collectors/kernelthread"
-	"etw_exporter/internal/collectors/knetwork"
-	"etw_exporter/internal/collectors/kperfinfo"
-	"etw_exporter/internal/collectors/kprocess"
-	"etw_exporter/internal/collectors/ksystemconfig"
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 )
@@ -50,7 +51,6 @@ type PerfInfoNtEventHandler interface {
 	HandleDPCEvent(helper *etw.EventRecordHelper) error
 	HandleImageLoadEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelImage handler.
 	HandleImageUnloadEvent(helper *etw.EventRecordHelper) error
-	HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelPageFault handler.
 	HandleSampleProfileEvent(helper *etw.EventRecordHelper) error
 }
 
@@ -71,6 +71,10 @@ type NetworkEventHandler interface {
 	HandleUDPConnectionFailed(helper *etw.EventRecordHelper) error
 }
 
+type MemoryNtEventHandler interface {
+	HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error
+}
+
 // EventHandler encapsulates state and logic for ETW event processing
 // This handler routes events to specialized sub-handlers based on event type
 // and provider GUID.
@@ -78,8 +82,9 @@ type EventHandler struct {
 	// Collectors for different metric categories
 	diskHandler     *kdiskio.DiskIOHandler
 	threadCSHandler *kernelthread.ThreadHandler
-	perfinfoHandler *kperfinfo.PerfInfoHandler
-	networkHandler  *knetwork.NetworkHandler
+	perfinfoHandler *kernelperf.PerfInfoHandler
+	networkHandler  *kernelnetwork.NetworkHandler
+	memoryHandler   *kernelmemory.MemoryHandler
 
 	// Future collectors will be added here:
 
@@ -98,14 +103,15 @@ type EventHandler struct {
 	pageFaultEventCount    atomic.Uint64
 	networkEventCount      atomic.Uint64
 
-	// Routing tables for different event types - hot path optimized
-	diskEventHandlers    []DiskEventHandler
-	processEventHandlers []ProcessEventHandler
-	threadEventHandlers  []ThreadNtEventHandler
-	fileEventHandlers    []FileEventHandler
-	perfinfoHandlers     []PerfInfoNtEventHandler
-	systemConfigHandlers []SystemConfigEventHandler
-	networkEventHandlers []NetworkEventHandler
+	// ROUTING TABLES for different event types - hot path optimized
+	diskEventHandlers         []DiskEventHandler
+	processEventHandlers      []ProcessEventHandler
+	threadEventHandlers       []ThreadNtEventHandler
+	fileEventHandlers         []FileEventHandler
+	perfinfoEventHandlers     []PerfInfoNtEventHandler
+	systemConfigEventHandlers []SystemConfigEventHandler
+	networkEventHandlers      []NetworkEventHandler
+	memoryEventHandlers       []MemoryNtEventHandler
 }
 
 // NewEventHandler creates a new central event handler. It initializes all collectors
@@ -113,25 +119,29 @@ type EventHandler struct {
 // metrics where applicable, and sets up the internal routing tables.
 func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	handler := &EventHandler{
-		config:               config,
-		log:                  logger.NewSampledLoggerCtx("event_handler"),
-		diskEventHandlers:    make([]DiskEventHandler, 0),
-		processEventHandlers: make([]ProcessEventHandler, 0),
-		threadEventHandlers:  make([]ThreadNtEventHandler, 0),
-		fileEventHandlers:    make([]FileEventHandler, 0),
-		perfinfoHandlers:     make([]PerfInfoNtEventHandler, 0),
-		systemConfigHandlers: make([]SystemConfigEventHandler, 0),
-		networkEventHandlers: make([]NetworkEventHandler, 0),
+		config:                    config,
+		log:                       logger.NewSampledLoggerCtx("event_handler"),
+		diskEventHandlers:         make([]DiskEventHandler, 0),
+		processEventHandlers:      make([]ProcessEventHandler, 0),
+		threadEventHandlers:       make([]ThreadNtEventHandler, 0),
+		fileEventHandlers:         make([]FileEventHandler, 0),
+		perfinfoEventHandlers:     make([]PerfInfoNtEventHandler, 0),
+		systemConfigEventHandlers: make([]SystemConfigEventHandler, 0),
+		networkEventHandlers:      make([]NetworkEventHandler, 0),
+		memoryEventHandlers:       make([]MemoryNtEventHandler, 0),
 	}
 
 	// Always register the global process handler for process events
 	// This ensures we have process name mappings available for all collectors
-	processHandler := kprocess.NewProcessHandler()
+	processHandler := kernelprocess.NewProcessHandler()
 	handler.RegisterProcessEventHandler(processHandler)
 	handler.log.Debug().Msg("Registered global process handler")
 
+	// Create the shared ThreadMapping instance TID -> PID for modules to use.
+	threadMapping := kernelthread.NewThreadMapping()
+
 	// Always register the system config handler to collect data
-	systemConfigHandler := ksystemconfig.NewSystemConfigHandler()
+	systemConfigHandler := kernelsysconfig.NewSystemConfigHandler()
 	handler.RegisterSystemConfigEventHandler(systemConfigHandler)
 	handler.log.Debug().Msg("Registered global system config handler")
 
@@ -144,55 +154,67 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.log.Info().Msg("Disk I/O collector enabled and registered with Prometheus")
 
 		// Request the necessary metrics from the system config collector.
-		systemConfigCollector := ksystemconfig.GetGlobalSystemConfigCollector()
+		systemConfigCollector := kernelsysconfig.GetGlobalSystemConfigCollector()
 		systemConfigCollector.RequestMetrics(
-			ksystemconfig.PhysicalDiskInfoMetricName,
-			ksystemconfig.LogicalDiskInfoMetricName,
+			kernelsysconfig.PhysicalDiskInfoMetricName,
+			kernelsysconfig.LogicalDiskInfoMetricName,
 		)
 
 	}
 
 	if config.ThreadCS.Enabled {
-		handler.threadCSHandler = kernelthread.NewThreadHandler()
+		handler.threadCSHandler = kernelthread.NewThreadHandler(threadMapping)
 		// Register the thread collector with the handler
 		handler.RegisterThreadEventHandler(handler.threadCSHandler)
-		// Register the custom collector with Prometheus for high-performance metrics
+		// Register the custom collector
 		prometheus.MustRegister(handler.threadCSHandler.GetCustomCollector())
 		handler.log.Info().Msg("ThreadCS collector enabled and registered with Prometheus")
 	}
 
 	if config.PerfInfo.Enabled {
-		handler.perfinfoHandler = kperfinfo.NewPerfInfoHandler(&config.PerfInfo)
+		handler.perfinfoHandler = kernelperf.NewPerfInfoHandler(&config.PerfInfo)
 		// Register the interrupt handler with the event handler
 		handler.RegisterPerfInfoEventHandler(handler.perfinfoHandler)
 		// Also register for thread events to finalize DPC durations with CSwitch events.
 		handler.RegisterThreadEventHandler(handler.perfinfoHandler)
-		// Register the custom collector with Prometheus for high-performance metrics
+		// Register the custom collector
 		prometheus.MustRegister(handler.perfinfoHandler.GetCustomCollector())
 		handler.log.Info().Msg("PerfInfo collector enabled and registered with Prometheus")
 	}
 
 	if config.Network.Enabled {
-		networkCollector := knetwork.NewNetworkCollector(&config.Network)
-		handler.networkHandler = knetwork.NewNetworkHandler(networkCollector)
+		handler.networkHandler = kernelnetwork.NewNetworkHandler(&config.Network)
 		// Register the network handler with the event handler
 		handler.RegisterNetworkEventHandler(handler.networkHandler)
-		// Register the network metrics with Prometheus
-		err := networkCollector.RegisterMetrics(prometheus.DefaultRegisterer)
-		if err != nil {
-			handler.log.Error().Err(err).Msg("Failed to register network metrics with Prometheus")
-		} else {
-			handler.log.Info().Msg("Network collector enabled and registered with Prometheus")
-		}
+		// Register the custom collector
+		prometheus.MustRegister(handler.networkHandler.GetCustomCollector())
+		handler.log.Info().Msg("Network collector enabled and registered with Prometheus")
 	}
+
+	if config.Memory.Enabled {
+		handler.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, threadMapping)
+		// Register the memory handler for hard fault events
+		handler.RegisterMemoryEventHandler(handler.memoryHandler)
+		// Register the custom collector
+		prometheus.MustRegister(handler.memoryHandler.GetCustomCollector())
+		handler.log.Info().Msg("Memory collector enabled and registered with Prometheus")
+	}
+
+	// --- Sentinel Collector Registration ---
+	// This collector MUST be registered LAST. Its purpose is to trigger a cleanup
+	// of terminated processes in the ProcessCollector AFTER all other collectors
+	// have completed their scrape. This prevents race conditions where a process
+	// terminates and its metrics are lost before they can be scraped.
+	prometheus.MustRegister(kernelprocess.NewProcessCleanupCollector())
+	handler.log.Debug().Msg("Registered post-scrape process cleanup collector")
 
 	handler.log.Info().
 		Int("disk_handlers", len(handler.diskEventHandlers)).
 		Int("process_handlers", len(handler.processEventHandlers)).
 		Int("thread_handlers", len(handler.threadEventHandlers)).
 		Int("file_handlers", len(handler.fileEventHandlers)).
-		Int("interrupt_handlers", len(handler.perfinfoHandlers)).
-		Int("systemconfig_handlers", len(handler.systemConfigHandlers)).
+		Int("interrupt_handlers", len(handler.perfinfoEventHandlers)).
+		Int("systemconfig_handlers", len(handler.systemConfigEventHandlers)).
 		Int("network_handlers", len(handler.networkEventHandlers)).
 		Msg("Event handlers initialized")
 
@@ -220,18 +242,23 @@ func (h *EventHandler) RegisterFileEventHandler(handler FileEventHandler) {
 }
 
 func (h *EventHandler) RegisterPerfInfoEventHandler(handler PerfInfoNtEventHandler) {
-	h.perfinfoHandlers = append(h.perfinfoHandlers, handler)
-	h.log.Debug().Int("total_perfinfo_handlers", len(h.perfinfoHandlers)).Msg("PerfInfo event handler registered")
+	h.perfinfoEventHandlers = append(h.perfinfoEventHandlers, handler)
+	h.log.Debug().Int("total_perfinfo_handlers", len(h.perfinfoEventHandlers)).Msg("PerfInfo event handler registered")
 }
 
 func (h *EventHandler) RegisterSystemConfigEventHandler(handler SystemConfigEventHandler) {
-	h.systemConfigHandlers = append(h.systemConfigHandlers, handler)
-	h.log.Debug().Int("total_systemconfig_handlers", len(h.systemConfigHandlers)).Msg("SystemConfig event handler registered")
+	h.systemConfigEventHandlers = append(h.systemConfigEventHandlers, handler)
+	h.log.Debug().Int("total_systemconfig_handlers", len(h.systemConfigEventHandlers)).Msg("SystemConfig event handler registered")
 }
 
 func (h *EventHandler) RegisterNetworkEventHandler(handler NetworkEventHandler) {
 	h.networkEventHandlers = append(h.networkEventHandlers, handler)
 	h.log.Debug().Int("total_network_handlers", len(h.networkEventHandlers)).Msg("Network event handler registered")
+}
+
+func (h *EventHandler) RegisterMemoryEventHandler(handler MemoryNtEventHandler) {
+	h.memoryEventHandlers = append(h.memoryEventHandlers, handler)
+	h.log.Debug().Int("total_memory_handlers", len(h.networkEventHandlers)).Msg("Memory event handler registered")
 }
 
 // GetEventCounts returns the current event counts for each provider.
@@ -363,19 +390,19 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 
 // routeSystemConfigEvents routes SystemConfig events to disk handlers
 func (h *EventHandler) routeSystemConfigEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.systemConfigHandlers) == 0 {
+	if len(h.systemConfigEventHandlers) == 0 {
 		return nil
 	}
 
 	switch eventID {
 	case etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK: // 11
-		for _, handler := range h.systemConfigHandlers {
+		for _, handler := range h.systemConfigEventHandlers {
 			if err := handler.HandleSystemConfigPhyDisk(helper); err != nil {
 				return err
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK: // 12
-		for _, handler := range h.systemConfigHandlers {
+		for _, handler := range h.systemConfigEventHandlers {
 			if err := handler.HandleSystemConfigLogDisk(helper); err != nil {
 				return err
 			}
@@ -528,26 +555,26 @@ func (h *EventHandler) EventCallback(event *etw.Event) error {
 
 // routePerfInfoEvents routes interrupt and DPC events to all registered interrupt handlers
 func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.perfinfoHandlers) == 0 {
+	if len(h.perfinfoEventHandlers) == 0 {
 		return nil
 	}
 
 	switch eventID {
 	case 67: // ISR
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.perfinfoEventHandlers {
 			if err := handler.HandleISREvent(helper); err != nil {
 				return err
 			}
 		}
 	case 66, 68, 69: // DPC
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.perfinfoEventHandlers {
 			if err := handler.HandleDPCEvent(helper); err != nil {
 				return err
 			}
 		}
 
 	case 46: // Sample Profile
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.perfinfoEventHandlers {
 			if err := handler.HandleSampleProfileEvent(helper); err != nil {
 				return err
 			}
@@ -559,7 +586,7 @@ func (h *EventHandler) routePerfInfoEvents(helper *etw.EventRecordHelper, eventI
 
 // routeImageEvents routes image load events to all registered interrupt handlers
 func (h *EventHandler) routeImageEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.perfinfoHandlers) == 0 {
+	if len(h.perfinfoEventHandlers) == 0 {
 		return nil
 	}
 
@@ -567,13 +594,13 @@ func (h *EventHandler) routeImageEvents(helper *etw.EventRecordHelper, eventID u
 	case etw.EVENT_TRACE_TYPE_DC_START,
 		etw.EVENT_TRACE_TYPE_DC_END,
 		etw.EVENT_TRACE_TYPE_LOAD: // Image Load events
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.perfinfoEventHandlers {
 			if err := handler.HandleImageLoadEvent(helper); err != nil {
 				return err
 			}
 		}
 	case etw.EVENT_TRACE_TYPE_END: // Image Unload event
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.perfinfoEventHandlers {
 			if err := handler.HandleImageUnloadEvent(helper); err != nil {
 				return err
 			}
@@ -585,14 +612,14 @@ func (h *EventHandler) routeImageEvents(helper *etw.EventRecordHelper, eventID u
 
 // routePageFaultEvents routes page fault events to all registered interrupt handlers
 func (h *EventHandler) routePageFaultEvents(helper *etw.EventRecordHelper, eventID uint16) error {
-	if len(h.perfinfoHandlers) == 0 {
+	if len(h.memoryEventHandlers) == 0 {
 		return nil
 	}
 
 	// Page fault events - need to check specific event IDs for hard page faults
 	switch eventID {
 	case 32: // 32 - Hard page fault
-		for _, handler := range h.perfinfoHandlers {
+		for _, handler := range h.memoryEventHandlers {
 			if err := handler.HandleHardPageFaultEvent(helper); err != nil {
 				return err
 			}

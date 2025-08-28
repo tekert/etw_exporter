@@ -1,5 +1,5 @@
 // filepath: e:\Sources\go\projects\etw_exporter\perfinfo_collector.go
-package kperfinfo
+package kernelperf
 
 import (
 	"strconv"
@@ -12,8 +12,6 @@ import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 )
-
-// TODO(tekert): do Process-Level Page Faults ?
 
 // DPC Latency is measured as an aproximation in this module,
 // It's measured time from the time a DCP is executed
@@ -54,7 +52,6 @@ var isrEventPool = sync.Pool{
 // - DPC execution time by driver (matches "Highest DPC routine execution time")
 // - DPC queue depth tracking (system-wide and per-CPU)
 // - SMI gap detection via timeline analysis
-// - Hard page fault counting (system-wide)
 //
 // All metrics use the etw_ prefix and are designed for low cardinality.
 type PerfInfoInterruptCollector struct {
@@ -78,11 +75,8 @@ type PerfInfoInterruptCollector struct {
 	dpcQueuedCount   map[uint16]int64 // CPU -> queued count
 	dpcExecutedCount map[uint16]int64 // CPU -> executed count
 
-	// SMI gap detection (placeholder for future implementation)
+	// SMI gap detection (placeholder for future implementation) // TODO
 	smiGapsDesc *prometheus.Desc
-
-	// Hard page fault counter
-	hardPageFaultCount int64
 
 	// Synchronization
 	mu            sync.RWMutex
@@ -97,7 +91,6 @@ type PerfInfoInterruptCollector struct {
 	dpcExecutedDesc     *prometheus.Desc
 	dpcQueuedCPUDesc    *prometheus.Desc
 	dpcExecutedCPUDesc  *prometheus.Desc
-	hardPageFaultsDesc  *prometheus.Desc
 
 	// Driver last seen tracking for stale metric cleanup
 	driverLastSeen map[string]time.Time // driver name -> last event time
@@ -215,11 +208,6 @@ func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptColle
 			nil, nil)
 	}
 
-	collector.hardPageFaultsDesc = prometheus.NewDesc(
-		"etw_memory_hard_pagefaults_total",
-		"Total hard page faults system-wide",
-		nil, nil)
-
 	// Create per-CPU descriptor only if enabled
 	if config.EnablePerCPU {
 		collector.dpcQueuedCPUDesc = prometheus.NewDesc(
@@ -243,7 +231,6 @@ func (c *PerfInfoInterruptCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.isrToDpcLatencyDesc
 	ch <- c.dpcQueuedDesc
 	ch <- c.dpcExecutedDesc
-	ch <- c.hardPageFaultsDesc
 
 	// Placeholder for SMI gap metric
 	if c.smiGapsDesc != nil {
@@ -292,13 +279,6 @@ func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
 	if c.config.EnableSMIDetection {
 		c.collectSMIGaps(ch)
 	}
-
-	// Hard page fault counter
-	ch <- prometheus.MustNewConstMetric(
-		c.hardPageFaultsDesc,
-		prometheus.CounterValue,
-		float64(c.hardPageFaultCount),
-	)
 }
 
 // collectISRToDPCLatencyHistogram creates the system-wide ISR to DPC latency histogram
@@ -538,14 +518,6 @@ func (c *PerfInfoInterruptCollector) ProcessImageUnloadEvent(imageBase uint64) {
 			delete(c.driverNames, routineAddr)
 		}
 	}
-}
-
-// ProcessHardPageFaultEvent increments the hard page fault counter
-func (c *PerfInfoInterruptCollector) ProcessHardPageFaultEvent() {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	c.hardPageFaultCount++
 }
 
 // resolveDriverNameUnsafe is an optimized version for use within locked contexts

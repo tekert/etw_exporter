@@ -9,7 +9,7 @@ import (
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
-	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 )
@@ -242,7 +242,7 @@ func (s *SessionManager) Stop() error {
 	}
 
 	// Stop sessions first
-	if err := s.stopSessions() ; err != nil {
+	if err := s.stopSessions(); err != nil {
 		return fmt.Errorf("failed to stop sessions: %w", err)
 	}
 
@@ -350,7 +350,7 @@ func (s *SessionManager) startStaleProcessCleanup() {
 			}
 
 			// 3. Clean up processes that were not "seen" during the rundown.
-			pc := kprocess.GetGlobalProcessCollector()
+			pc := kernelprocess.GetGlobalProcessCollector()
 			cleanedCount := pc.CleanupStaleProcesses(processMaxAge)
 			if cleanedCount > 0 {
 				log.Info().Int("count", cleanedCount).Msg("Cleaned up stale processes")

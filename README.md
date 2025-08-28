@@ -11,6 +11,10 @@ The exporter provides several categories of metrics, which can be enabled via th
 - **Interrupt & DPC Latency**: Measures low-level kernel latencies, including ISR-to-DPC latency and DPC execution time by driver.
 - **Network**: Monitors TCP/UDP traffic, connection stats, and retransmissions by process.
 
+> If you need more metrics just open an issue, there is tons of additional info from the kernel, the config exposed here is the one that requieres less cardinality for metrics.
+
+Configurable per process filters will be in v0.4
+
 ## Configuration
 
 The exporter is configured using a TOML file. Below is an example configuration. For a full list of options, see `config/CONFIG.md` and `config/LOGCONFIG.md`.
@@ -66,7 +70,6 @@ enabled = true
 ```
 
 - **Metrics Endpoint**: `http://localhost:9189/metrics`
-- **Status Page**: `http://localhost:9189/`
 
 ## Requirements
 

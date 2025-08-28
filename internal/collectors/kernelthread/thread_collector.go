@@ -11,7 +11,7 @@ import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"etw_exporter/internal/collectors/kprocess"
+	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/logger"
 )
 
@@ -236,12 +236,13 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 	}
 
 	// Collect process context switches
-	processCollector := kprocess.GetGlobalProcessCollector()
+	processCollector := kernelprocess.GetGlobalProcessCollector()
 	c.contextSwitchesPerProcess.Range(func(key, val any) bool {
 		pid := key.(uint32)
 		countPtr := val.(*int64)
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
+			// PID-Name mappings are retained until after scrap by the process collector.
 			if processName, isKnown := processCollector.GetProcessName(pid); isKnown {
 				count := atomic.LoadInt64(countPtr)
 				data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
@@ -301,7 +302,9 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 
 	// Record context switch per process (concurrent map)
 	if processID > 0 {
-		processCollector := kprocess.GetGlobalProcessCollector()
+		processCollector := kernelprocess.GetGlobalProcessCollector()
+		// Only create metrics for processes that are still known at scrape time
+		// PID-Name mappings are retained until after scrap by the process collector.
 		if processCollector.IsKnownProcess(processID) {
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)
