@@ -338,7 +338,7 @@ func LoadConfig(configPath string) (*AppConfig, error) {
 	}
 
 	if _, err := os.Stat(configPath); errors.Is(err, fs.ErrNotExist) {
-		return config, nil
+		return config, fmt.Errorf("config file not found: %s", configPath)
 	}
 
 	// Parse TOML file
