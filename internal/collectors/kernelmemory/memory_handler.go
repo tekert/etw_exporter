@@ -22,8 +22,9 @@ func NewMemoryHandler(config *config.MemoryConfig,
 	threadMapping *kernelthread.ThreadMapping) *MemoryHandler {
 
 	return &MemoryHandler{
-		collector: NewMemoryCollector(config),
-		log:       logger.NewSampledLoggerCtx("memory_handler"),
+		collector:     NewMemoryCollector(config),
+		threadMapping: threadMapping,
+		log:           logger.NewSampledLoggerCtx("memory_handler"),
 	}
 }
 
