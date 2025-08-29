@@ -112,6 +112,14 @@ func (s *SessionManager) Start() error {
 		}()
 	}
 
+	// Start the safety net cleanup routine to prevent memory leaks if scrapes stop.
+	// These are mark for deletion that are kept until scrape that must be deleted if no scrape happens.
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.startScrapeSafetyNet()
+	}()
+
 	s.running = true
 	s.log.Info().Msg("✅ ETW session/s started successfully")
 	return nil
@@ -306,6 +314,49 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	}
 	s.log.Debug().Msg("Process rundown triggered successfully")
 	return nil
+}
+
+// startScrapeSafetyNet runs a periodic task to force-cleanup entries that have been
+// marked for deletion for a very long time. This acts as a safety net to prevent
+// unbounded memory growth in the terminated maps if Prometheus stops scraping.
+func (s *SessionManager) startScrapeSafetyNet() {
+    const checkInterval = 1 * time.Hour
+    const hardCapMaxAge = 6 * time.Hour
+
+    log.Info().
+        Dur("interval", checkInterval).
+        Dur("max_age", hardCapMaxAge).
+        Msg("🧹 Starting scrape safety net routine")
+
+    ticker := time.NewTicker(checkInterval)
+    defer ticker.Stop()
+
+    for {
+        select {
+        case <-ticker.C:
+            pc := kernelprocess.GetGlobalProcessCollector()
+            cleanedProcs := pc.ForceCleanupOldEntries(hardCapMaxAge)
+            if cleanedProcs > 0 {
+                log.Warn().
+                    Int("count", cleanedProcs).
+                    Msg("Forcibly cleaned up stale process entries older than max age (scrape likely stopped)")
+            }
+
+            // The event handler holds the reference to the thread mapping
+            if tm := s.eventHandler.GetThreadMapping(); tm != nil {
+                cleanedThreads := tm.ForceCleanupOldEntries(hardCapMaxAge)
+                if cleanedThreads > 0 {
+                    log.Warn().
+                        Int("count", cleanedThreads).
+                        Msg("Forcibly cleaned up stale thread entries older than max age (scrape likely stopped)")
+                }
+            }
+
+        case <-s.ctx.Done():
+            log.Debug().Msg("Stopping scrape safety net routine")
+            return
+        }
+    }
 }
 
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.

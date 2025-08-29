@@ -1,6 +1,7 @@
 package kernelprocess
 
 import (
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/etw"
@@ -10,13 +11,15 @@ import (
 // ProcessHandler processes ETW process events and delegates to the process collector
 type ProcessHandler struct {
 	processCollector *ProcessCollector
+	threadMapping    *threadmapping.ThreadMapping
 	log              *phusluadapter.SampledLogger
 }
 
 // NewProcessHandler creates a new process handler instance
-func NewProcessHandler() *ProcessHandler {
+func NewProcessHandler(threadMapping *threadmapping.ThreadMapping) *ProcessHandler {
 	return &ProcessHandler{
 		processCollector: GetGlobalProcessCollector(),
+		threadMapping:    threadMapping,
 		log:              logger.NewSampledLoggerCtx("process_handler"),
 	}
 }
@@ -80,11 +83,18 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 //	ImageName (win:AnsiString) - Process image name
 func (ph *ProcessHandler) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
+	pid := uint32(processID)
 
 	ph.processCollector.log.Trace().
-		Uint32("pid", uint32(processID)).
-		Msg("Process end event received, marking for deletion")
+		Uint32("pid", pid).
+		Msg("Process end event received, marking for deletion and cleaning threads")
 
-	ph.processCollector.MarkProcessForDeletion(uint32(processID))
+	// Mark the process for deletion in the process collector (delayed cleanup for metrics)
+	ph.processCollector.MarkProcessForDeletion(pid)
+
+	// Mark all associated threads for deletion as well. The actual cleanup will
+	// happen synchronously after the next Prometheus scrape.
+	ph.threadMapping.MarkThreadsForDeletionForProcess(pid)
+
 	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/logger"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -54,23 +55,26 @@ func GetGlobalProcessCollector() *ProcessCollector {
 // ProcessCleanupCollector is a sentinel collector that triggers cleanup after a scrape.
 type ProcessCleanupCollector struct {
 	pc *ProcessCollector
+	tm *threadmapping.ThreadMapping
 }
 
 // NewProcessCleanupCollector creates a new sentinel collector.
-func NewProcessCleanupCollector() *ProcessCleanupCollector {
+func NewProcessCleanupCollector(tm *threadmapping.ThreadMapping) *ProcessCleanupCollector {
 	return &ProcessCleanupCollector{
 		pc: GetGlobalProcessCollector(),
+		tm: tm,
 	}
 }
 
 // Describe does nothing. It's a sentinel collector.
 func (c *ProcessCleanupCollector) Describe(ch chan<- *prometheus.Desc) {}
 
-// Collect triggers the post-scrape cleanup in the ProcessCollector.
+// Collect triggers the post-scrape cleanup in the ProcessCollector and ThreadMapping.
 // This method is called by Prometheus during a scrape. By registering this
 // collector last, we ensure cleanup happens after all other collectors are done.
 func (c *ProcessCleanupCollector) Collect(ch chan<- prometheus.Metric) {
 	c.pc.PostScrapeCleanup()
+	c.tm.PostScrapeCleanup()
 }
 
 // AddProcess adds or updates process information. If the process already exists,
@@ -212,6 +216,26 @@ func (pc *ProcessCollector) PostScrapeCleanup() {
 	if cleanedCount > 0 {
 		pc.log.Debug().Int("count", cleanedCount).Msg("Post-scrape cleanup of terminated processes complete")
 	}
+}
+
+// ForceCleanupOldEntries is a safety net to prevent memory leaks if scrapes stop.
+// It removes any process that was marked for deletion more than the maxAge ago.
+func (pc *ProcessCollector) ForceCleanupOldEntries(maxAge time.Duration) int {
+	cutoff := time.Now().Add(-maxAge)
+	var cleanedCount int
+
+	pc.terminatedProcesses.Range(func(key, value any) bool {
+		pid := key.(uint32)
+		markedTime := value.(time.Time)
+
+		if markedTime.Before(cutoff) {
+			pc.processes.Delete(pid)
+			pc.terminatedProcesses.Delete(pid)
+			cleanedCount++
+		}
+		return true
+	})
+	return cleanedCount
 }
 
 // CleanupStaleProcesses marks processes that have not been seen for a specified duration for deletion.

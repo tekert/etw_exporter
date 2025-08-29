@@ -1,7 +1,7 @@
 package kernelmemory
 
 import (
-	"etw_exporter/internal/collectors/kernelthread"
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 
@@ -13,13 +13,13 @@ import (
 // MemoryHandler processes ETW memory events and delegates to the memory collector.
 type MemoryHandler struct {
 	collector     *MemoryCollector
-	threadMapping *kernelthread.ThreadMapping
+	threadMapping *threadmapping.ThreadMapping
 	log           *phusluadapter.SampledLogger
 }
 
 // NewMemoryHandler creates a new memory handler instance.
 func NewMemoryHandler(config *config.MemoryConfig,
-	threadMapping *kernelthread.ThreadMapping) *MemoryHandler {
+	threadMapping *threadmapping.ThreadMapping) *MemoryHandler {
 
 	return &MemoryHandler{
 		collector:     NewMemoryCollector(config),

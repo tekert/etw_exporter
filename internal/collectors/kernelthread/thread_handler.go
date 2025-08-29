@@ -7,6 +7,7 @@ import (
 
 	"github.com/tekert/goetw/etw"
 
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
@@ -30,17 +31,17 @@ import (
 // custom collector pattern.
 type ThreadHandler struct {
 	lastCpuSwitch   []atomic.Int64               // stores the last context switch timestamp (in ns) for each CPU
-	threadMapping   *ThreadMapping               // TID -> PID mapping
+	threadMapping   *threadmapping.ThreadMapping // TID -> PID mapping
 	customCollector *ThreadCSCollector           // High-performance custom collector
 	log             *phusluadapter.SampledLogger // Thread collector logger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
 // The custom collector provides high-performance metrics aggregation
-func NewThreadHandler(threadMapping *ThreadMapping) *ThreadHandler {
+func NewThreadHandler(threadMapping *threadmapping.ThreadMapping) *ThreadHandler {
 	return &ThreadHandler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
-		customCollector: NewThreadCSCollector(),
+		customCollector: NewThreadCSCollector(threadMapping),
 		threadMapping:   threadMapping,
 		log:             logger.NewSampledLoggerCtx("thread_handler"),
 		//log:             logger.NewLoggerWithContext("thread_handler"),
@@ -257,7 +258,7 @@ func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessId")
 
 	// Store thread to process mapping for context switch metrics
-	c.threadMapping.AddThread(uint32(threadID), uint32(processID)) // TODO: delete stale threads?
+	c.threadMapping.AddThread(uint32(threadID), uint32(processID))
 
 	// Track thread creation
 	c.customCollector.RecordThreadCreation()
@@ -284,8 +285,8 @@ func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 func (c *ThreadHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 
-	// Clean up thread to process mapping
-	c.threadMapping.RemoveThread(uint32(threadID))  // TODO: delete stale threads?
+	// Mark the thread for deletion. The actual cleanup will happen after the next scrape.
+	c.threadMapping.MarkThreadForDeletion(uint32(threadID))
 
 	// Track thread termination
 	c.customCollector.RecordThreadTermination()

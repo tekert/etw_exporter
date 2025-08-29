@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 
 	"etw_exporter/internal/collectors/kernelprocess"
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/logger"
 )
 
@@ -38,6 +39,9 @@ type ThreadCSCollector struct {
 	threadStateCounters []*int64
 	stateKeyToIndex     map[ThreadStateKey]int
 	indexToStateKey     []ThreadStateKey
+
+	// The thread mapping is consulted for cleanup.
+	threadMapping *threadmapping.ThreadMapping
 
 	log log.Logger
 
@@ -75,7 +79,7 @@ type IntervalStats struct {
 var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
-func NewThreadCSCollector() *ThreadCSCollector {
+func NewThreadCSCollector(threadMapping *threadmapping.ThreadMapping) *ThreadCSCollector {
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
@@ -126,6 +130,7 @@ func NewThreadCSCollector() *ThreadCSCollector {
 		threadStateCounters:    threadStateCounters,
 		stateKeyToIndex:        stateKeyToIndex,
 		indexToStateKey:        indexToStateKey,
+		threadMapping:          threadMapping,
 		log:                    logger.NewLoggerWithContext("thread_collector"),
 
 		// Initialize descriptors once
@@ -166,6 +171,11 @@ func (c *ThreadCSCollector) Describe(ch chan<- *prometheus.Desc) {
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
 func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
+	// The cleanup of thread and process mappings is now handled exclusively by the
+	// ProcessCleanupCollector, which runs after all other collectors have finished
+	// their scrapes. This ensures data consistency and prevents race conditions.
+	// Therefore, no cleanup logic is needed here.
+
 	data := c.collectData()
 
 	// Create context switches per CPU metrics

@@ -1,4 +1,4 @@
-package kdiskio
+package kerneldiskio
 
 import (
 	"sync"

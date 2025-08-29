@@ -1,19 +1,21 @@
 package etwmain
 
 import (
+	"reflect"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
-	"etw_exporter/internal/collectors/kdiskio"
+	"etw_exporter/internal/collectors/kerneldiskio"
 	"etw_exporter/internal/collectors/kernelmemory"
 	"etw_exporter/internal/collectors/kernelnetwork"
 	"etw_exporter/internal/collectors/kernelperf"
 	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/collectors/kernelsysconfig"
 	"etw_exporter/internal/collectors/kernelthread"
+	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 )
@@ -49,7 +51,7 @@ type FileEventHandler interface {
 type PerfInfoNtEventHandler interface {
 	HandleISREvent(helper *etw.EventRecordHelper) error
 	HandleDPCEvent(helper *etw.EventRecordHelper) error
-	HandleImageLoadEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelImage handler.
+	HandleImageLoadEvent(helper *etw.EventRecordHelper) error // TODO: this should go to KernelImage handler. or not
 	HandleImageUnloadEvent(helper *etw.EventRecordHelper) error
 	HandleSampleProfileEvent(helper *etw.EventRecordHelper) error
 }
@@ -80,7 +82,7 @@ type MemoryNtEventHandler interface {
 // and provider GUID.
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskHandler     *kdiskio.DiskIOHandler
+	diskHandler     *kerneldiskio.DiskIOHandler
 	threadCSHandler *kernelthread.ThreadHandler
 	perfinfoHandler *kernelperf.PerfInfoHandler
 	networkHandler  *kernelnetwork.NetworkHandler
@@ -89,8 +91,9 @@ type EventHandler struct {
 	// Future collectors will be added here:
 
 	// Shared state and caches for callbacks
-	config *config.CollectorConfig
-	log    *phusluadapter.SampledLogger // Event handler logger
+	config        *config.CollectorConfig
+	log           *phusluadapter.SampledLogger // Event handler logger
+	threadMapping *threadmapping.ThreadMapping
 
 	// Event counters by provider - atomic counters for thread safety
 	diskEventCount         atomic.Uint64
@@ -131,14 +134,16 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		memoryEventHandlers:       make([]MemoryNtEventHandler, 0),
 	}
 
+	// --- Core Component Initialization ---
+	// ThreadMapping is a shared dependency for TID-PID tracking and lifecycle management.
+	threadMapping := threadmapping.NewThreadMapping()
+	handler.threadMapping = threadMapping
+
 	// Always register the global process handler for process events
 	// This ensures we have process name mappings available for all collectors
-	processHandler := kernelprocess.NewProcessHandler()
+	processHandler := kernelprocess.NewProcessHandler(threadMapping)
 	handler.RegisterProcessEventHandler(processHandler)
 	handler.log.Debug().Msg("Registered global process handler")
-
-	// Create the shared ThreadMapping instance TID -> PID for modules to use.
-	threadMapping := kernelthread.NewThreadMapping()
 
 	// Always register the system config handler to collect data
 	systemConfigHandler := kernelsysconfig.NewSystemConfigHandler()
@@ -147,7 +152,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 
 	// Initialize enabled collectors based on configuration
 	if config.DiskIO.Enabled {
-		handler.diskHandler = kdiskio.NewDiskIOHandler(&config.DiskIO)
+		handler.diskHandler = kerneldiskio.NewDiskIOHandler(&config.DiskIO)
 		handler.RegisterDiskEventHandler(handler.diskHandler)
 		handler.RegisterFileEventHandler(handler.diskHandler)
 		prometheus.MustRegister(handler.diskHandler.GetCustomCollector())
@@ -205,20 +210,36 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	// of terminated processes in the ProcessCollector AFTER all other collectors
 	// have completed their scrape. This prevents race conditions where a process
 	// terminates and its metrics are lost before they can be scraped.
-	prometheus.MustRegister(kernelprocess.NewProcessCleanupCollector())
+	prometheus.MustRegister(kernelprocess.NewProcessCleanupCollector(threadMapping))
 	handler.log.Debug().Msg("Registered post-scrape process cleanup collector")
 
-	handler.log.Info().
-		Int("disk_handlers", len(handler.diskEventHandlers)).
-		Int("process_handlers", len(handler.processEventHandlers)).
-		Int("thread_handlers", len(handler.threadEventHandlers)).
-		Int("file_handlers", len(handler.fileEventHandlers)).
-		Int("interrupt_handlers", len(handler.perfinfoEventHandlers)).
-		Int("systemconfig_handlers", len(handler.systemConfigEventHandlers)).
-		Int("network_handlers", len(handler.networkEventHandlers)).
-		Msg("Event handlers initialized")
-
+	handler.LogHandlerCounts()
 	return handler
+}
+
+// GetThreadMapping returns the shared thread mapping instance.
+func (h *EventHandler) GetThreadMapping() *threadmapping.ThreadMapping {
+	return h.threadMapping
+}
+
+func (h *EventHandler) LogHandlerCounts() {
+	v := reflect.ValueOf(h).Elem() // Get the value of the EventHandler struct
+	t := v.Type()                  // Get the type of the EventHandler struct
+
+	log := h.log.Info() // Start building the log message
+
+	// Iterate over the fields of the struct
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		fieldValue := v.Field(i)
+
+		// Check if the field name ends with "Handlers" and is a slice
+		if fieldValue.Kind() == reflect.Slice && field.Name[len(field.Name)-8:] == "Handlers" {
+			log = log.Int(field.Name, fieldValue.Len())
+		}
+	}
+
+	log.Msg("Event handlers initialized")
 }
 
 func (h *EventHandler) RegisterDiskEventHandler(handler DiskEventHandler) {
