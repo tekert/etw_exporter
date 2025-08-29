@@ -9,7 +9,6 @@ import (
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
-	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 )
@@ -334,23 +333,9 @@ func (s *SessionManager) startScrapeSafetyNet() {
     for {
         select {
         case <-ticker.C:
-            pc := kernelprocess.GetGlobalProcessCollector()
-            cleanedProcs := pc.ForceCleanupOldEntries(hardCapMaxAge)
-            if cleanedProcs > 0 {
-                log.Warn().
-                    Int("count", cleanedProcs).
-                    Msg("Forcibly cleaned up stale process entries older than max age (scrape likely stopped)")
-            }
-
-            // The event handler holds the reference to the thread mapping
-            if tm := s.eventHandler.GetThreadMapping(); tm != nil {
-                cleanedThreads := tm.ForceCleanupOldEntries(hardCapMaxAge)
-                if cleanedThreads > 0 {
-                    log.Warn().
-                        Int("count", cleanedThreads).
-                        Msg("Forcibly cleaned up stale thread entries older than max age (scrape likely stopped)")
-                }
-            }
+            sm := s.eventHandler.GetStateManager()
+            sm.ForceCleanupOldEntries(hardCapMaxAge)
+            log.Debug().Msg("Ran periodic safety net cleanup")
 
         case <-s.ctx.Done():
             log.Debug().Msg("Stopping scrape safety net routine")
@@ -401,15 +386,13 @@ func (s *SessionManager) startStaleProcessCleanup() {
 			}
 
 			// 3. Clean up processes that were not "seen" during the rundown.
-			pc := kernelprocess.GetGlobalProcessCollector()
-			cleanedCount := pc.CleanupStaleProcesses(processMaxAge)
-			if cleanedCount > 0 {
-				log.Info().Int("count", cleanedCount).Msg("Cleaned up stale processes")
-			}
+			sm := s.eventHandler.GetStateManager()
+			sm.CleanupStaleProcesses(processMaxAge)
+			log.Debug().Msg("Ran stale process cleanup")
 
-		case <-s.ctx.Done():
-			log.Debug().Msg("Stopping stale process cleanup routine")
-			return
-		}
-	}
+        case <-s.ctx.Done():
+            log.Debug().Msg("Stopping stale process cleanup routine")
+            return
+        }
+    }
 }

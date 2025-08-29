@@ -15,8 +15,8 @@ import (
 	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/collectors/kernelsysconfig"
 	"etw_exporter/internal/collectors/kernelthread"
-	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
 
@@ -91,12 +91,12 @@ type EventHandler struct {
 	// Future collectors will be added here:
 
 	// Shared state and caches for callbacks
-	config        *config.CollectorConfig
-	log           *phusluadapter.SampledLogger // Event handler logger
-	threadMapping *threadmapping.ThreadMapping
+	config       *config.CollectorConfig
+	log          *phusluadapter.SampledLogger // Event handler logger
+	stateManager *statemanager.KernelStateManager
 
 	// Event counters by provider - atomic counters for thread safety
-	diskEventCount         atomic.Uint64
+	diskEventCount atomic.Uint64
 	processEventCount      atomic.Uint64
 	threadEventCount       atomic.Uint64
 	fileEventCount         atomic.Uint64
@@ -135,13 +135,12 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	}
 
 	// --- Core Component Initialization ---
-	// ThreadMapping is a shared dependency for TID-PID tracking and lifecycle management.
-	threadMapping := threadmapping.NewThreadMapping()
-	handler.threadMapping = threadMapping
+	// The KernelStateManager is the singleton source of truth for entity state.
+	handler.stateManager = statemanager.GetGlobalStateManager()
 
 	// Always register the global process handler for process events
 	// This ensures we have process name mappings available for all collectors
-	processHandler := kernelprocess.NewProcessHandler(threadMapping)
+	processHandler := kernelprocess.NewProcessHandler(handler.stateManager)
 	handler.RegisterProcessEventHandler(processHandler)
 	handler.log.Debug().Msg("Registered global process handler")
 
@@ -168,7 +167,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	}
 
 	if config.ThreadCS.Enabled {
-		handler.threadCSHandler = kernelthread.NewThreadHandler(threadMapping)
+		handler.threadCSHandler = kernelthread.NewThreadHandler(handler.stateManager)
 		// Register the thread collector with the handler
 		handler.RegisterThreadEventHandler(handler.threadCSHandler)
 		// Register the custom collector
@@ -197,7 +196,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	}
 
 	if config.Memory.Enabled {
-		handler.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, threadMapping)
+		handler.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, handler.stateManager)
 		// Register the memory handler for hard fault events
 		handler.RegisterMemoryEventHandler(handler.memoryHandler)
 		// Register the custom collector
@@ -207,19 +206,18 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 
 	// --- Sentinel Collector Registration ---
 	// This collector MUST be registered LAST. Its purpose is to trigger a cleanup
-	// of terminated processes in the ProcessCollector AFTER all other collectors
-	// have completed their scrape. This prevents race conditions where a process
-	// terminates and its metrics are lost before they can be scraped.
-	prometheus.MustRegister(kernelprocess.NewProcessCleanupCollector(threadMapping))
-	handler.log.Debug().Msg("Registered post-scrape process cleanup collector")
+	// of terminated entities in the KernelStateManager AFTER all other collectors
+	// have completed their scrape. This prevents race conditions.
+	prometheus.MustRegister(statemanager.NewStateCleanupCollector())
+	handler.log.Debug().Msg("Registered post-scrape state cleanup collector")
 
 	handler.LogHandlerCounts()
 	return handler
 }
 
-// GetThreadMapping returns the shared thread mapping instance.
-func (h *EventHandler) GetThreadMapping() *threadmapping.ThreadMapping {
-	return h.threadMapping
+// GetStateManager returns the shared state manager instance.
+func (h *EventHandler) GetStateManager() *statemanager.KernelStateManager {
+	return h.stateManager
 }
 
 func (h *EventHandler) LogHandlerCounts() {

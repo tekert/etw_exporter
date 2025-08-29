@@ -5,8 +5,8 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -65,11 +65,11 @@ func (c *MemoryCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	if c.config.EnablePerProcess {
-		processCollector := kernelprocess.GetGlobalProcessCollector()
+		stateManager := statemanager.GetGlobalStateManager()
 		c.hardPageFaultsPerProcess.Range(func(key, val any) bool {
 			pid := key.(uint32)
 			count := atomic.LoadUint64(val.(*uint64))
-			if processName, ok := processCollector.GetProcessName(pid); ok {
+			if processName, ok := stateManager.GetProcessName(pid); ok {
 				ch <- prometheus.MustNewConstMetric(
 					c.hardPageFaultsPerProcessDesc,
 					prometheus.CounterValue,

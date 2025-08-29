@@ -7,8 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"etw_exporter/internal/collectors/kernelprocess"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
@@ -148,12 +148,12 @@ func (nc *NetworkCSCollector) Describe(ch chan<- *prometheus.Desc) {
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
 func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
-	processCollector := kernelprocess.GetGlobalProcessCollector()
+	stateManager := statemanager.GetGlobalStateManager()
 
 	// --- Data Volume Metrics ---
 	nc.bytesSentTotal.Range(func(key, val any) bool {
 		k := key.(dataKey)
-		if processName, ok := processCollector.GetProcessName(k.PID); ok {
+		if processName, ok := stateManager.GetProcessName(k.PID); ok {
 			count := atomic.LoadUint64(val.(*uint64))
 			ch <- prometheus.MustNewConstMetric(nc.bytesSentTotalDesc, prometheus.CounterValue, float64(count),
 				strconv.FormatUint(uint64(k.PID), 10), processName, k.Protocol)
@@ -162,7 +162,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	nc.bytesReceivedTotal.Range(func(key, val any) bool {
 		k := key.(dataKey)
-		if processName, ok := processCollector.GetProcessName(k.PID); ok {
+		if processName, ok := stateManager.GetProcessName(k.PID); ok {
 			count := atomic.LoadUint64(val.(*uint64))
 			ch <- prometheus.MustNewConstMetric(nc.bytesReceivedTotalDesc, prometheus.CounterValue, float64(count),
 				strconv.FormatUint(uint64(k.PID), 10), processName, k.Protocol)
@@ -174,7 +174,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 	if nc.config.ConnectionHealth {
 		nc.connectionsAttemptedTotal.Range(func(key, val any) bool {
 			k := key.(dataKey)
-			if processName, ok := processCollector.GetProcessName(k.PID); ok {
+			if processName, ok := stateManager.GetProcessName(k.PID); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.connectionsAttemptedTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(k.PID), 10), processName, k.Protocol)
@@ -183,7 +183,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 		})
 		nc.connectionsAcceptedTotal.Range(func(key, val any) bool {
 			k := key.(dataKey)
-			if processName, ok := processCollector.GetProcessName(k.PID); ok {
+			if processName, ok := stateManager.GetProcessName(k.PID); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.connectionsAcceptedTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(k.PID), 10), processName, k.Protocol)
@@ -192,7 +192,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 		})
 		nc.connectionsFailedTotal.Range(func(key, val any) bool {
 			k := key.(failureKey)
-			processName, ok := processCollector.GetProcessName(k.PID)
+			processName, ok := stateManager.GetProcessName(k.PID)
 			if !ok && k.PID == 0 { // Handle system-level failures
 				processName, ok = "system", true
 			}
@@ -220,7 +220,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 	if nc.config.RetransmissionRate {
 		nc.retransmissionsTotal.Range(func(key, val any) bool {
 			pid := key.(uint32)
-			if processName, ok := processCollector.GetProcessName(pid); ok {
+			if processName, ok := stateManager.GetProcessName(pid); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.retransmissionsTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(pid), 10), processName)

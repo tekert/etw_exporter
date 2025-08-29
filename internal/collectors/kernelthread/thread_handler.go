@@ -7,7 +7,7 @@ import (
 
 	"github.com/tekert/goetw/etw"
 
-	"etw_exporter/internal/collectors/kernelthread/threadmapping"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
@@ -30,19 +30,19 @@ import (
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
 type ThreadHandler struct {
-	lastCpuSwitch   []atomic.Int64               // stores the last context switch timestamp (in ns) for each CPU
-	threadMapping   *threadmapping.ThreadMapping // TID -> PID mapping
-	customCollector *ThreadCSCollector           // High-performance custom collector
-	log             *phusluadapter.SampledLogger // Thread collector logger
+	lastCpuSwitch   []atomic.Int64
+	stateManager    *statemanager.KernelStateManager
+	customCollector *ThreadCSCollector
+	log             *phusluadapter.SampledLogger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
 // The custom collector provides high-performance metrics aggregation
-func NewThreadHandler(threadMapping *threadmapping.ThreadMapping) *ThreadHandler {
+func NewThreadHandler(sm *statemanager.KernelStateManager) *ThreadHandler {
 	return &ThreadHandler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
-		customCollector: NewThreadCSCollector(threadMapping),
-		threadMapping:   threadMapping,
+		customCollector: NewThreadCSCollector(),
+		stateManager:    sm,
 		log:             logger.NewSampledLoggerCtx("thread_handler"),
 		//log:             logger.NewLoggerWithContext("thread_handler"),
 	}
@@ -117,7 +117,7 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
-	if pid, exists := c.threadMapping.GetProcessID(uint32(newThreadID)); exists {
+	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
 		processID = pid
 	}
 
@@ -183,7 +183,7 @@ func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
-	if pid, exists := c.threadMapping.GetProcessID(uint32(newThreadID)); exists {
+	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
 		processID = pid
 	}
 
@@ -258,7 +258,7 @@ func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessId")
 
 	// Store thread to process mapping for context switch metrics
-	c.threadMapping.AddThread(uint32(threadID), uint32(processID))
+	c.stateManager.AddThread(uint32(threadID), uint32(processID))
 
 	// Track thread creation
 	c.customCollector.RecordThreadCreation()
@@ -286,7 +286,7 @@ func (c *ThreadHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 
 	// Mark the thread for deletion. The actual cleanup will happen after the next scrape.
-	c.threadMapping.MarkThreadForDeletion(uint32(threadID))
+	c.stateManager.MarkThreadForDeletion(uint32(threadID))
 
 	// Track thread termination
 	c.customCollector.RecordThreadTermination()

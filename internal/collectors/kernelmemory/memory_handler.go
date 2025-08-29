@@ -1,8 +1,8 @@
 package kernelmemory
 
 import (
-	"etw_exporter/internal/collectors/kernelthread/threadmapping"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -12,19 +12,19 @@ import (
 
 // MemoryHandler processes ETW memory events and delegates to the memory collector.
 type MemoryHandler struct {
-	collector     *MemoryCollector
-	threadMapping *threadmapping.ThreadMapping
-	log           *phusluadapter.SampledLogger
+	collector    *MemoryCollector
+	stateManager *statemanager.KernelStateManager
+	log          *phusluadapter.SampledLogger
 }
 
 // NewMemoryHandler creates a new memory handler instance.
 func NewMemoryHandler(config *config.MemoryConfig,
-	threadMapping *threadmapping.ThreadMapping) *MemoryHandler {
+	stateManager *statemanager.KernelStateManager) *MemoryHandler {
 
 	return &MemoryHandler{
-		collector:     NewMemoryCollector(config),
-		threadMapping: threadMapping,
-		log:           logger.NewSampledLoggerCtx("memory_handler"),
+		collector:    NewMemoryCollector(config),
+		stateManager: stateManager,
+		log:          logger.NewSampledLoggerCtx("memory_handler"),
 	}
 }
 
@@ -62,7 +62,7 @@ func (h *MemoryHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) 
 
 	// Resolve Thread ID to Process ID using the global thread handler.
 	// This is reliable because the 'memory' provider group now enables the THREAD kernel flag.
-	pid, isKnown := h.threadMapping.GetProcessID(uint32(threadID))
+	pid, isKnown := h.stateManager.GetProcessIDForThread(uint32(threadID))
 	if !isKnown {
 		h.log.Debug().Uint32("tid", uint32(threadID)).Msg("Could not resolve PID for thread causing page fault")
 		return nil // Cannot attribute the fault without a known PID.

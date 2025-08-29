@@ -7,7 +7,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"etw_exporter/internal/collectors/kernelprocess"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
@@ -279,12 +279,11 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	}
 
 	// Collect process I/O counts
-	processCollector := kernelprocess.GetGlobalProcessCollector()
+	stateManager := statemanager.GetGlobalStateManager()
 	for key, countPtr := range c.processIOCount {
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
-			// PID-Name mappings are retained until after scrap by the process collector.
-			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
 				count := atomic.LoadInt64(countPtr)
 				data.ProcessIOCount[key] = ProcessIOCountData{
 					ProcessID:   key.ProcessID,
@@ -301,8 +300,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	for key, countPtr := range c.processBytesRead {
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
-			// PID-Name mappings are retained until after scrap by the process collector.
-			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesRead[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
@@ -318,7 +316,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 	for key, countPtr := range c.processBytesWritten {
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
-			if processName, isKnown := processCollector.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesWritten[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
@@ -377,9 +375,9 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 
 	// Record process-level metrics (only for known processes with valid names)
 	if processID > 0 {
-		// Check if process is known by the global process collector
-		processCollector := kernelprocess.GetGlobalProcessCollector()
-		if processCollector.IsKnownProcess(processID) {
+		// Check if process is known by the global state manager
+		stateManager := statemanager.GetGlobalStateManager()
+		if stateManager.IsKnownProcess(processID) {
 			// Record process I/O count
 			processIOKey := ProcessIOKey{ProcessID: processID, DiskNumber: diskNumber, Operation: operation}
 			if c.processIOCount[processIOKey] == nil {

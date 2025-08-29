@@ -11,8 +11,7 @@ import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 
-	"etw_exporter/internal/collectors/kernelprocess"
-	"etw_exporter/internal/collectors/kernelthread/threadmapping"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
 
@@ -39,9 +38,6 @@ type ThreadCSCollector struct {
 	threadStateCounters []*int64
 	stateKeyToIndex     map[ThreadStateKey]int
 	indexToStateKey     []ThreadStateKey
-
-	// The thread mapping is consulted for cleanup.
-	threadMapping *threadmapping.ThreadMapping
 
 	log log.Logger
 
@@ -79,7 +75,7 @@ type IntervalStats struct {
 var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
-func NewThreadCSCollector(threadMapping *threadmapping.ThreadMapping) *ThreadCSCollector {
+func NewThreadCSCollector() *ThreadCSCollector {
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
@@ -130,7 +126,6 @@ func NewThreadCSCollector(threadMapping *threadmapping.ThreadMapping) *ThreadCSC
 		threadStateCounters:    threadStateCounters,
 		stateKeyToIndex:        stateKeyToIndex,
 		indexToStateKey:        indexToStateKey,
-		threadMapping:          threadMapping,
 		log:                    logger.NewLoggerWithContext("thread_collector"),
 
 		// Initialize descriptors once
@@ -246,14 +241,14 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 	}
 
 	// Collect process context switches
-	processCollector := kernelprocess.GetGlobalProcessCollector()
+	stateManager := statemanager.GetGlobalStateManager()
 	c.contextSwitchesPerProcess.Range(func(key, val any) bool {
 		pid := key.(uint32)
 		countPtr := val.(*int64)
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
-			// PID-Name mappings are retained until after scrap by the process collector.
-			if processName, isKnown := processCollector.GetProcessName(pid); isKnown {
+			// PID-Name mappings are retained until after scrap by the state manager.
+			if processName, isKnown := stateManager.GetProcessName(pid); isKnown {
 				count := atomic.LoadInt64(countPtr)
 				data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
 					ProcessID:   pid,
@@ -312,10 +307,10 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 
 	// Record context switch per process (concurrent map)
 	if processID > 0 {
-		processCollector := kernelprocess.GetGlobalProcessCollector()
+		stateManager := statemanager.GetGlobalStateManager()
 		// Only create metrics for processes that are still known at scrape time
-		// PID-Name mappings are retained until after scrap by the process collector.
-		if processCollector.IsKnownProcess(processID) {
+		// PID-Name mappings are retained until after scrap by the state manager.
+		if stateManager.IsKnownProcess(processID) {
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)
 		}
