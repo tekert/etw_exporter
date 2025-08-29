@@ -11,6 +11,8 @@ import (
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
+
+	"golang.org/x/sys/windows"
 )
 
 // TODO(tekert): reopen NT Kernel Logger session if it closes, just a goroutine that checks every 5 seconds
@@ -27,7 +29,7 @@ type SessionManager struct {
 
 	consumer        *etw.Consumer
 	manifestSession *etw.RealTimeSession
-	kernelSession   *etw.RealTimeSession
+	kernelSession   *etw.RealTimeSession // Aditional session needed for win10 and below
 	eventHandler    *EventHandler
 	config          *config.CollectorConfig
 	log             log.Logger // Session manager logger
@@ -171,42 +173,71 @@ func (s *SessionManager) captureNtSystemConfigEvents() error {
 	return nil
 }
 
+// isSystemProviderSupported checks if the OS version is sufficient to support System Providers.
+// This feature was introduced in Windows 10 SDK build 20348 (which corresponds to
+// Windows Server 2022 and Windows 11). A simple major version check for >= 10 and
+// build number >= 20348 is a reliable way to detect this.
+func isSystemProviderSupported() bool {
+	v := windows.RtlGetVersion()
+	// Windows 10 is Major version 10. Windows 11 reports as Major version 10 for compatibility.
+	// We must check the build number.
+	return v.MajorVersion >= 10 && v.BuildNumber >= 20348
+}
+
 // setupSessions creates and configures the required ETW sessions based on the
-// enabled collectors in the user's configuration. It sets up a manifest session
-// for user-space providers and a kernel session for kernel-mode providers.
+// enabled collectors in the user's configuration. It intelligently chooses between
+// modern System Providers (on Win11+) and legacy Kernel Flags (on Win10).
 func (s *SessionManager) setupSessions() error {
 	var sessions []etw.Session
 
-	// Setup manifest providers session if needed
 	manifestProviders := GetEnabledManifestProviders(s.config)
-	if len(manifestProviders) > 0 {
-		s.manifestSession = etw.NewRealTimeSession("etw_exporter")
-		for _, provider := range manifestProviders {
-			if err := s.manifestSession.EnableProvider(provider); err != nil {
-				return fmt.Errorf("failed to enable provider %s: %w", provider.Name, err)
+	if isSystemProviderSupported() {
+		// --- Win11+ Path ---
+		s.log.Info().Msg("Using System Providers for kernel events.")
+		systemProviders := GetEnabledSystemProviders(s.config)
+		manifestProviders := append(manifestProviders, systemProviders...)
+		if len(manifestProviders) > 0 {
+			// Mark the session as a "system logger"
+			// to allow enabling System Providers.
+			s.manifestSession = etw.NewSystemTraceProviderSession("etw_exporter")
+		}
+	} else {
+		// --- Legacy (Win10) Path ---
+		s.log.Warn().Msg("System Providers not supported on this OS version, falling back to NT Kernel Logger session for kernel events.")
+		if len(manifestProviders) > 0 {
+			s.manifestSession = etw.NewRealTimeSession("etw_exporter")
+		}
+		// Setup additional kernel session
+		kernelFlags := GetEnabledKernelFlags(s.config)
+		if kernelFlags != 0 {
+			s.kernelSession = etw.NewKernelRealTimeSession(kernelFlags)
+			// IMPORTANT: Kernel sessions must be explicitly started (unlike manifest providers)
+			if err := s.kernelSession.Start(); err != nil {
+				return fmt.Errorf("failed to start kernel session: %w", err)
 			}
-			// force rundown events for manifest providers
-			// This ensures we get initial state for providers that support rundown
-			s.manifestSession.GetRundownEvents(&provider.GUID)
+			//s.kernelSession.GetRundownEvents(etw.SystemConfigGuid)
+			sessions = append(sessions, s.kernelSession)
 		}
-		sessions = append(sessions, s.manifestSession)
 	}
 
-	// Setup kernel session if needed
-	kernelFlags := GetEnabledKernelFlags(s.config)
-	if kernelFlags != 0 {
-		s.kernelSession = etw.NewKernelRealTimeSession(kernelFlags)
-		// IMPORTANT: Kernel sessions must be explicitly started (unlike manifest providers)
-		if err := s.kernelSession.Start(); err != nil {
-			return fmt.Errorf("failed to start kernel session: %w", err)
+	for _, provider := range manifestProviders {
+		if err := s.manifestSession.EnableProvider(provider); err != nil {
+			return fmt.Errorf("failed to enable provider %s: %w", provider.Name, err)
 		}
-		//s.kernelSession.GetRundownEvents(etw.SystemConfigGuid)
-		sessions = append(sessions, s.kernelSession)
+		s.log.Debug().Str("provider", provider.Name).Msg("Enabled provider in manifest session")
+		// force rundown events for manifest providers
+		// This ensures we get initial state for providers that support rundown
+		s.manifestSession.GetRundownEvents(&provider.GUID)
+	}
+	sessions = append(sessions, s.manifestSession)
+
+	if len(sessions) == 0 {
+		s.log.Warn().Msg("No providers or kernel flags enabled, no sessions will be started.")
+		return nil
 	}
 
-	// Create consumer from sessions names
+	// Create consumer from the configured sessions
 	s.consumer = etw.NewConsumer(s.ctx).FromSessions(sessions...)
-
 	return nil
 }
 
@@ -319,29 +350,29 @@ func (s *SessionManager) TriggerProcessRundown() error {
 // marked for deletion for a very long time. This acts as a safety net to prevent
 // unbounded memory growth in the terminated maps if Prometheus stops scraping.
 func (s *SessionManager) startScrapeSafetyNet() {
-    const checkInterval = 1 * time.Hour
-    const hardCapMaxAge = 6 * time.Hour
+	const checkInterval = 1 * time.Hour
+	const hardCapMaxAge = 6 * time.Hour
 
-    log.Info().
-        Dur("interval", checkInterval).
-        Dur("max_age", hardCapMaxAge).
-        Msg("🧹 Starting scrape safety net routine")
+	log.Info().
+		Str("interval", checkInterval.String()).
+		Str("max_age", hardCapMaxAge.String()).
+		Msg("🧹 Starting scrape safety net routine")
 
-    ticker := time.NewTicker(checkInterval)
-    defer ticker.Stop()
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
 
-    for {
-        select {
-        case <-ticker.C:
-            sm := s.eventHandler.GetStateManager()
-            sm.ForceCleanupOldEntries(hardCapMaxAge)
-            log.Debug().Msg("Ran periodic safety net cleanup")
+	for {
+		select {
+		case <-ticker.C:
+			sm := s.eventHandler.GetStateManager()
+			sm.ForceCleanupOldEntries(hardCapMaxAge)
+			log.Debug().Msg("Ran periodic safety net cleanup")
 
-        case <-s.ctx.Done():
-            log.Debug().Msg("Stopping scrape safety net routine")
-            return
-        }
-    }
+		case <-s.ctx.Done():
+			log.Debug().Msg("Stopping scrape safety net routine")
+			return
+		}
+	}
 }
 
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.
@@ -354,8 +385,8 @@ func (s *SessionManager) startStaleProcessCleanup() {
 	const rundownWait = 5 * time.Second
 
 	log.Info().
-		Dur("interval", cleanupInterval).
-		Dur("max_age", processMaxAge).
+		Str("interval", cleanupInterval.String()).
+		Str("max_age", processMaxAge.String()).
 		Msg("🧹 Starting stale process cleanup routine (ETW Rundown)")
 
 	ticker := time.NewTicker(cleanupInterval)
@@ -390,9 +421,9 @@ func (s *SessionManager) startStaleProcessCleanup() {
 			sm.CleanupStaleProcesses(processMaxAge)
 			log.Debug().Msg("Ran stale process cleanup")
 
-        case <-s.ctx.Done():
-            log.Debug().Msg("Stopping stale process cleanup routine")
-            return
-        }
-    }
+		case <-s.ctx.Done():
+			log.Debug().Msg("Stopping stale process cleanup routine")
+			return
+		}
+	}
 }
