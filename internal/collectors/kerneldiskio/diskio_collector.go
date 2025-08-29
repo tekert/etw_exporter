@@ -53,6 +53,7 @@ type DiskIOKey struct {
 // ProcessIOKey represents a composite key for process I/O operations.
 type ProcessIOKey struct {
 	ProcessID  uint32
+	StartKey   uint64
 	DiskNumber uint32
 	Operation  string
 }
@@ -60,6 +61,7 @@ type ProcessIOKey struct {
 // ProcessBytesKey represents a composite key for process bytes transferred.
 type ProcessBytesKey struct {
 	ProcessID  uint32
+	StartKey   uint64
 	DiskNumber uint32
 }
 
@@ -83,6 +85,7 @@ type DiskIOCountData struct {
 // ProcessIOCountData holds process I/O count data with labels
 type ProcessIOCountData struct {
 	ProcessID   uint32
+	StartKey    uint64
 	ProcessName string
 	DiskNumber  uint32
 	Operation   string
@@ -92,6 +95,7 @@ type ProcessIOCountData struct {
 // ProcessBytesData holds process bytes transfer data with labels
 type ProcessBytesData struct {
 	ProcessID   uint32
+	StartKey    uint64
 	ProcessName string
 	DiskNumber  uint32
 	Bytes       int64
@@ -127,17 +131,17 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 		processIOCountDesc: prometheus.NewDesc(
 			"etw_disk_process_io_operations_total",
 			"Total number of disk I/O operations per process, disk, and operation type",
-			[]string{"process_id", "process_name", "disk", "operation"}, nil,
+			[]string{"process_id", "process_start_key", "process_name", "disk", "operation"}, nil,
 		),
 		processReadBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_read_bytes_total",
 			"Total bytes read from disk per process",
-			[]string{"process_id", "process_name", "disk"}, nil,
+			[]string{"process_id", "process_start_key", "process_name", "disk"}, nil,
 		),
 		processWrittenBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_written_bytes_total",
 			"Total bytes written to disk per process",
-			[]string{"process_id", "process_name", "disk"}, nil,
+			[]string{"process_id", "process_start_key", "process_name", "disk"}, nil,
 		),
 	}
 }
@@ -207,6 +211,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(procData.Count),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
+			strconv.FormatUint(procData.StartKey, 10),
 			procData.ProcessName,
 			strconv.FormatUint(uint64(procData.DiskNumber), 10),
 			procData.Operation,
@@ -220,6 +225,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(procData.Bytes),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
+			strconv.FormatUint(procData.StartKey, 10),
 			procData.ProcessName,
 			strconv.FormatUint(uint64(procData.DiskNumber), 10),
 		)
@@ -232,6 +238,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(procData.Bytes),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
+			strconv.FormatUint(procData.StartKey, 10),
 			procData.ProcessName,
 			strconv.FormatUint(uint64(procData.DiskNumber), 10),
 		)
@@ -287,6 +294,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 				count := atomic.LoadInt64(countPtr)
 				data.ProcessIOCount[key] = ProcessIOCountData{
 					ProcessID:   key.ProcessID,
+					StartKey:    key.StartKey,
 					ProcessName: processName,
 					DiskNumber:  key.DiskNumber,
 					Operation:   key.Operation,
@@ -304,6 +312,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesRead[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
+					StartKey:    key.StartKey,
 					ProcessName: processName,
 					DiskNumber:  key.DiskNumber,
 					Bytes:       bytes,
@@ -320,6 +329,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesWritten[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
+					StartKey:    key.StartKey,
 					ProcessName: processName,
 					DiskNumber:  key.DiskNumber,
 					Bytes:       bytes,
@@ -341,6 +351,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 func (c *DiskIOCustomCollector) RecordDiskIO(
 	diskNumber uint32,
 	processID uint32,
+	startKey uint64,
 	transferSize uint32,
 	isWrite bool) {
 
@@ -379,14 +390,14 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 		stateManager := statemanager.GetGlobalStateManager()
 		if stateManager.IsKnownProcess(processID) {
 			// Record process I/O count
-			processIOKey := ProcessIOKey{ProcessID: processID, DiskNumber: diskNumber, Operation: operation}
+			processIOKey := ProcessIOKey{ProcessID: processID, StartKey: startKey, DiskNumber: diskNumber, Operation: operation}
 			if c.processIOCount[processIOKey] == nil {
 				c.processIOCount[processIOKey] = new(int64)
 			}
 			atomic.AddInt64(c.processIOCount[processIOKey], 1)
 
 			// Record process bytes transferred
-			processBytesKey := ProcessBytesKey{ProcessID: processID, DiskNumber: diskNumber}
+			processBytesKey := ProcessBytesKey{ProcessID: processID, StartKey: startKey, DiskNumber: diskNumber}
 			if isWrite {
 				if c.processBytesWritten[processBytesKey] == nil {
 					c.processBytesWritten[processBytesKey] = new(int64)
