@@ -20,6 +20,10 @@ type KernelStateManager struct {
 	processes           sync.Map // key: uint32 (PID), value: *ProcessInfo
 	terminatedProcesses sync.Map // key: uint32 (PID), value: time.Time
 
+	// Process Start Key state for robust tracking
+	startKeyToPids sync.Map // key: uint64 (startKey), value: *sync.Map (of PIDs -> struct{})
+	pidToStartKey  sync.Map // key: uint32 (PID), value: uint64 (startKey)
+
 	// Thread state
 	tidToPid          sync.Map // key: TID (uint32), value: PID (uint32)
 	pidToTids         sync.Map // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
@@ -88,6 +92,7 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 		pid := key.(uint32)
 		sm.processes.Delete(pid)
 		sm.terminatedProcesses.Delete(pid)
+		sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
 		cleanedCount++
 
 		// 2. Atomically clean up all threads associated with the terminated process.
@@ -137,6 +142,7 @@ func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
 			pid := key.(uint32)
 			sm.processes.Delete(pid)
 			sm.terminatedProcesses.Delete(pid)
+			sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
 			cleanedProcs++
 
 			// Cascade delete to threads
@@ -207,4 +213,28 @@ func (sm *KernelStateManager) removeThread(tid uint32) {
 		}
 	}
 	sm.tidToPid.Delete(tid)
+}
+
+// removeProcessStartKeyMapping cleans up the PID <-> StartKey mappings.
+// If a StartKey no longer has any associated PIDs, the key itself is removed.
+func (sm *KernelStateManager) removeProcessStartKeyMapping(pid uint32) {
+	if skVal, skExists := sm.pidToStartKey.Load(pid); skExists {
+		startKey := skVal.(uint64)
+		sm.pidToStartKey.Delete(pid)
+
+		if pidsVal, pidsExist := sm.startKeyToPids.Load(startKey); pidsExist {
+			pidsMap := pidsVal.(*sync.Map)
+			pidsMap.Delete(pid)
+
+			// Check if the map of PIDs for this start key is now empty.
+			isEmpty := true
+			pidsMap.Range(func(k, v any) bool {
+				isEmpty = false
+				return false // Stop iteration
+			})
+			if isEmpty {
+				sm.startKeyToPids.Delete(startKey)
+			}
+		}
+	}
 }

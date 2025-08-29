@@ -10,6 +10,7 @@ import (
 // and parent PID. It is protected by a mutex to allow for safe concurrent updates.
 type ProcessInfo struct {
 	PID       uint32
+	StartKey  uint64 // Uniquely identifies a process instance during a boot session.
 	Name      string
 	StartTime time.Time
 	LastSeen  time.Time
@@ -24,6 +25,7 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 
 	return ProcessInfo{
 		PID:       pi.PID,
+		StartKey:  pi.StartKey,
 		Name:      pi.Name,
 		StartTime: pi.StartTime,
 		LastSeen:  pi.LastSeen,
@@ -36,10 +38,17 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 // AddProcess adds or updates process information. If the process already exists,
 // it updates its details and refreshes its LastSeen timestamp. This handles both
 // new processes and updates from rundown events.
-func (sm *KernelStateManager) AddProcess(pid uint32, name string, parentPID uint32, eventTimestamp time.Time) {
+func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, name string, parentPID uint32, eventTimestamp time.Time) {
 	// If the process was recently terminated, remove it from the terminated list
 	// as it might be a PID reuse scenario.
 	sm.terminatedProcesses.Delete(pid)
+
+	// Associate PID with its unique Start Key
+	if startKey != 0 {
+		sm.pidToStartKey.Store(pid, startKey)
+		pidsMap, _ := sm.startKeyToPids.LoadOrStore(startKey, &sync.Map{})
+		pidsMap.(*sync.Map).Store(pid, struct{}{})
+	}
 
 	if val, existed := sm.processes.Load(pid); existed {
 		// Update existing process information
@@ -48,12 +57,16 @@ func (sm *KernelStateManager) AddProcess(pid uint32, name string, parentPID uint
 		info.Name = name
 		info.ParentPID = parentPID
 		info.LastSeen = eventTimestamp
+		if startKey != 0 {
+			info.StartKey = startKey
+		}
 		info.mu.Unlock()
 		return
 	}
 
 	sm.processes.Store(pid, &ProcessInfo{
 		PID:       pid,
+		StartKey:  startKey,
 		Name:      name,
 		StartTime: eventTimestamp,
 		LastSeen:  eventTimestamp,
@@ -97,4 +110,12 @@ func (sm *KernelStateManager) GetProcessName(pid uint32) (string, bool) {
 		return name, true
 	}
 	return "unknown_" + strconv.FormatUint(uint64(pid), 10), false
+}
+
+// GetProcessStartKey returns the unique process start key for a given PID.
+func (sm *KernelStateManager) GetProcessStartKey(pid uint32) (uint64, bool) {
+	if val, exists := sm.pidToStartKey.Load(pid); exists {
+		return val.(uint64), true
+	}
+	return 0, false
 }

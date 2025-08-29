@@ -49,11 +49,9 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 	parentProcessID, _ := helper.GetPropertyUint("ParentProcessID")
 	processName, _ := helper.GetPropertyString("ImageName")
 	timestamp := helper.Timestamp()
+	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	// key, on := helper.EventRec.ExtProcessStartKey()
-	// ph.log.Error().Uint64("key",key).Bool("on",on).Msg("key") // ! TESTING
-
-	ph.stateManager.AddProcess(uint32(processID), processName, uint32(parentProcessID), timestamp)
+	ph.stateManager.AddProcess(uint32(processID), startKey, processName, uint32(parentProcessID), timestamp)
 	return nil
 }
 
