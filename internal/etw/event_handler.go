@@ -96,7 +96,7 @@ type EventHandler struct {
 	stateManager *statemanager.KernelStateManager
 
 	// Event counters by provider - atomic counters for thread safety
-	diskEventCount atomic.Uint64
+	diskEventCount         atomic.Uint64
 	processEventCount      atomic.Uint64
 	threadEventCount       atomic.Uint64
 	fileEventCount         atomic.Uint64
@@ -155,7 +155,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.RegisterDiskEventHandler(handler.diskHandler)
 		handler.RegisterFileEventHandler(handler.diskHandler)
 		prometheus.MustRegister(handler.diskHandler.GetCustomCollector())
-		handler.log.Info().Msg("Disk I/O collector enabled and registered with Prometheus")
+		handler.log.Debug().Msg("Disk I/O collector enabled and registered with Prometheus")
 
 		// Request the necessary metrics from the system config collector.
 		systemConfigCollector := kernelsysconfig.GetGlobalSystemConfigCollector()
@@ -172,7 +172,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.RegisterThreadEventHandler(handler.threadCSHandler)
 		// Register the custom collector
 		prometheus.MustRegister(handler.threadCSHandler.GetCustomCollector())
-		handler.log.Info().Msg("ThreadCS collector enabled and registered with Prometheus")
+		handler.log.Debug().Msg("ThreadCS collector enabled and registered with Prometheus")
 	}
 
 	if config.PerfInfo.Enabled {
@@ -183,7 +183,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.RegisterThreadEventHandler(handler.perfinfoHandler)
 		// Register the custom collector
 		prometheus.MustRegister(handler.perfinfoHandler.GetCustomCollector())
-		handler.log.Info().Msg("PerfInfo collector enabled and registered with Prometheus")
+		handler.log.Debug().Msg("PerfInfo collector enabled and registered with Prometheus")
 	}
 
 	if config.Network.Enabled {
@@ -192,7 +192,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.RegisterNetworkEventHandler(handler.networkHandler)
 		// Register the custom collector
 		prometheus.MustRegister(handler.networkHandler.GetCustomCollector())
-		handler.log.Info().Msg("Network collector enabled and registered with Prometheus")
+		handler.log.Debug().Msg("Network collector enabled and registered with Prometheus")
 	}
 
 	if config.Memory.Enabled {
@@ -201,7 +201,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		handler.RegisterMemoryEventHandler(handler.memoryHandler)
 		// Register the custom collector
 		prometheus.MustRegister(handler.memoryHandler.GetCustomCollector())
-		handler.log.Info().Msg("Memory collector enabled and registered with Prometheus")
+		handler.log.Debug().Msg("Memory collector enabled and registered with Prometheus")
 	}
 
 	// --- Sentinel Collector Registration ---
@@ -224,7 +224,7 @@ func (h *EventHandler) LogHandlerCounts() {
 	v := reflect.ValueOf(h).Elem() // Get the value of the EventHandler struct
 	t := v.Type()                  // Get the type of the EventHandler struct
 
-	log := h.log.Info() // Start building the log message
+	log := h.log.Debug() // Start building the log message
 
 	// Iterate over the fields of the struct
 	for i := 0; i < t.NumField(); i++ {
