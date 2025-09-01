@@ -99,8 +99,8 @@ func (sm *KernelStateManager) IsKnownProcess(pid uint32) bool {
 }
 
 // GetProcessName returns the process name for a given PID.
-// It can resolve names for active processes. If the process is not found,
-// it returns a formatted "unknown" string and false.
+// It can resolve names for active processes and processes maked for deletetion (before a scrape).
+// If the process is not found, it returns a formatted "unknown" string and false.
 func (sm *KernelStateManager) GetProcessName(pid uint32) (string, bool) {
 	if val, exists := sm.processes.Load(pid); exists {
 		info := val.(*ProcessInfo)

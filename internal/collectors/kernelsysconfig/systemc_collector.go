@@ -76,61 +76,6 @@ func GetGlobalSystemConfigCollector() *SystemConfigCollector {
 	return globalSystemConfigCollector
 }
 
-// RequestMetrics allows other collectors to request that specific metrics be exposed.
-// This method is thread-safe and ensures the collector is registered with Prometheus
-// exactly once when the first metric is requested.
-func (sc *SystemConfigCollector) RequestMetrics(metricNames ...string) {
-	sc.mu.Lock()
-
-	metricsWereRequested := false
-	for _, name := range metricNames {
-		var desc *prometheus.Desc
-		switch name {
-		case PhysicalDiskInfoMetricName:
-			desc = sc.physicalDiskInfoDesc
-		case LogicalDiskInfoMetricName:
-			desc = sc.logicalDiskInfoDesc
-		default:
-			sc.log.Warn().Str("metric", name).Msg("Unknown system config metric requested.")
-			continue
-		}
-
-		key := desc.String()
-		if !sc.requestedMetrics[key] {
-			sc.requestedMetrics[key] = true
-			metricsWereRequested = true
-			sc.log.Info().Str("metric", name).Msg("System config metric has been requested.")
-		}
-	}
-
-	needRegister := metricsWereRequested && len(sc.requestedMetrics) > 0
-	sc.mu.Unlock()
-
-	// If any new metrics were requested, ensure the collector is registered.
-	if needRegister {
-		sc.registerOnce.Do(func() {
-			prometheus.MustRegister(sc)
-			sc.log.Info().Msg("SystemConfigCollector registered with Prometheus.")
-		})
-	}
-}
-
-// AddPhysicalDisk adds or updates information about a physical disk.
-func (sc *SystemConfigCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	sc.physicalDisks[info.DiskNumber] = info
-	sc.log.Debug().Interface("disk_info", info).Msg("Added physical disk info")
-}
-
-// AddLogicalDisk adds or updates information about a logical disk.
-func (sc *SystemConfigCollector) AddLogicalDisk(info LogicalDiskInfo) {
-	sc.mu.Lock()
-	defer sc.mu.Unlock()
-	sc.logicalDisks[info.DiskNumber] = info
-	sc.log.Debug().Interface("disk_info", info).Msg("Added logical disk info")
-}
-
 // Describe implements prometheus.Collector.
 func (sc *SystemConfigCollector) Describe(ch chan<- *prometheus.Desc) {
 	sc.mu.RLock()
@@ -175,4 +120,59 @@ func (sc *SystemConfigCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 	}
+}
+
+// RequestMetrics allows other collectors to request that specific metrics be exposed.
+// This method is thread-safe and ensures the collector is registered with Prometheus
+// exactly once when the first metric is requested.
+func (sc *SystemConfigCollector) RequestMetrics(metricNames ...string) {
+	sc.mu.Lock()
+
+	metricsWereRequested := false
+	for _, name := range metricNames {
+		var desc *prometheus.Desc
+		switch name {
+		case PhysicalDiskInfoMetricName:
+			desc = sc.physicalDiskInfoDesc
+		case LogicalDiskInfoMetricName:
+			desc = sc.logicalDiskInfoDesc
+		default:
+			sc.log.Warn().Str("metric", name).Msg("Unknown system config metric requested.")
+			continue
+		}
+
+		key := desc.String()
+		if !sc.requestedMetrics[key] {
+			sc.requestedMetrics[key] = true
+			metricsWereRequested = true
+			sc.log.Debug().Str("metric", name).Msg("System config metric has been requested.")
+		}
+	}
+
+	needRegister := metricsWereRequested && len(sc.requestedMetrics) > 0
+	sc.mu.Unlock()
+
+	// If any new metrics were requested, ensure the collector is registered.
+	if needRegister {
+		sc.registerOnce.Do(func() {
+			prometheus.MustRegister(sc)
+			sc.log.Debug().Msg("SystemConfigCollector registered with Prometheus.")
+		})
+	}
+}
+
+// AddPhysicalDisk adds or updates information about a physical disk.
+func (sc *SystemConfigCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.physicalDisks[info.DiskNumber] = info
+	sc.log.Debug().Interface("disk_info", info).Msg("Added physical disk info")
+}
+
+// AddLogicalDisk adds or updates information about a logical disk.
+func (sc *SystemConfigCollector) AddLogicalDisk(info LogicalDiskInfo) {
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
+	sc.logicalDisks[info.DiskNumber] = info
+	sc.log.Debug().Interface("disk_info", info).Msg("Added logical disk info")
 }

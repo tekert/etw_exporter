@@ -33,12 +33,12 @@ func (h *MemoryHandler) GetCustomCollector() prometheus.Collector {
 	return h.collector
 }
 
-// HandleHardPageFaultEvent processes hard page fault events to count memory faults.
+// HandleMofHardPageFaultEvent processes hard page fault events from the NT Kernel Logger (MOF schema).
 //
 // ETW Event Details:
 //   - Provider Name: NT Kernel Logger (PageFault)
-//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-//   - Event ID(s): 32
+//   - Provider GUID: {3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 32 (Opcode)
 //   - Event Name(s): HardFault
 //   - Event Version(s): 2
 //   - Schema: MOF
@@ -53,7 +53,7 @@ func (h *MemoryHandler) GetCustomCollector() prometheus.Collector {
 //
 // This handler increments a counter for each hard page fault. It resolves the
 // Thread ID to a Process ID to attribute the fault correctly.
-func (h *MemoryHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+func (h *MemoryHandler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 	threadID, err := helper.GetPropertyUint("TThreadId")
 	if err != nil {
 		h.log.SampledWarn("pagefault_tid_error").Err(err).Msg("Failed to get thread ID from HardFault event")
@@ -69,5 +69,28 @@ func (h *MemoryHandler) HandleHardPageFaultEvent(helper *etw.EventRecordHelper) 
 	}
 
 	h.collector.ProcessHardPageFaultEvent(pid)
+	return nil
+}
+
+// HandleManifestHardPageFaultEvent is a placeholder for a hypothetical manifest-based provider.
+// It demonstrates how a new provider for the same logical event would be handled.
+//
+// ETW Event Details:
+//   - Provider Name: Microsoft-Windows-Kernel-Memory
+//   - Provider GUID: TODO
+//   - Event ID(s): TODO
+//   - Schema: Manifest (XML)
+//
+// Schema (Hypothetical):
+//   // TODO
+func (h *MemoryHandler) HandleManifestHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+	// Manifest events often provide the PID directly, simplifying the logic.
+	pid, err := helper.GetPropertyUint("ProcessID")
+	if err != nil {
+		h.log.SampledWarn("pagefault_pid_error").Err(err).Msg("Failed to get ProcessID from manifest HardFault event")
+		return err
+	}
+
+	h.collector.ProcessHardPageFaultEvent(uint32(pid))
 	return nil
 }
