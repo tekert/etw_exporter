@@ -246,7 +246,7 @@ func (s *SessionManager) setupSessions() error {
 func (s *SessionManager) setupConsumer() error {
 	// Set up callbacks using the event handler
 	s.consumer.EventRecordCallback = s.eventHandler.EventRecordCallback
-	s.consumer.EventRecordHelperCallback = s.eventHandler.EventRecordHelperCallback
+	//s.consumer.EventRecordHelperCallback = s.eventHandler.EventRecordHelperCallback
 	s.consumer.EventPreparedCallback = s.eventHandler.EventPreparedCallback
 	s.consumer.EventCallback = s.eventHandler.EventCallback
 
