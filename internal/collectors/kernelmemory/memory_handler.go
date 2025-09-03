@@ -10,18 +10,18 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// MemoryHandler processes ETW memory events and delegates to the memory collector.
-type MemoryHandler struct {
-	collector    *MemoryCollector
+// Handler processes ETW memory events and delegates to the memory collector.
+type Handler struct {
+	collector    *MemCollector
 	stateManager *statemanager.KernelStateManager
 	log          *phusluadapter.SampledLogger
 }
 
 // NewMemoryHandler creates a new memory handler instance.
 func NewMemoryHandler(config *config.MemoryConfig,
-	stateManager *statemanager.KernelStateManager) *MemoryHandler {
+	stateManager *statemanager.KernelStateManager) *Handler {
 
-	return &MemoryHandler{
+	return &Handler{
 		collector:    NewMemoryCollector(config),
 		stateManager: stateManager,
 		log:          logger.NewSampledLoggerCtx("memory_handler"),
@@ -29,7 +29,7 @@ func NewMemoryHandler(config *config.MemoryConfig,
 }
 
 // GetCustomCollector returns the underlying custom collector for Prometheus registration.
-func (h *MemoryHandler) GetCustomCollector() prometheus.Collector {
+func (h *Handler) GetCustomCollector() prometheus.Collector {
 	return h.collector
 }
 
@@ -53,7 +53,7 @@ func (h *MemoryHandler) GetCustomCollector() prometheus.Collector {
 //
 // This handler increments a counter for each hard page fault. It resolves the
 // Thread ID to a Process ID to attribute the fault correctly.
-func (h *MemoryHandler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 	threadID, err := helper.GetPropertyUint("TThreadId")
 	if err != nil {
 		h.log.SampledWarn("pagefault_tid_error").Err(err).Msg("Failed to get thread ID from HardFault event")
@@ -82,8 +82,9 @@ func (h *MemoryHandler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelpe
 //   - Schema: Manifest (XML)
 //
 // Schema (Hypothetical):
-//   // TODO
-func (h *MemoryHandler) HandleManifestHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+//
+//	// TODO
+func (h *Handler) HandleManifestHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 	// Manifest events often provide the PID directly, simplifying the logic.
 	pid, err := helper.GetPropertyUint("ProcessID")
 	if err != nil {

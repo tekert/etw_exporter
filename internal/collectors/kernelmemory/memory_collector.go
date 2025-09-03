@@ -13,9 +13,9 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// MemoryCollector implements prometheus.Collector for memory-related metrics.
+// MemCollector implements prometheus.Collector for memory-related metrics.
 // This collector is designed for high performance, using lock-free atomics.
-type MemoryCollector struct {
+type MemCollector struct {
 	config *config.MemoryConfig
 	log    *phusluadapter.SampledLogger
 
@@ -27,8 +27,8 @@ type MemoryCollector struct {
 }
 
 // NewMemoryCollector creates a new memory metrics collector.
-func NewMemoryCollector(config *config.MemoryConfig) *MemoryCollector {
-	c := &MemoryCollector{
+func NewMemoryCollector(config *config.MemoryConfig) *MemCollector {
+	c := &MemCollector{
 		config: config,
 		log:    logger.NewSampledLoggerCtx("memory_collector"),
 	}
@@ -49,7 +49,7 @@ func NewMemoryCollector(config *config.MemoryConfig) *MemoryCollector {
 }
 
 // Describe implements prometheus.Collector.
-func (c *MemoryCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *MemCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.hardPageFaultsTotalDesc
 	if c.config.EnablePerProcess {
 		ch <- c.hardPageFaultsPerProcessDesc
@@ -57,7 +57,7 @@ func (c *MemoryCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements prometheus.Collector.
-func (c *MemoryCollector) Collect(ch chan<- prometheus.Metric) {
+func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.hardPageFaultsTotalDesc,
 		prometheus.CounterValue,
@@ -84,7 +84,7 @@ func (c *MemoryCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // ProcessHardPageFaultEvent increments the hard page fault counters.
-func (c *MemoryCollector) ProcessHardPageFaultEvent(pid uint32) {
+func (c *MemCollector) ProcessHardPageFaultEvent(pid uint32) {
 	atomic.AddUint64(&c.hardPageFaultsTotal, 1)
 
 	if c.config.EnablePerProcess {

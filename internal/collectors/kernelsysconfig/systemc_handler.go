@@ -7,15 +7,15 @@ import (
 	"etw_exporter/internal/logger"
 )
 
-// SystemConfigHandler processes system configuration events from the NT Kernel Logger.
-type SystemConfigHandler struct {
-	collector *SystemConfigCollector
+// Handler processes system configuration events from the NT Kernel Logger.
+type Handler struct {
+	collector *SysConfCollector
 	log       log.Logger
 }
 
 // NewSystemConfigHandler creates a new system configuration event handler.
-func NewSystemConfigHandler() *SystemConfigHandler {
-	return &SystemConfigHandler{
+func NewSystemConfigHandler() *Handler {
+	return &Handler{
 		collector: GetGlobalSystemConfigCollector(),
 		log:       logger.NewLoggerWithContext("system_config_handler"),
 	}
@@ -52,7 +52,7 @@ func NewSystemConfigHandler() *SystemConfigHandler {
 //
 // These events provide a one-time snapshot of the disk hardware configuration
 // when an NT Kernel Logger session is stopped.
-func (h *SystemConfigHandler) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleSystemConfigPhyDisk(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		h.log.Error().Err(err).Msg("Failed to get DiskNumber for physical disk config")
@@ -105,7 +105,7 @@ func (h *SystemConfigHandler) HandleSystemConfigPhyDisk(helper *etw.EventRecordH
 //
 // These events provide a one-time snapshot of the logical disk configuration
 // when an NT Kernel Logger session is stopped.
-func (h *SystemConfigHandler) HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleSystemConfigLogDisk(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		h.log.Error().Err(err).Msg("Failed to get DiskNumber for logical disk config")

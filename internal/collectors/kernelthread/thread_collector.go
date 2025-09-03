@@ -21,10 +21,10 @@ type ThreadStateKey struct {
 	WaitReason string
 }
 
-// ThreadCSCollector implements prometheus.Collector for thread-related metrics.
+// ThreadCollector implements prometheus.Collector for thread-related metrics.
 // This collector is designed for extreme performance, using pre-allocation,
 // lock-free atomics, and fine-grained locking to minimize overhead on the hot path.
-type ThreadCSCollector struct {
+type ThreadCollector struct {
 	// Per-CPU data structures for lock-free access on the hot path.
 	// Slices are indexed by CPU number.
 	contextSwitchesPerCPU  []*int64
@@ -75,7 +75,7 @@ type IntervalStats struct {
 var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
-func NewThreadCSCollector() *ThreadCSCollector {
+func NewThreadCSCollector() *ThreadCollector {
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
@@ -120,7 +120,7 @@ func NewThreadCSCollector() *ThreadCSCollector {
 		threadStateCounters[i] = new(int64)
 	}
 
-	return &ThreadCSCollector{
+	return &ThreadCollector{
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
 		threadStateCounters:    threadStateCounters,
@@ -155,7 +155,7 @@ func NewThreadCSCollector() *ThreadCSCollector {
 // Describe implements prometheus.Collector.
 // It sends the descriptors of all the metrics the collector can possibly export
 // to the provided channel. This is called once during registration.
-func (c *ThreadCSCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *ThreadCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.contextSwitchesPerCPUDesc
 	ch <- c.contextSwitchesPerProcessDesc
 	ch <- c.contextSwitchIntervalsDesc
@@ -165,7 +165,7 @@ func (c *ThreadCSCollector) Describe(ch chan<- *prometheus.Desc) {
 // Collect implements prometheus.Collector.
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
-func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
+func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 	// The cleanup of thread and process mappings is now handled exclusively by the
 	// ProcessCleanupCollector, which runs after all other collectors have finished
 	// their scrapes. This ensures data consistency and prevents race conditions.
@@ -225,7 +225,7 @@ func (c *ThreadCSCollector) Collect(ch chan<- prometheus.Metric) {
 
 // collectData creates a snapshot of current metrics data.
 // This method is called during metric collection to ensure consistent data.
-func (c *ThreadCSCollector) collectData() ThreadMetricsData {
+func (c *ThreadCollector) collectData() ThreadMetricsData {
 	data := ThreadMetricsData{
 		ContextSwitchesPerCPU:     make(map[uint16]int64),
 		ContextSwitchesPerProcess: make(map[uint32]ProcessContextSwitches),
@@ -294,7 +294,7 @@ func (c *ThreadCSCollector) collectData() ThreadMetricsData {
 // - newThreadID: Thread ID of the thread being switched to
 // - processID: Process ID that owns the new thread (0 if unknown)
 // - interval: Time since last context switch on this CPU
-func (c *ThreadCSCollector) RecordContextSwitch(
+func (c *ThreadCollector) RecordContextSwitch(
 	cpu uint16,
 	newThreadID uint32,
 	processID uint32,
@@ -354,7 +354,7 @@ func (c *ThreadCSCollector) RecordContextSwitch(
 // Parameters:
 // - state: The thread state (e.g., "ready", "waiting", "running", "terminated")
 // - waitReason: The wait reason if state is "waiting", otherwise "none"
-func (c *ThreadCSCollector) RecordThreadStateTransition(state, waitReason string) {
+func (c *ThreadCollector) RecordThreadStateTransition(state, waitReason string) {
 	// This hot path is allocation-free and lock-free.
 	stateKey := ThreadStateKey{State: state, WaitReason: waitReason}
 	if idx, ok := c.stateKeyToIndex[stateKey]; ok {
@@ -364,12 +364,12 @@ func (c *ThreadCSCollector) RecordThreadStateTransition(state, waitReason string
 
 // RecordThreadCreation records a thread creation event.
 // This is a convenience method that records a "created" state transition.
-func (c *ThreadCSCollector) RecordThreadCreation() {
+func (c *ThreadCollector) RecordThreadCreation() {
 	c.RecordThreadStateTransition("created", "none")
 }
 
 // RecordThreadTermination records a thread termination event.
 // This is a convenience method that records a "terminated" state transition.
-func (c *ThreadCSCollector) RecordThreadTermination() {
+func (c *ThreadCollector) RecordThreadTermination() {
 	c.RecordThreadStateTransition("terminated", "none")
 }

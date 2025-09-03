@@ -29,9 +29,9 @@ type LogicalDiskInfo struct {
 	FileSystem        string
 }
 
-// SystemConfigCollector stores static system configuration data collected from ETW.
+// SysConfCollector stores static system configuration data collected from ETW.
 // It acts as a singleton global repository for this information and a Prometheus collector.
-type SystemConfigCollector struct {
+type SysConfCollector struct {
 	physicalDisks map[uint32]PhysicalDiskInfo // diskNumber -> disk info
 	logicalDisks  map[uint32]LogicalDiskInfo  // diskNumber -> logical disk info
 
@@ -48,14 +48,14 @@ type SystemConfigCollector struct {
 }
 
 var (
-	globalSystemConfigCollector *SystemConfigCollector
+	globalSystemConfigCollector *SysConfCollector
 	systemConfigOnce            sync.Once
 )
 
 // GetGlobalSystemConfigCollector returns the singleton instance of the SystemConfigCollector.
-func GetGlobalSystemConfigCollector() *SystemConfigCollector {
+func GetGlobalSystemConfigCollector() *SysConfCollector {
 	systemConfigOnce.Do(func() {
-		globalSystemConfigCollector = &SystemConfigCollector{
+		globalSystemConfigCollector = &SysConfCollector{
 			physicalDisks:    make(map[uint32]PhysicalDiskInfo),
 			logicalDisks:     make(map[uint32]LogicalDiskInfo),
 			log:              logger.NewLoggerWithContext("system_config_collector"),
@@ -77,7 +77,7 @@ func GetGlobalSystemConfigCollector() *SystemConfigCollector {
 }
 
 // Describe implements prometheus.Collector.
-func (sc *SystemConfigCollector) Describe(ch chan<- *prometheus.Desc) {
+func (sc *SysConfCollector) Describe(ch chan<- *prometheus.Desc) {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 
@@ -90,7 +90,7 @@ func (sc *SystemConfigCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements prometheus.Collector.
-func (sc *SystemConfigCollector) Collect(ch chan<- prometheus.Metric) {
+func (sc *SysConfCollector) Collect(ch chan<- prometheus.Metric) {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 
@@ -125,7 +125,7 @@ func (sc *SystemConfigCollector) Collect(ch chan<- prometheus.Metric) {
 // RequestMetrics allows other collectors to request that specific metrics be exposed.
 // This method is thread-safe and ensures the collector is registered with Prometheus
 // exactly once when the first metric is requested.
-func (sc *SystemConfigCollector) RequestMetrics(metricNames ...string) {
+func (sc *SysConfCollector) RequestMetrics(metricNames ...string) {
 	sc.mu.Lock()
 
 	metricsWereRequested := false
@@ -162,7 +162,7 @@ func (sc *SystemConfigCollector) RequestMetrics(metricNames ...string) {
 }
 
 // AddPhysicalDisk adds or updates information about a physical disk.
-func (sc *SystemConfigCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
+func (sc *SysConfCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.physicalDisks[info.DiskNumber] = info
@@ -170,7 +170,7 @@ func (sc *SystemConfigCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
 }
 
 // AddLogicalDisk adds or updates information about a logical disk.
-func (sc *SystemConfigCollector) AddLogicalDisk(info LogicalDiskInfo) {
+func (sc *SysConfCollector) AddLogicalDisk(info LogicalDiskInfo) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.logicalDisks[info.DiskNumber] = info

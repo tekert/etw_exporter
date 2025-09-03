@@ -13,15 +13,11 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// DiskIOCustomCollector implements prometheus.Collector for disk I/O related metrics.
+// DiskCollector implements prometheus.Collector for disk I/O related metrics.
 // This collector follows Prometheus best practices by creating new metrics on each scrape
 //
-// It provides high-performance aggregated metrics for:
-// - Disk I/O operations (read/write/flush) per disk and per process
-// - Bytes transferred (read/written) per disk and per process
-//
 // All metrics are designed for low cardinality to maintain performance at scale.
-type DiskIOCustomCollector struct {
+type DiskCollector struct {
 	// Atomic counters for high-frequency operations
 	diskIOCount      map[DiskIOKey]*int64 // {diskNumber, operation} -> count
 	diskBytesRead    map[uint32]*int64    // diskNumber -> bytes read
@@ -102,8 +98,8 @@ type ProcessBytesData struct {
 }
 
 // NewDiskIOCustomCollector creates a new disk I/O metrics custom collector.
-func NewDiskIOCustomCollector() *DiskIOCustomCollector {
-	return &DiskIOCustomCollector{
+func NewDiskIOCustomCollector() *DiskCollector {
+	return &DiskCollector{
 		diskIOCount:         make(map[DiskIOKey]*int64),
 		diskBytesRead:       make(map[uint32]*int64),
 		diskBytesWritten:    make(map[uint32]*int64),
@@ -152,7 +148,7 @@ func NewDiskIOCustomCollector() *DiskIOCustomCollector {
 //
 // Parameters:
 //   - ch: Channel to send metric descriptors to
-func (c *DiskIOCustomCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *DiskCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.diskIOCountDesc
 	ch <- c.diskReadBytesDesc
 	ch <- c.diskWrittenBytesDesc
@@ -166,7 +162,7 @@ func (c *DiskIOCustomCollector) Describe(ch chan<- *prometheus.Desc) {
 //
 // Parameters:
 //   - ch: Channel to send metrics to
-func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
+func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -250,7 +246,7 @@ func (c *DiskIOCustomCollector) Collect(ch chan<- prometheus.Metric) {
 //
 // Returns:
 //   - DiskIOMetricsData: Snapshot of current metric data
-func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
+func (c *DiskCollector) collectData() DiskIOMetricsData {
 	data := DiskIOMetricsData{
 		DiskIOCount:         make(map[DiskIOKey]DiskIOCountData),
 		DiskBytesRead:       make(map[uint32]int64),
@@ -348,7 +344,7 @@ func (c *DiskIOCustomCollector) collectData() DiskIOMetricsData {
 //   - processID: Process ID that initiated the I/O operation
 //   - transferSize: Number of bytes transferred in the operation
 //   - isWrite: True for write operations, false for read operations
-func (c *DiskIOCustomCollector) RecordDiskIO(
+func (c *DiskCollector) RecordDiskIO(
 	diskNumber uint32,
 	processID uint32,
 	startKey uint64,
@@ -417,7 +413,7 @@ func (c *DiskIOCustomCollector) RecordDiskIO(
 //
 // Parameters:
 //   - diskNumber: Physical disk number where the flush occurred
-func (c *DiskIOCustomCollector) RecordDiskFlush(diskNumber uint32) {
+func (c *DiskCollector) RecordDiskFlush(diskNumber uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 

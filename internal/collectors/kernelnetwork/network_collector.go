@@ -41,11 +41,11 @@ type retransmissionKey struct {
 	StartKey uint64
 }
 
-// NetworkCSCollector implements prometheus.Collector for network-related metrics.
+// NetCollector implements prometheus.Collector for network-related metrics.
 // This collector is designed for high performance, using lock-free atomics and
 // struct-based keys in sync.Map to eliminate allocations on the hot path.
 // Metrics are created on each scrape to ensure data consistency.
-type NetworkCSCollector struct {
+type NetCollector struct {
 	config *config.NetworkConfig
 	log    *phusluadapter.SampledLogger
 
@@ -78,8 +78,8 @@ type NetworkCSCollector struct {
 }
 
 // NewNetworkCollector creates a new network collector with Prometheus metric descriptors.
-func NewNetworkCollector(config *config.NetworkConfig) *NetworkCSCollector {
-	nc := &NetworkCSCollector{
+func NewNetworkCollector(config *config.NetworkConfig) *NetCollector {
+	nc := &NetCollector{
 		config: config,
 		log:    logger.NewSampledLoggerCtx("network_collector"),
 
@@ -135,7 +135,7 @@ func NewNetworkCollector(config *config.NetworkConfig) *NetworkCSCollector {
 // Describe implements prometheus.Collector.
 // It sends the descriptors of all the metrics the collector can possibly export
 // to the provided channel. This is called once during registration.
-func (nc *NetworkCSCollector) Describe(ch chan<- *prometheus.Desc) {
+func (nc *NetCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- nc.bytesSentTotalDesc
 	ch <- nc.bytesReceivedTotalDesc
 
@@ -155,7 +155,7 @@ func (nc *NetworkCSCollector) Describe(ch chan<- *prometheus.Desc) {
 // Collect implements prometheus.Collector.
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
-func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
+func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	stateManager := statemanager.GetGlobalStateManager()
 
 	// --- Data Volume Metrics ---
@@ -240,7 +240,7 @@ func (nc *NetworkCSCollector) Collect(ch chan<- prometheus.Metric) {
 
 // RecordDataSent records bytes sent for a process and protocol.
 // This is on the hot path and must be highly performant.
-func (nc *NetworkCSCollector) RecordDataSent(pid uint32, startKey uint64, protocol string, bytes uint32) {
+func (nc *NetCollector) RecordDataSent(pid uint32, startKey uint64, protocol string, bytes uint32) {
 	key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 	val, _ := nc.bytesSentTotal.LoadOrStore(key, new(uint64))
 	atomic.AddUint64(val.(*uint64), uint64(bytes))
@@ -254,7 +254,7 @@ func (nc *NetworkCSCollector) RecordDataSent(pid uint32, startKey uint64, protoc
 
 // RecordDataReceived records bytes received for a process and protocol.
 // This is on the hot path and must be highly performant.
-func (nc *NetworkCSCollector) RecordDataReceived(pid uint32, startKey uint64, protocol string, bytes uint32) {
+func (nc *NetCollector) RecordDataReceived(pid uint32, startKey uint64, protocol string, bytes uint32) {
 	key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 	val, _ := nc.bytesReceivedTotal.LoadOrStore(key, new(uint64))
 	atomic.AddUint64(val.(*uint64), uint64(bytes))
@@ -268,37 +268,37 @@ func (nc *NetworkCSCollector) RecordDataReceived(pid uint32, startKey uint64, pr
 
 // RecordConnectionAttempted records a connection attempt.
 // This is on the hot path and must be highly performant.
-func (nc *NetworkCSCollector) RecordConnectionAttempted(pid uint32, startKey uint64, protocol string) {
-    if nc.config.ConnectionHealth {
-        key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
-        val, _ := nc.connectionsAttemptedTotal.LoadOrStore(key, new(uint64))
-        atomic.AddUint64(val.(*uint64), 1)
-    }
+func (nc *NetCollector) RecordConnectionAttempted(pid uint32, startKey uint64, protocol string) {
+	if nc.config.ConnectionHealth {
+		key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
+		val, _ := nc.connectionsAttemptedTotal.LoadOrStore(key, new(uint64))
+		atomic.AddUint64(val.(*uint64), 1)
+	}
 }
 
 // RecordConnectionAccepted records a connection acceptance.
-func (nc *NetworkCSCollector) RecordConnectionAccepted(pid uint32, startKey uint64, protocol string) {
-    if nc.config.ConnectionHealth {
-        key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
-        val, _ := nc.connectionsAcceptedTotal.LoadOrStore(key, new(uint64))
-        atomic.AddUint64(val.(*uint64), 1)
-    }
+func (nc *NetCollector) RecordConnectionAccepted(pid uint32, startKey uint64, protocol string) {
+	if nc.config.ConnectionHealth {
+		key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
+		val, _ := nc.connectionsAcceptedTotal.LoadOrStore(key, new(uint64))
+		atomic.AddUint64(val.(*uint64), 1)
+	}
 }
 
 // RecordConnectionFailed records a connection failure.
-func (nc *NetworkCSCollector) RecordConnectionFailed(pid uint32, startKey uint64, protocol string, failureCode uint16) {
-    if nc.config.ConnectionHealth {
-        key := failureKey{PID: pid, StartKey: startKey, Protocol: protocol, FailureCode: failureCode}
-        val, _ := nc.connectionsFailedTotal.LoadOrStore(key, new(uint64))
-        atomic.AddUint64(val.(*uint64), 1)
-    }
+func (nc *NetCollector) RecordConnectionFailed(pid uint32, startKey uint64, protocol string, failureCode uint16) {
+	if nc.config.ConnectionHealth {
+		key := failureKey{PID: pid, StartKey: startKey, Protocol: protocol, FailureCode: failureCode}
+		val, _ := nc.connectionsFailedTotal.LoadOrStore(key, new(uint64))
+		atomic.AddUint64(val.(*uint64), 1)
+	}
 }
 
 // RecordRetransmission records a TCP retransmission.
-func (nc *NetworkCSCollector) RecordRetransmission(pid uint32, startKey uint64) {
-    if nc.config.RetransmissionRate {
-        key := retransmissionKey{PID: pid, StartKey: startKey}
-        val, _ := nc.retransmissionsTotal.LoadOrStore(key, new(uint64))
-        atomic.AddUint64(val.(*uint64), 1)
-    }
+func (nc *NetCollector) RecordRetransmission(pid uint32, startKey uint64) {
+	if nc.config.RetransmissionRate {
+		key := retransmissionKey{PID: pid, StartKey: startKey}
+		val, _ := nc.retransmissionsTotal.LoadOrStore(key, new(uint64))
+		atomic.AddUint64(val.(*uint64), 1)
+	}
 }

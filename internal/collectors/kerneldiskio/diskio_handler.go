@@ -18,7 +18,7 @@ type processIdentifier struct {
 	StartKey uint64
 }
 
-// DiskIOHandler handles disk I/O events from ETW providers.
+// Handler handles disk I/O events from ETW providers.
 // This handler processes ETW events from multiple providers related to disk and file operations:
 //
 // Disk I/O Provider:
@@ -38,9 +38,9 @@ type processIdentifier struct {
 //
 // The handler maintains FileObject-to-ProcessID mappings for accurate attribution
 // of disk operations to the correct processes.
-type DiskIOHandler struct {
-	customCollector *DiskIOCustomCollector // High-performance custom collector
-	config          *config.DiskIOConfig   // Collector configuration
+type Handler struct {
+	customCollector *DiskCollector       // High-performance custom collector
+	config          *config.DiskIOConfig // Collector configuration
 
 	fileObjectMutex sync.RWMutex
 	fileObjectMap   map[uint64]processIdentifier // FileObject -> {PID, StartKey} mapping
@@ -53,8 +53,8 @@ type DiskIOHandler struct {
 //
 // Returns:
 //   - *DiskIOHandler: A new disk I/O handler instance
-func NewDiskIOHandler(config *config.DiskIOConfig) *DiskIOHandler {
-	return &DiskIOHandler{
+func NewDiskIOHandler(config *config.DiskIOConfig) *Handler {
+	return &Handler{
 		customCollector: NewDiskIOCustomCollector(),
 		config:          config,
 		fileObjectMap:   make(map[uint64]processIdentifier),
@@ -74,7 +74,7 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *DiskIOHandler {
 //
 // Returns:
 //   - *DiskIOCustomCollector: The custom collector instance for registration
-func (d *DiskIOHandler) GetCustomCollector() *DiskIOCustomCollector {
+func (d *Handler) GetCustomCollector() *DiskCollector {
 	return d.customCollector
 }
 
@@ -100,7 +100,7 @@ func (d *DiskIOHandler) GetCustomCollector() *DiskIOCustomCollector {
 //
 // This handler extracts the disk number, transfer size, and FileObject to record
 // disk read metrics, attributing the I/O to a specific process via FileObject mapping.
-func (d *DiskIOHandler) HandleDiskRead(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk read")
@@ -185,7 +185,7 @@ func (d *DiskIOHandler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 //
 // This handler extracts the disk number, transfer size, and FileObject to record
 // disk write metrics, attributing the I/O to a specific process via FileObject mapping.
-func (d *DiskIOHandler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk write")
@@ -265,7 +265,7 @@ func (d *DiskIOHandler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 //   - IORequestPacket (win:Pointer): Pointer to the I/O request packet.
 //
 // This handler is responsible for counting disk flush operations per disk.
-func (d *DiskIOHandler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk flush")
@@ -300,7 +300,7 @@ func (d *DiskIOHandler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 // This handler is crucial for correlating subsequent disk I/O events (which only have a
 // FileObject) back to the process that initiated them by mapping the FileObject to the
 // ProcessId from the event header.
-func (d *DiskIOHandler) HandleFileCreate(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleFileCreate(helper *etw.EventRecordHelper) error {
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
@@ -341,7 +341,7 @@ func (d *DiskIOHandler) HandleFileCreate(helper *etw.EventRecordHelper) error {
 //
 // This handler removes the FileObject-to-ProcessID mapping when a file handle is
 // closed to prevent the map from growing indefinitely and holding stale entries.
-func (d *DiskIOHandler) HandleFileClose(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleFileClose(helper *etw.EventRecordHelper) error {
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
@@ -381,7 +381,7 @@ func (d *DiskIOHandler) HandleFileClose(helper *etw.EventRecordHelper) error {
 //
 // This handler ensures the FileObject-to-ProcessID mapping is kept up-to-date, as
 // a file handle might be used by a process long after it was created.
-func (d *DiskIOHandler) HandleFileWrite(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleFileWrite(helper *etw.EventRecordHelper) error {
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
@@ -426,7 +426,7 @@ func (d *DiskIOHandler) HandleFileWrite(helper *etw.EventRecordHelper) error {
 //
 // This handler ensures the FileObject-to-ProcessID mapping is kept up-to-date, as
 // a file handle might be used by a process long after it was created.
-func (d *DiskIOHandler) HandleFileRead(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleFileRead(helper *etw.EventRecordHelper) error {
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject
@@ -469,7 +469,7 @@ func (d *DiskIOHandler) HandleFileRead(helper *etw.EventRecordHelper) error {
 //   - FilePath (win:UnicodeString): File path.
 //
 // This handler removes the FileObject-to-ProcessID mapping when a file is deleted.
-func (d *DiskIOHandler) HandleFileDelete(helper *etw.EventRecordHelper) error {
+func (d *Handler) HandleFileDelete(helper *etw.EventRecordHelper) error {
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
 		return nil // Can't correlate without FileObject

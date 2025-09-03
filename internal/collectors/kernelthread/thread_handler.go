@@ -13,7 +13,7 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// ThreadHandler handles thread events and metrics with low cardinality.
+// Handler handles thread events and metrics with low cardinality.
 // This collector processes ETW events from the NT Kernel Logger (CSwitch) provider
 // and integrates with a custom Prometheus collector for optimal performance.
 //
@@ -29,17 +29,17 @@ import (
 //
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
-type ThreadHandler struct {
+type Handler struct {
 	lastCpuSwitch   []atomic.Int64
 	stateManager    *statemanager.KernelStateManager
-	customCollector *ThreadCSCollector
+	customCollector *ThreadCollector
 	log             *phusluadapter.SampledLogger
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
 // The custom collector provides high-performance metrics aggregation
-func NewThreadHandler(sm *statemanager.KernelStateManager) *ThreadHandler {
-	return &ThreadHandler{
+func NewThreadHandler(sm *statemanager.KernelStateManager) *Handler {
+	return &Handler{
 		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
 		customCollector: NewThreadCSCollector(),
 		stateManager:    sm,
@@ -56,7 +56,7 @@ func NewThreadHandler(sm *statemanager.KernelStateManager) *ThreadHandler {
 //
 //	threadCollector := NewThreadCSCollector()
 //	prometheus.MustRegister(threadCollector.GetCustomCollector())
-func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector {
+func (c *Handler) GetCustomCollector() *ThreadCollector {
 	return c.customCollector
 }
 
@@ -88,7 +88,7 @@ func (c *ThreadHandler) GetCustomCollector() *ThreadCSCollector {
 // - OldThreadWaitIdealProcessor (int8): offset 15
 // - NewThreadWaitTime (uint32): offset 16
 // - Reserved (uint32): offset 20
-func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// Read properties using direct offsets.
 	newThreadID, err := er.GetUint32At(0)
 	if err != nil {
@@ -159,7 +159,7 @@ func (c *ThreadHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 //
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
-func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	// NOTE: This is now the fallback/slower path. The primary logic has been moved to
 	// HandleContextSwitchRaw for performance. This function will not be called
 	// for CSwitch events due to the routing logic in EventRecordCallback.
@@ -218,7 +218,7 @@ func (c *ThreadHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error
 //
 // This event indicates a thread is transitioning from a wait state to ready state,
 // meaning it's eligible for scheduling but not yet running.
-func (c *ThreadHandler) HandleReadyThread(helper *etw.EventRecordHelper) error {
+func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	// Track thread state transition to ready
 	c.customCollector.RecordThreadStateTransition("ready", "none")
 	return nil
@@ -253,7 +253,7 @@ func (c *ThreadHandler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 // - ThreadName (string): Thread name (if available, V4+ only)
 //
 // This handler maintains the thread-to-process mapping for context switch tracking.
-func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
+func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 	processID, _ := helper.GetPropertyUint("ProcessId")
 
@@ -282,7 +282,7 @@ func (c *ThreadHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 // - ProcessId (uint32): Process ID that owned the thread (format: hex)
 //
 // This handler cleans up the thread-to-process mapping and records termination metrics.
-func (c *ThreadHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
+func (c *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	threadID, _ := helper.GetPropertyUint("TThreadId")
 
 	// Mark the thread for deletion. The actual cleanup will happen after the next scrape.

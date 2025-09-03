@@ -8,15 +8,15 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// ProcessHandler processes ETW process events and delegates to the KernelStateManager.
-type ProcessHandler struct {
+// Handler processes ETW process events and delegates to the KernelStateManager.
+type Handler struct {
 	stateManager *statemanager.KernelStateManager
 	log          *phusluadapter.SampledLogger
 }
 
 // NewProcessHandler creates a new process handler instance.
-func NewProcessHandler(sm *statemanager.KernelStateManager) *ProcessHandler {
-	return &ProcessHandler{
+func NewProcessHandler(sm *statemanager.KernelStateManager) *Handler {
+	return &Handler{
 		stateManager: sm,
 		log:          logger.NewSampledLoggerCtx("process_handler"),
 	}
@@ -44,7 +44,7 @@ func NewProcessHandler(sm *statemanager.KernelStateManager) *ProcessHandler {
 // Note: ProcessRundown events are crucial for capturing process names of processes
 // that were already running when ETW tracing started. Without these events,
 // processes that started before tracing would show as "unknown_*" in metrics.
-func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) error {
+func (ph *Handler) HandleProcessStart(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 	parentProcessID, _ := helper.GetPropertyUint("ParentProcessID")
 	processName, _ := helper.GetPropertyString("ImageName")
@@ -74,7 +74,7 @@ func (ph *ProcessHandler) HandleProcessStart(helper *etw.EventRecordHelper) erro
 //   - ExitTime (win:FILETIME): Process exit time.
 //   - ExitCode (win:UInt32): Process exit code.
 //   - ImageName (win:AnsiString): Process image name (often just the executable name).
-func (ph *ProcessHandler) HandleProcessEnd(helper *etw.EventRecordHelper) error {
+func (ph *Handler) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 	pid := uint32(processID)
 

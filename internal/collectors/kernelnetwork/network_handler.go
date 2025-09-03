@@ -8,22 +8,22 @@ import (
 	"etw_exporter/internal/logger"
 )
 
-// NetworkHandler processes ETW network events and delegates to the network collector.
-type NetworkHandler struct {
-	collector *NetworkCSCollector
+// Handler processes ETW network events and delegates to the network collector.
+type Handler struct {
+	collector *NetCollector
 	log       *phusluadapter.SampledLogger
 }
 
 // NewNetworkHandler creates a new network handler instance.
-func NewNetworkHandler(config *config.NetworkConfig) *NetworkHandler {
-	return &NetworkHandler{
+func NewNetworkHandler(config *config.NetworkConfig) *Handler {
+	return &Handler{
 		collector: NewNetworkCollector(config),
 		log:       logger.NewSampledLoggerCtx("network_handler"),
 	}
 }
 
 // GetCustomCollector returns the underlying custom collector for Prometheus registration.
-func (nh *NetworkHandler) GetCustomCollector() *NetworkCSCollector {
+func (nh *Handler) GetCustomCollector() *NetCollector {
 	return nh.collector
 }
 
@@ -49,7 +49,7 @@ func (nh *NetworkHandler) GetCustomCollector() *NetworkCSCollector {
 //   - endtime (win:UInt32): End time of the operation.
 //   - seqnum (win:UInt32): Sequence number.
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleTCPDataSent(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPDataSent(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func (nh *NetworkHandler) HandleTCPDataSent(helper *etw.EventRecordHelper) error
 //   - sport (win:UInt16): Source port.
 //   - seqnum (win:UInt32): Sequence number.
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleTCPDataReceived(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPDataReceived(helper *etw.EventRecordHelper) error {
 	processID, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -125,7 +125,7 @@ func (nh *NetworkHandler) HandleTCPDataReceived(helper *etw.EventRecordHelper) e
 //   - sndwinscale (win:UInt16): Send window scale.
 //   - seqnum (win:UInt32): Sequence number.
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -150,7 +150,7 @@ func (nh *NetworkHandler) HandleTCPConnectionAttempted(helper *etw.EventRecordHe
 // Schema (from manifest):
 //   - PID (win:UInt32): Process identifier. Offset: 0
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -175,7 +175,7 @@ func (nh *NetworkHandler) HandleTCPConnectionAccepted(helper *etw.EventRecordHel
 // Schema (from manifest):
 //   - PID (win:UInt32): Process identifier. Offset: 0
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleTCPDataRetransmitted(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPDataRetransmitted(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -202,7 +202,7 @@ func (nh *NetworkHandler) HandleTCPDataRetransmitted(helper *etw.EventRecordHelp
 //   - FailureCode (win:UInt16): Failure code.
 //
 // Note: This event does not contain a PID. We attribute it to PID 0 ("system").
-func (nh *NetworkHandler) HandleTCPConnectionFailed(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleTCPConnectionFailed(helper *etw.EventRecordHelper) error {
 	failureCode, err := helper.GetPropertyUint("FailureCode")
 	if err != nil {
 		return err
@@ -227,7 +227,7 @@ func (nh *NetworkHandler) HandleTCPConnectionFailed(helper *etw.EventRecordHelpe
 //   - PID (win:UInt32): Process identifier. Offset: 0
 //   - size (win:UInt32): Number of bytes sent. Offset: 4
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleUDPDataSent(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleUDPDataSent(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -257,7 +257,7 @@ func (nh *NetworkHandler) HandleUDPDataSent(helper *etw.EventRecordHelper) error
 //   - PID (win:UInt32): Process identifier. Offset: 0
 //   - size (win:UInt32): Number of bytes received. Offset: 4
 //   - connid (win:UInt32): Connection identifier.
-func (nh *NetworkHandler) HandleUDPDataReceived(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleUDPDataReceived(helper *etw.EventRecordHelper) error {
 	pid, err := helper.GetPropertyUint("PID")
 	if err != nil {
 		return err
@@ -288,7 +288,7 @@ func (nh *NetworkHandler) HandleUDPDataReceived(helper *etw.EventRecordHelper) e
 //   - FailureCode (win:UInt16): Failure code.
 //
 // Note: This event does not contain a PID. We attribute it to PID 0 ("system").
-func (nh *NetworkHandler) HandleUDPConnectionFailed(helper *etw.EventRecordHelper) error {
+func (nh *Handler) HandleUDPConnectionFailed(helper *etw.EventRecordHelper) error {
 	failureCode, err := helper.GetPropertyUint("FailureCode")
 	if err != nil {
 		return err

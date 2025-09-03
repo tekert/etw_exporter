@@ -19,10 +19,10 @@ type pendingDPCInfo struct {
 	routineAddress uint64
 }
 
-// PerfInfoHandler handles interrupt-related ETW events for performance monitoring
+// Handler handles interrupt-related ETW events for performance monitoring
 // It implements the event handler interfaces needed for interrupt latency tracking
-type PerfInfoHandler struct {
-	collector *PerfInfoInterruptCollector
+type Handler struct {
+	collector *PerfCollector
 	config    *config.PerfInfoConfig
 	log       *phusluadapter.SampledLogger
 
@@ -47,8 +47,8 @@ type PerfInfoHandler struct {
 }
 
 // NewPerfInfoHandler creates a new interrupt event handler
-func NewPerfInfoHandler(config *config.PerfInfoConfig) *PerfInfoHandler {
-	return &PerfInfoHandler{
+func NewPerfInfoHandler(config *config.PerfInfoConfig) *Handler {
+	return &Handler{
 		collector:     NewPerfInfoCollector(config),
 		config:        config,
 		log:           logger.NewSampledLoggerCtx("perfinfo_handler"),
@@ -57,13 +57,13 @@ func NewPerfInfoHandler(config *config.PerfInfoConfig) *PerfInfoHandler {
 }
 
 // GetCustomCollector returns the Prometheus collector for registration
-func (h *PerfInfoHandler) GetCustomCollector() prometheus.Collector {
+func (h *Handler) GetCustomCollector() prometheus.Collector {
 	return h.collector
 }
 
 // finalizeAndClearPendingDPC checks for a pending/previous DPC on a given CPU, processes it
 // if one exists, and clears it from the pending map. The mutex must be held by the caller.
-func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Time) {
+func (h *Handler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Time) {
 	if lastDPC, exists := h.lastDPCPerCPU[cpu]; exists {
 		// Calculate the duration from the DPC start to the provided end time.
 		durationMicros := float64(endTime.Sub(lastDPC.initialTime).Microseconds())
@@ -95,7 +95,7 @@ func (h *PerfInfoHandler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Ti
 //   - Reserved (uint16): Reserved field.
 //
 // This handler records ISR entry time and routine address for driver latency analysis.
-func (h *PerfInfoHandler) HandleISREvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	cpu := helper.EventRec.ProcessorNumber()
 
 	routineAddress, err := helper.GetPropertyUint("Routine")
@@ -140,7 +140,7 @@ var times int64 // ! TESTING log lib crash
 // This handler tracks the start of a DPC. The duration is calculated later when the
 // next DPC or a context switch occurs on the same CPU. The InitialTime property's
 // clock source (QPC, SystemTime, CPUTick) depends on the session's ClientContext.
-func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	cpu := helper.EventRec.ProcessorNumber()
 	eventTime := helper.Timestamp()
 
@@ -227,7 +227,7 @@ func (h *PerfInfoHandler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 // execution on that core. Since DPCs run at a high IRQL, they must complete before
 // the scheduler can run. Therefore, the timestamp of a CSwitch event provides a
 // reliable end time for any DPC that was running just before it.
-func (h *PerfInfoHandler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
 	cpu := helper.EventRec.ProcessorNumber()
@@ -244,17 +244,17 @@ func (h *PerfInfoHandler) HandleContextSwitch(helper *etw.EventRecordHelper) err
 }
 
 // HandleReadyThread is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *PerfInfoHandler) HandleReadyThread(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	return nil // PerfInfoHandler does not process this event.
 }
 
 // HandleThreadStart is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *PerfInfoHandler) HandleThreadStart(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	return nil // PerfInfoHandler does not process this event.
 }
 
 // HandleThreadEnd is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *PerfInfoHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	return nil // PerfInfoHandler does not process this event.
 }
 
@@ -285,7 +285,7 @@ func (h *PerfInfoHandler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 // This is a high-performance "fast path" that reads directly from the UserData
 // buffer using known offsets, bypassing parsing overhead. It uses the event's
 // timestamp to finalize the duration of a pending DPC on the same CPU.
-func (h *PerfInfoHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+func (h *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
 	cpu := er.ProcessorNumber()
@@ -327,7 +327,7 @@ func (h *PerfInfoHandler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 //
 // This handler collects information about loaded modules (drivers, executables, DLLs)
 // to resolve routine addresses from DPC/ISR events to a driver name.
-func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 	// Extract image load properties using optimized methods
 	var imageBase uint64
 	var imageSize uint64
@@ -378,7 +378,7 @@ func (h *PerfInfoHandler) HandleImageLoadEvent(helper *etw.EventRecordHelper) er
 //
 // This handler removes the address-to-driver mapping when a module is unloaded
 // to prevent stale data.
-func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 	var imageBase uint64
 	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
 		imageBase = base
@@ -391,6 +391,6 @@ func (h *PerfInfoHandler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) 
 }
 
 // HandleSampleProfileEvent processes SampledProfile events for SMI gap detection.
-func (h *PerfInfoHandler) HandleSampleProfileEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleSampleProfileEvent(helper *etw.EventRecordHelper) error {
 	return nil
 }

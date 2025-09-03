@@ -32,11 +32,11 @@ type eventHandlerFunc func(helper *etw.EventRecordHelper) error
 // This handler routes events to specialized sub-handlers based on a data-driven map.
 type EventHandler struct {
 	// Collectors for different metric categories
-	diskHandler     *kerneldiskio.DiskIOHandler
-	threadCSHandler *kernelthread.ThreadHandler
-	perfinfoHandler *kernelperf.PerfInfoHandler
-	networkHandler  *kernelnetwork.NetworkHandler
-	memoryHandler   *kernelmemory.MemoryHandler
+	diskHandler     *kerneldiskio.Handler
+	threadHandler *kernelthread.Handler
+	perfinfoHandler *kernelperf.Handler
+	networkHandler  *kernelnetwork.Handler
+	memoryHandler   *kernelmemory.Handler
 
 	// Shared state and caches for callbacks
 	config       *config.CollectorConfig
@@ -63,7 +63,7 @@ type EventHandler struct {
 // that are enabled in the provided configuration, registers them for Prometheus
 // metrics where applicable, and sets up the internal routing maps.
 func NewEventHandler(config *config.CollectorConfig) *EventHandler {
-	handler := &EventHandler{
+	eh := &EventHandler{
 		config:        config,
 		log:           logger.NewSampledLoggerCtx("event_handler"),
 		routeMap:      make(map[eventRoute]eventHandlerFunc),
@@ -71,54 +71,54 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	}
 
 	// --- Core Component Initialization ---
-	handler.stateManager = statemanager.GetGlobalStateManager()
+	eh.stateManager = statemanager.GetGlobalStateManager()
 
 	// Populate the GUID to counter map.
-	handler.guidToCounter[*SystemConfigGUID] = &handler.systemConfigEventCount
-	handler.guidToCounter[*MicrosoftWindowsKernelDiskGUID] = &handler.diskEventCount
-	handler.guidToCounter[*MicrosoftWindowsKernelProcessGUID] = &handler.processEventCount
-	handler.guidToCounter[*MicrosoftWindowsKernelFileGUID] = &handler.fileEventCount
-	handler.guidToCounter[*ThreadKernelGUID] = &handler.threadEventCount
-	handler.guidToCounter[*PerfInfoKernelGUID] = &handler.perfinfoEventCount
-	handler.guidToCounter[*ImageKernelGUID] = &handler.imageEventCount
-	handler.guidToCounter[*PageFaultKernelGUID] = &handler.pageFaultEventCount
-	handler.guidToCounter[*MicrosoftWindowsKernelNetworkGUID] = &handler.networkEventCount
+	eh.guidToCounter[*SystemConfigGUID] = &eh.systemConfigEventCount
+	eh.guidToCounter[*MicrosoftWindowsKernelDiskGUID] = &eh.diskEventCount
+	eh.guidToCounter[*MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
+	eh.guidToCounter[*MicrosoftWindowsKernelFileGUID] = &eh.fileEventCount
+	eh.guidToCounter[*ThreadKernelGUID] = &eh.threadEventCount
+	eh.guidToCounter[*PerfInfoKernelGUID] = &eh.perfinfoEventCount
+	eh.guidToCounter[*ImageKernelGUID] = &eh.imageEventCount
+	eh.guidToCounter[*PageFaultKernelGUID] = &eh.pageFaultEventCount
+	eh.guidToCounter[*MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
 
 	// --- Register Routes for All Handlers ---
 
 	// Always register the global process handler for process name mappings.
 	// Provider: Microsoft-Windows-Kernel-Process ({22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716})
-	processHandler := kernelprocess.NewProcessHandler(handler.stateManager)
-	handler.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 1}] = processHandler.HandleProcessStart  // ProcessStart
-	handler.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 15}] = processHandler.HandleProcessStart // ProcessRundown
-	handler.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 2}] = processHandler.HandleProcessEnd    // ProcessStop
-	handler.log.Debug().Msg("Registered global process handler routes")
+	processHandler := kernelprocess.NewProcessHandler(eh.stateManager)
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 1}] = processHandler.HandleProcessStart  // ProcessStart
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 15}] = processHandler.HandleProcessStart // ProcessRundown
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 2}] = processHandler.HandleProcessEnd    // ProcessStop
+	eh.log.Debug().Msg("Registered global process handler routes")
 
 	// Always register the system config handler.
 	// Provider: NT Kernel Logger (EventTraceConfig) ({01853a65-418f-4f36-aefc-dc0f1d2fd235})
 	systemConfigHandler := kernelsysconfig.NewSystemConfigHandler()
-	handler.routeMap[eventRoute{*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK}] = systemConfigHandler.HandleSystemConfigPhyDisk
-	handler.routeMap[eventRoute{*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK}] = systemConfigHandler.HandleSystemConfigLogDisk
-	handler.log.Debug().Msg("Registered global system config handler routes")
+	eh.routeMap[eventRoute{*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK}] = systemConfigHandler.HandleSystemConfigPhyDisk
+	eh.routeMap[eventRoute{*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK}] = systemConfigHandler.HandleSystemConfigLogDisk
+	eh.log.Debug().Msg("Registered global system config handler routes")
 
 	// Initialize enabled collectors and register their routes.
 	if config.DiskIO.Enabled {
-		handler.diskHandler = kerneldiskio.NewDiskIOHandler(&config.DiskIO)
-		prometheus.MustRegister(handler.diskHandler.GetCustomCollector())
+		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&config.DiskIO)
+		prometheus.MustRegister(eh.diskHandler.GetCustomCollector())
 
 		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271})
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ}] = handler.diskHandler.HandleDiskRead   // DiskRead
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE}] = handler.diskHandler.HandleDiskWrite // DiskWrite
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH}] = handler.diskHandler.HandleDiskFlush // DiskFlush
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ}] = eh.diskHandler.HandleDiskRead   // DiskRead
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE}] = eh.diskHandler.HandleDiskWrite // DiskWrite
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH}] = eh.diskHandler.HandleDiskFlush // DiskFlush
 
 		// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 12}] = handler.diskHandler.HandleFileCreate // Create
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 14}] = handler.diskHandler.HandleFileClose  // Close
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 15}] = handler.diskHandler.HandleFileRead   // Read
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 16}] = handler.diskHandler.HandleFileWrite  // Write
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 26}] = handler.diskHandler.HandleFileDelete // DeletePath
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 12}] = eh.diskHandler.HandleFileCreate // Create
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 14}] = eh.diskHandler.HandleFileClose  // Close
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 15}] = eh.diskHandler.HandleFileRead   // Read
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 16}] = eh.diskHandler.HandleFileWrite  // Write
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelFileGUID, 26}] = eh.diskHandler.HandleFileDelete // DeletePath
 
-		handler.log.Debug().Msg("Disk I/O collector enabled and routes registered")
+		eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
 		kernelsysconfig.GetGlobalSystemConfigCollector().RequestMetrics(
 			kernelsysconfig.PhysicalDiskInfoMetricName,
 			kernelsysconfig.LogicalDiskInfoMetricName,
@@ -126,72 +126,72 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	}
 
 	if config.ThreadCS.Enabled {
-		handler.threadCSHandler = kernelthread.NewThreadHandler(handler.stateManager)
-		prometheus.MustRegister(handler.threadCSHandler.GetCustomCollector())
+		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
+		prometheus.MustRegister(eh.threadHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
 		// Note: CSwitch (36) is handled in the raw EventRecordCallback for performance.
-		handler.routeMap[eventRoute{*ThreadKernelGUID, 50}] = handler.threadCSHandler.HandleReadyThread                            // ReadyThread
-		handler.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START}] = handler.threadCSHandler.HandleThreadStart    // ThreadStart
-		handler.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START}] = handler.threadCSHandler.HandleThreadStart // ThreadRundown
-		handler.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END}] = handler.threadCSHandler.HandleThreadEnd        // ThreadEnd
-		handler.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END}] = handler.threadCSHandler.HandleThreadEnd     // ThreadRundownEnd
-		handler.log.Debug().Msg("ThreadCS collector enabled and routes registered")
+		eh.routeMap[eventRoute{*ThreadKernelGUID, 50}] = eh.threadHandler.HandleReadyThread                            // ReadyThread
+		eh.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START}] = eh.threadHandler.HandleThreadStart    // ThreadStart
+		eh.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START}] = eh.threadHandler.HandleThreadStart // ThreadRundown
+		eh.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END}] = eh.threadHandler.HandleThreadEnd        // ThreadEnd
+		eh.routeMap[eventRoute{*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END}] = eh.threadHandler.HandleThreadEnd     // ThreadRundownEnd
+		eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
 	}
 
 	if config.PerfInfo.Enabled {
-		handler.perfinfoHandler = kernelperf.NewPerfInfoHandler(&config.PerfInfo)
-		prometheus.MustRegister(handler.perfinfoHandler.GetCustomCollector())
+		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&config.PerfInfo)
+		prometheus.MustRegister(eh.perfinfoHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (PerfInfo) ({ce1dbfb4-137e-4da6-87b0-3f59aa102cbc})
-		handler.routeMap[eventRoute{*PerfInfoKernelGUID, 67}] = handler.perfinfoHandler.HandleISREvent           // ISR
-		handler.routeMap[eventRoute{*PerfInfoKernelGUID, 66}] = handler.perfinfoHandler.HandleDPCEvent           // ThreadDPC
-		handler.routeMap[eventRoute{*PerfInfoKernelGUID, 68}] = handler.perfinfoHandler.HandleDPCEvent           // DPC
-		handler.routeMap[eventRoute{*PerfInfoKernelGUID, 69}] = handler.perfinfoHandler.HandleDPCEvent           // TimerDPC
-		handler.routeMap[eventRoute{*PerfInfoKernelGUID, 46}] = handler.perfinfoHandler.HandleSampleProfileEvent // SampleProfile
+		eh.routeMap[eventRoute{*PerfInfoKernelGUID, 67}] = eh.perfinfoHandler.HandleISREvent           // ISR
+		eh.routeMap[eventRoute{*PerfInfoKernelGUID, 66}] = eh.perfinfoHandler.HandleDPCEvent           // ThreadDPC
+		eh.routeMap[eventRoute{*PerfInfoKernelGUID, 68}] = eh.perfinfoHandler.HandleDPCEvent           // DPC
+		eh.routeMap[eventRoute{*PerfInfoKernelGUID, 69}] = eh.perfinfoHandler.HandleDPCEvent           // TimerDPC
+		eh.routeMap[eventRoute{*PerfInfoKernelGUID, 46}] = eh.perfinfoHandler.HandleSampleProfileEvent // SampleProfile
 
 		// Provider: NT Kernel Logger (Image) ({2cb15d1d-5fc1-11d2-abe1-00a0c911f518})
-		handler.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_LOAD}] = handler.perfinfoHandler.HandleImageLoadEvent     // Image Load
-		handler.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_START}] = handler.perfinfoHandler.HandleImageLoadEvent // Image Rundown
-		handler.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_END}] = handler.perfinfoHandler.HandleImageLoadEvent   // Image Rundown End
-		handler.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_END}] = handler.perfinfoHandler.HandleImageUnloadEvent    // Image Unload
+		eh.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_LOAD}] = eh.perfinfoHandler.HandleImageLoadEvent     // Image Load
+		eh.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_START}] = eh.perfinfoHandler.HandleImageLoadEvent // Image Rundown
+		eh.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_END}] = eh.perfinfoHandler.HandleImageLoadEvent   // Image Rundown End
+		eh.routeMap[eventRoute{*ImageKernelGUID, etw.EVENT_TRACE_TYPE_END}] = eh.perfinfoHandler.HandleImageUnloadEvent    // Image Unload
 
 		// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
 		// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
-		handler.log.Debug().Msg("PerfInfo collector enabled and routes registered")
+		eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
 	}
 
 	if config.Network.Enabled {
-		handler.networkHandler = kernelnetwork.NewNetworkHandler(&config.Network)
-		prometheus.MustRegister(handler.networkHandler.GetCustomCollector())
+		eh.networkHandler = kernelnetwork.NewNetworkHandler(&config.Network)
+		prometheus.MustRegister(eh.networkHandler.GetCustomCollector())
 
 		// Provider: Microsoft-Windows-Kernel-Network ({7dd42a49-5329-4832-8dfd-43d979153a88})
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 10}] = handler.networkHandler.HandleTCPDataSent            // TCP Send (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 26}] = handler.networkHandler.HandleTCPDataSent            // TCP Send (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 11}] = handler.networkHandler.HandleTCPDataReceived        // TCP Recv (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 27}] = handler.networkHandler.HandleTCPDataReceived        // TCP Recv (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 12}] = handler.networkHandler.HandleTCPConnectionAttempted // TCP Connect (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 28}] = handler.networkHandler.HandleTCPConnectionAttempted // TCP Connect (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 15}] = handler.networkHandler.HandleTCPConnectionAccepted  // TCP Accept (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 31}] = handler.networkHandler.HandleTCPConnectionAccepted  // TCP Accept (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 14}] = handler.networkHandler.HandleTCPDataRetransmitted   // TCP Retransmit (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 30}] = handler.networkHandler.HandleTCPDataRetransmitted   // TCP Retransmit (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 17}] = handler.networkHandler.HandleTCPConnectionFailed    // TCP Connect Failed
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 42}] = handler.networkHandler.HandleUDPDataSent            // UDP Send (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 58}] = handler.networkHandler.HandleUDPDataSent            // UDP Send (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 43}] = handler.networkHandler.HandleUDPDataReceived        // UDP Recv (IPv4)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 59}] = handler.networkHandler.HandleUDPDataReceived        // UDP Recv (IPv6)
-		handler.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 49}] = handler.networkHandler.HandleUDPConnectionFailed    // UDP Connect Failed
-		handler.log.Debug().Msg("Network collector enabled and routes registered")
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 10}] = eh.networkHandler.HandleTCPDataSent            // TCP Send (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 26}] = eh.networkHandler.HandleTCPDataSent            // TCP Send (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 11}] = eh.networkHandler.HandleTCPDataReceived        // TCP Recv (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 27}] = eh.networkHandler.HandleTCPDataReceived        // TCP Recv (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 12}] = eh.networkHandler.HandleTCPConnectionAttempted // TCP Connect (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 28}] = eh.networkHandler.HandleTCPConnectionAttempted // TCP Connect (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 15}] = eh.networkHandler.HandleTCPConnectionAccepted  // TCP Accept (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 31}] = eh.networkHandler.HandleTCPConnectionAccepted  // TCP Accept (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 14}] = eh.networkHandler.HandleTCPDataRetransmitted   // TCP Retransmit (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 30}] = eh.networkHandler.HandleTCPDataRetransmitted   // TCP Retransmit (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 17}] = eh.networkHandler.HandleTCPConnectionFailed    // TCP Connect Failed
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 42}] = eh.networkHandler.HandleUDPDataSent            // UDP Send (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 58}] = eh.networkHandler.HandleUDPDataSent            // UDP Send (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 43}] = eh.networkHandler.HandleUDPDataReceived        // UDP Recv (IPv4)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 59}] = eh.networkHandler.HandleUDPDataReceived        // UDP Recv (IPv6)
+		eh.routeMap[eventRoute{*MicrosoftWindowsKernelNetworkGUID, 49}] = eh.networkHandler.HandleUDPConnectionFailed    // UDP Connect Failed
+		eh.log.Debug().Msg("Network collector enabled and routes registered")
 	}
 
 	if config.Memory.Enabled {
-		handler.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, handler.stateManager)
-		prometheus.MustRegister(handler.memoryHandler.GetCustomCollector())
+		eh.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, eh.stateManager)
+		prometheus.MustRegister(eh.memoryHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
-		handler.routeMap[eventRoute{*PageFaultKernelGUID, 32}] = handler.memoryHandler.HandleMofHardPageFaultEvent // HardFault
-		handler.log.Debug().Msg("Memory collector enabled and routes registered")
+		eh.routeMap[eventRoute{*PageFaultKernelGUID, 32}] = eh.memoryHandler.HandleMofHardPageFaultEvent // HardFault
+		eh.log.Debug().Msg("Memory collector enabled and routes registered")
 	}
 
 	// --- Sentinel Collector Registration ---
@@ -199,10 +199,10 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	// of terminated entities in the KernelStateManager AFTER all other collectors
 	// have completed their scrape.
 	prometheus.MustRegister(statemanager.NewStateCleanupCollector())
-	handler.log.Debug().Msg("Registered post-scrape state cleanup collector")
+	eh.log.Debug().Msg("Registered post-scrape state cleanup collector")
 
-	handler.log.Debug().Int("total_routes", len(handler.routeMap)).Msg("Event handler initialized")
-	return handler
+	eh.log.Debug().Int("total_routes", len(eh.routeMap)).Msg("Event handler initialized")
+	return eh
 }
 
 // GetStateManager returns the shared state manager instance.
@@ -235,8 +235,8 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 		h.threadEventCount.Add(1)
 
 		// Route to thread collector for context switch metrics.
-		if h.threadCSHandler != nil {
-			_ = h.threadCSHandler.HandleContextSwitchRaw(record)
+		if h.threadHandler != nil {
+			_ = h.threadHandler.HandleContextSwitchRaw(record)
 		}
 		// Route to perfinfo collector to finalize DPC durations.
 		if h.perfinfoHandler != nil {

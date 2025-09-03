@@ -46,7 +46,7 @@ var isrEventPool = sync.Pool{
 	},
 }
 
-// PerfInfoInterruptCollector implements prometheus.Collector for real-time performance metrics.
+// PerfCollector implements prometheus.Collector for real-time performance metrics.
 // This collector provides high-performance aggregated metrics for:
 // - System-wide ISR to DPC latency (measures DPC queue time)
 // - DPC execution time by driver (matches "Highest DPC routine execution time")
@@ -54,7 +54,7 @@ var isrEventPool = sync.Pool{
 // - SMI gap detection via timeline analysis
 //
 // All metrics use the etw_ prefix and are designed for low cardinality.
-type PerfInfoInterruptCollector struct {
+type PerfCollector struct {
 	// Configuration options
 	config *config.PerfInfoConfig
 
@@ -143,8 +143,8 @@ var (
 )
 
 // NewPerfInfoCollector creates a new interrupt latency collector
-func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptCollector {
-	collector := &PerfInfoInterruptCollector{
+func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfCollector {
+	collector := &PerfCollector{
 		config:                 config,
 		pendingISRs:            make(map[ISRKey]*ISREvent, 256),  // Pre-size for performance
 		imageDatabase:          make(map[uint64]ImageInfo, 1000), // Pre-size for typical driver count
@@ -226,7 +226,7 @@ func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfInfoInterruptColle
 }
 
 // Describe implements the prometheus.Collector interface
-func (c *PerfInfoInterruptCollector) Describe(ch chan<- *prometheus.Desc) {
+func (c *PerfCollector) Describe(ch chan<- *prometheus.Desc) {
 	// Always include core system-wide metrics
 	ch <- c.isrToDpcLatencyDesc
 	ch <- c.dpcQueuedDesc
@@ -254,7 +254,7 @@ func (c *PerfInfoInterruptCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // Collect implements the prometheus.Collector interface
-func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
+func (c *PerfCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -282,7 +282,7 @@ func (c *PerfInfoInterruptCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // collectISRToDPCLatencyHistogram creates the system-wide ISR to DPC latency histogram
-func (c *PerfInfoInterruptCollector) collectISRToDPCLatencyHistogram(ch chan<- prometheus.Metric) {
+func (c *PerfCollector) collectISRToDPCLatencyHistogram(ch chan<- prometheus.Metric) {
 	cumulativeBuckets := make(map[float64]uint64)
 	var cumulativeCount uint64
 
@@ -305,7 +305,7 @@ func (c *PerfInfoInterruptCollector) collectISRToDPCLatencyHistogram(ch chan<- p
 }
 
 // collectISRDurationHistograms creates ISR duration histograms by driver
-func (c *PerfInfoInterruptCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric) {
+func (c *PerfCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric) {
 	for driverKey, hd := range c.dpcDurationHistograms {
 		cumulativeBuckets := make(map[float64]uint64)
 		var cumulativeCount uint64
@@ -331,7 +331,7 @@ func (c *PerfInfoInterruptCollector) collectDPCDurationHistograms(ch chan<- prom
 }
 
 // collectDPCQueueDepth creates DPC queue depth metrics
-func (c *PerfInfoInterruptCollector) collectDPCCounters(ch chan<- prometheus.Metric) {
+func (c *PerfCollector) collectDPCCounters(ch chan<- prometheus.Metric) {
 	// Create a set of all CPUs from both maps to ensure we don't miss any.
 	allCPUs := make(map[uint16]struct{})
 	for cpu := range c.dpcQueuedCount {
@@ -380,7 +380,7 @@ func (c *PerfInfoInterruptCollector) collectDPCCounters(ch chan<- prometheus.Met
 }
 
 // collectSMIGaps returns a zero-value histogram as SMI detection is currently disabled.
-func (c *PerfInfoInterruptCollector) collectSMIGaps(ch chan<- prometheus.Metric) {
+func (c *PerfCollector) collectSMIGaps(ch chan<- prometheus.Metric) {
 	// This is a placeholder. The SMI detection logic has been removed for now.
 	// We will return a zero-value histogram to maintain metric presence.
 	histogram := prometheus.MustNewConstHistogram(
@@ -393,7 +393,7 @@ func (c *PerfInfoInterruptCollector) collectSMIGaps(ch chan<- prometheus.Metric)
 }
 
 // ProcessISREvent processes an ISR event for latency tracking
-func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16,
+func (c *PerfCollector) ProcessISREvent(cpu uint16, vector uint16,
 	initialTime time.Time, routineAddress uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -422,7 +422,7 @@ func (c *PerfInfoInterruptCollector) ProcessISREvent(cpu uint16, vector uint16,
 }
 
 // ProcessDPCEvent processes a DPC event and correlates with ISR for latency calculation
-func (c *PerfInfoInterruptCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
+func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 	routineAddress uint64, durationMicros float64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -471,7 +471,7 @@ func (c *PerfInfoInterruptCollector) ProcessDPCEvent(cpu uint16, initialTime tim
 }
 
 // ProcessImageLoadEvent processes image load events to build driver database
-func (c *PerfInfoInterruptCollector) ProcessImageLoadEvent(imageBase, imageSize uint64, fileName string) {
+func (c *PerfCollector) ProcessImageLoadEvent(imageBase, imageSize uint64, fileName string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -493,7 +493,7 @@ func (c *PerfInfoInterruptCollector) ProcessImageLoadEvent(imageBase, imageSize 
 }
 
 // ProcessImageUnloadEvent processes image unload events to remove driver metrics.
-func (c *PerfInfoInterruptCollector) ProcessImageUnloadEvent(imageBase uint64) {
+func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -522,7 +522,7 @@ func (c *PerfInfoInterruptCollector) ProcessImageUnloadEvent(imageBase uint64) {
 
 // resolveDriverNameUnsafe is an optimized version for use within locked contexts
 // Assumes caller already holds the mutex
-func (c *PerfInfoInterruptCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
+func (c *PerfCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
 	// Check cache first
 	if driverName, exists := c.driverNames[routineAddress]; exists {
 		return driverName
@@ -546,7 +546,7 @@ func (c *PerfInfoInterruptCollector) resolveDriverNameUnsafe(routineAddress uint
 
 // pruneStaleDrivers removes metrics for drivers that have been inactive for a configured timeout.
 // This is called periodically from the Collect method.
-func (c *PerfInfoInterruptCollector) pruneStaleDrivers() {
+func (c *PerfCollector) pruneStaleDrivers() {
 	now := time.Now()
 	staleDrivers := make([]string, 0)
 
@@ -566,7 +566,7 @@ func (c *PerfInfoInterruptCollector) pruneStaleDrivers() {
 
 // removeDriverMetrics removes all metrics associated with a given driver name.
 // The caller must hold the mutex.
-func (c *PerfInfoInterruptCollector) removeDriverMetrics(driverName string) {
+func (c *PerfCollector) removeDriverMetrics(driverName string) {
 	// Remove from last seen tracking
 	delete(c.driverLastSeen, driverName)
 
@@ -577,7 +577,7 @@ func (c *PerfInfoInterruptCollector) removeDriverMetrics(driverName string) {
 }
 
 // recordISRToDPCLatency records a system-wide ISR to DPC latency sample
-func (c *PerfInfoInterruptCollector) recordISRToDPCLatency(latencyMicros float64) {
+func (c *PerfCollector) recordISRToDPCLatency(latencyMicros float64) {
 	c.isrToDpcLatencyCount++
 	c.isrToDpcLatencySum += latencyMicros
 	// Find appropriate bucket
@@ -590,7 +590,7 @@ func (c *PerfInfoInterruptCollector) recordISRToDPCLatency(latencyMicros float64
 }
 
 // recordDPCDuration records a DPC duration sample for a specific driver
-func (c *PerfInfoInterruptCollector) recordDPCDuration(driverName string, durationMicros float64) {
+func (c *PerfCollector) recordDPCDuration(driverName string, durationMicros float64) {
 	key := DPCDriverKey{ImageName: driverName}
 
 	// Get or create histogram data for this driver
@@ -618,7 +618,7 @@ func (c *PerfInfoInterruptCollector) recordDPCDuration(driverName string, durati
 }
 
 // cleanupOldISRs removes ISRs older than 10ms to prevent memory leaks
-func (c *PerfInfoInterruptCollector) cleanupOldISRs(currentTime time.Time) {
+func (c *PerfCollector) cleanupOldISRs(currentTime time.Time) {
 	const maxAge = 10 * time.Millisecond
 
 	for key, isr := range c.pendingISRs {
@@ -645,7 +645,7 @@ func extractDriverName(filePath string) string {
 }
 
 // formatCPU formats CPU number as string, using a cache to reduce allocations.
-func (c *PerfInfoInterruptCollector) formatCPU(cpu uint16) string {
+func (c *PerfCollector) formatCPU(cpu uint16) string {
 	if str, ok := c.cpuStringCache[cpu]; ok {
 		return str
 	}
