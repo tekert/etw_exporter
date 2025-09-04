@@ -89,9 +89,9 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	// Always register the global process handler for process name mappings.
 	// Provider: Microsoft-Windows-Kernel-Process ({22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716})
 	processHandler := kernelprocess.NewProcessHandler(eh.stateManager)
-	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 1}] = processHandler.HandleProcessStart  // ProcessStart
-	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 15}] = processHandler.HandleProcessStart // ProcessRundown
-	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 2}] = processHandler.HandleProcessEnd    // ProcessStop
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 1}] = processHandler.HandleProcessStart    // ProcessStart
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 15}] = processHandler.HandleProcessRundown // ProcessRundown
+	eh.routeMap[eventRoute{*MicrosoftWindowsKernelProcessGUID, 2}] = processHandler.HandleProcessEnd      // ProcessStop
 	eh.log.Debug().Msg("Registered global process handler routes")
 
 	// Always register the system config handler.
