@@ -161,7 +161,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	// --- Data Volume Metrics ---
 	nc.bytesSentTotal.Range(func(key, val any) bool {
 		k := key.(dataKey)
-		if processName, ok := stateManager.GetProcessName(k.PID); ok {
+		if processName, ok := stateManager.GetKnownProcessName(k.PID); ok {
 			count := atomic.LoadUint64(val.(*uint64))
 			ch <- prometheus.MustNewConstMetric(nc.bytesSentTotalDesc, prometheus.CounterValue, float64(count),
 				strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol)
@@ -170,7 +170,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 	nc.bytesReceivedTotal.Range(func(key, val any) bool {
 		k := key.(dataKey)
-		if processName, ok := stateManager.GetProcessName(k.PID); ok {
+		if processName, ok := stateManager.GetKnownProcessName(k.PID); ok {
 			count := atomic.LoadUint64(val.(*uint64))
 			ch <- prometheus.MustNewConstMetric(nc.bytesReceivedTotalDesc, prometheus.CounterValue, float64(count),
 				strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol)
@@ -182,7 +182,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	if nc.config.ConnectionHealth {
 		nc.connectionsAttemptedTotal.Range(func(key, val any) bool {
 			k := key.(dataKey)
-			if processName, ok := stateManager.GetProcessName(k.PID); ok {
+			if processName, ok := stateManager.GetKnownProcessName(k.PID); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.connectionsAttemptedTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol)
@@ -191,7 +191,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 		})
 		nc.connectionsAcceptedTotal.Range(func(key, val any) bool {
 			k := key.(dataKey)
-			if processName, ok := stateManager.GetProcessName(k.PID); ok {
+			if processName, ok := stateManager.GetKnownProcessName(k.PID); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.connectionsAcceptedTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol)
@@ -200,14 +200,17 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 		})
 		nc.connectionsFailedTotal.Range(func(key, val any) bool {
 			k := key.(failureKey)
-			processName, ok := stateManager.GetProcessName(k.PID)
-			if !ok && k.PID == 0 { // Handle system-level failures
-				processName, ok = "system", true
-			}
-			if ok {
-				count := atomic.LoadUint64(val.(*uint64))
-				ch <- prometheus.MustNewConstMetric(nc.connectionsFailedTotalDesc, prometheus.CounterValue, float64(count),
-					strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol, strconv.FormatUint(uint64(k.FailureCode), 10))
+			// For failures, we check tracking only if PID > 0. PID 0 is system-level.
+			if k.PID == 0 || stateManager.IsKnownProcess(k.PID) {
+				processName, ok := stateManager.GetProcessName(k.PID)
+				if !ok && k.PID == 0 { // Handle system-level failures
+					processName, ok = "system", true
+				}
+				if ok {
+					count := atomic.LoadUint64(val.(*uint64))
+					ch <- prometheus.MustNewConstMetric(nc.connectionsFailedTotalDesc, prometheus.CounterValue, float64(count),
+						strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName, k.Protocol, strconv.FormatUint(uint64(k.FailureCode), 10))
+				}
 			}
 			return true
 		})
@@ -228,7 +231,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	if nc.config.RetransmissionRate {
 		nc.retransmissionsTotal.Range(func(key, val any) bool {
 			k := key.(retransmissionKey)
-			if processName, ok := stateManager.GetProcessName(k.PID); ok {
+			if processName, ok := stateManager.GetKnownProcessName(k.PID); ok {
 				count := atomic.LoadUint64(val.(*uint64))
 				ch <- prometheus.MustNewConstMetric(nc.retransmissionsTotalDesc, prometheus.CounterValue, float64(count),
 					strconv.FormatUint(uint64(k.PID), 10), strconv.FormatUint(k.StartKey, 10), processName)
@@ -241,6 +244,9 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 // RecordDataSent records bytes sent for a process and protocol.
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordDataSent(pid uint32, startKey uint64, protocol string, bytes uint32) {
+	if !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+		return
+	}
 	key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 	val, _ := nc.bytesSentTotal.LoadOrStore(key, new(uint64))
 	atomic.AddUint64(val.(*uint64), uint64(bytes))
@@ -255,6 +261,9 @@ func (nc *NetCollector) RecordDataSent(pid uint32, startKey uint64, protocol str
 // RecordDataReceived records bytes received for a process and protocol.
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordDataReceived(pid uint32, startKey uint64, protocol string, bytes uint32) {
+	if !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+		return
+	}
 	key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 	val, _ := nc.bytesReceivedTotal.LoadOrStore(key, new(uint64))
 	atomic.AddUint64(val.(*uint64), uint64(bytes))
@@ -270,6 +279,9 @@ func (nc *NetCollector) RecordDataReceived(pid uint32, startKey uint64, protocol
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordConnectionAttempted(pid uint32, startKey uint64, protocol string) {
 	if nc.config.ConnectionHealth {
+		if !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+			return
+		}
 		key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 		val, _ := nc.connectionsAttemptedTotal.LoadOrStore(key, new(uint64))
 		atomic.AddUint64(val.(*uint64), 1)
@@ -279,6 +291,9 @@ func (nc *NetCollector) RecordConnectionAttempted(pid uint32, startKey uint64, p
 // RecordConnectionAccepted records a connection acceptance.
 func (nc *NetCollector) RecordConnectionAccepted(pid uint32, startKey uint64, protocol string) {
 	if nc.config.ConnectionHealth {
+		if !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+			return
+		}
 		key := dataKey{PID: pid, StartKey: startKey, Protocol: protocol}
 		val, _ := nc.connectionsAcceptedTotal.LoadOrStore(key, new(uint64))
 		atomic.AddUint64(val.(*uint64), 1)
@@ -288,6 +303,10 @@ func (nc *NetCollector) RecordConnectionAccepted(pid uint32, startKey uint64, pr
 // RecordConnectionFailed records a connection failure.
 func (nc *NetCollector) RecordConnectionFailed(pid uint32, startKey uint64, protocol string, failureCode uint16) {
 	if nc.config.ConnectionHealth {
+		// We check for tracking only if PID > 0. PID 0 is system-level and always tracked for failures.
+		if pid > 0 && !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+			return
+		}
 		key := failureKey{PID: pid, StartKey: startKey, Protocol: protocol, FailureCode: failureCode}
 		val, _ := nc.connectionsFailedTotal.LoadOrStore(key, new(uint64))
 		atomic.AddUint64(val.(*uint64), 1)
@@ -297,6 +316,9 @@ func (nc *NetCollector) RecordConnectionFailed(pid uint32, startKey uint64, prot
 // RecordRetransmission records a TCP retransmission.
 func (nc *NetCollector) RecordRetransmission(pid uint32, startKey uint64) {
 	if nc.config.RetransmissionRate {
+		if !statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+			return
+		}
 		key := retransmissionKey{PID: pid, StartKey: startKey}
 		val, _ := nc.retransmissionsTotal.LoadOrStore(key, new(uint64))
 		atomic.AddUint64(val.(*uint64), 1)

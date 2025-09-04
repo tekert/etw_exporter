@@ -69,7 +69,7 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 		c.hardPageFaultsPerProcess.Range(func(key, val any) bool {
 			pid := key.(uint32)
 			count := atomic.LoadUint64(val.(*uint64))
-			if processName, ok := stateManager.GetProcessName(pid); ok {
+			if processName, ok := stateManager.GetKnownProcessName(pid); ok {
 				ch <- prometheus.MustNewConstMetric(
 					c.hardPageFaultsPerProcessDesc,
 					prometheus.CounterValue,
@@ -88,7 +88,10 @@ func (c *MemCollector) ProcessHardPageFaultEvent(pid uint32) {
 	atomic.AddUint64(&c.hardPageFaultsTotal, 1)
 
 	if c.config.EnablePerProcess {
-		val, _ := c.hardPageFaultsPerProcess.LoadOrStore(pid, new(uint64))
-		atomic.AddUint64(val.(*uint64), 1)
+		stateManager := statemanager.GetGlobalStateManager()
+		if stateManager.IsKnownProcess(pid) {
+			val, _ := c.hardPageFaultsPerProcess.LoadOrStore(pid, new(uint64))
+			atomic.AddUint64(val.(*uint64), 1)
+		}
 	}
 }

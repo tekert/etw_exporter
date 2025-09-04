@@ -31,6 +31,21 @@ pprof_enabled = true
 
 The `[collectors]` section enables and configures the different ETW data collectors.
 
+### Process Filtering
+
+The `process_filter` section allows you to collect metrics for a specific subset of processes, reducing metric cardinality and focusing on applications of interest.
+
+```toml
+[collectors.process_filter]
+enabled = false
+include_names = ["svchost.exe", "myapp.*\\.exe", "sqlservr.exe"]
+```
+
+- **enabled**: Set to `true` to enable process filtering. If `false`, metrics for all processes are collected.
+- **include_names**: A list of regular expressions to match against process image names (e.g., `notepad.exe`). If filtering is enabled, only processes whose names match one of these patterns will have their metrics exported.
+  - The matching is based on the process's unique "start key". Once a process name matches, all other processes sharing that same start key (even if they have a different PID due to reuse) will also be tracked.
+  - The syntax is Go's standard regular expression format, as documented [here](https://golang.org/s/re2syntax).
+
 ### Disk I/O Collector
 
 The `disk_io` collector tracks disk read, write, and flush operations.
@@ -46,9 +61,9 @@ enabled = true
 - `etw_disk_io_operations_total{disk, operation}`: Total count of I/O operations (`read`, `write`, `flush`) per physical disk.
 - `etw_disk_read_bytes_total{disk}`: Total bytes read per physical disk.
 - `etw_disk_written_bytes_total{disk}`: Total bytes written per physical disk.
-- `etw_disk_process_io_operations_total{process_id, process_name, disk, operation}`: Total count of I/O operations per process and disk.
-- `etw_disk_process_read_bytes_total{process_id, process_name, disk}`: Total bytes read per process and disk.
-- `etw_disk_process_written_bytes_total{process_id, process_name, disk}`: Total bytes written per process and disk.
+- `etw_disk_process_io_operations_total{process_id, process_start_key, process_name, disk, operation}`: Total count of I/O operations per process and disk.
+- `etw_disk_process_read_bytes_total{process_id, process_start_key, process_name, disk}`: Total bytes read per process and disk.
+- `etw_disk_process_written_bytes_total{process_id, process_start_key, process_name, disk}`: Total bytes written per process and disk.
 
 ### Thread Context Switch Collector
 
@@ -65,7 +80,7 @@ enabled = false
 - `etw_thread_context_switches_cpu_total{cpu}`: Total number of context switches per CPU.
 - `etw_thread_context_switches_process_total{process_id, process_name}`: Total number of context switches per process.
 - `etw_thread_context_switch_interval_milliseconds{cpu}`: A histogram of the time between context switches on each CPU.
-- `etw_thread_thread_states_total{state, wait_reason}`: A count of thread state transitions (e.g., `running`, `waiting`).
+- `etw_thread_states_total{state, wait_reason}`: A count of thread state transitions (e.g., `running`, `waiting`).
 
 ### Performance Info Collector
 
@@ -79,7 +94,7 @@ enable_per_driver = false
 enable_smi_detection = false
 ```
 
-- **enabled**: Enables the core system-wide latency and page fault metrics.
+- **enabled**: Enables the core system-wide latency metrics.
 - **enable_per_cpu**: Adds a `cpu` label to DPC queue metrics for per-CPU analysis. This increases metric cardinality.
 - **enable_per_driver**: Adds an `image_name` label to DPC duration metrics to identify which drivers are causing latency. This increases cardinality.
 - **enable_smi_detection**: (Experimental) Enables detection of System Management Interrupts (SMI).
@@ -88,7 +103,6 @@ enable_smi_detection = false
 - `etw_perfinfo_isr_to_dpc_latency_microseconds`: Histogram of the time from an interrupt request (ISR) to the start of its corresponding DPC.
 - `etw_perfinfo_dpc_queued_total`: Total number of DPCs queued for execution.
 - `etw_perfinfo_dpc_executed_total`: Total number of DPCs that began execution.
-- `etw_memory_hard_pagefaults_total`: Total number of hard page faults system-wide.
 - With `enable_per_cpu`:
     - `etw_perfinfo_dpc_queued_cpu_total{cpu}`
     - `etw_perfinfo_dpc_executed_cpu_total{cpu}`
@@ -113,14 +127,31 @@ enable_retrasmission_rate = false
 - **enable_retrasmission_rate**: Enables metrics for tracking TCP retransmissions.
 
 **Metrics Provided:**
-- `etw_network_sent_bytes_total{process_name, protocol}`: Total bytes sent per process and protocol (`tcp`/`udp`).
-- `etw_network_received_bytes_total{process_name, protocol}`: Total bytes received per process and protocol.
+- `etw_network_sent_bytes_total{process_id, process_start_key, process_name, protocol}`: Total bytes sent per process and protocol (`tcp`/`udp`).
+- `etw_network_received_bytes_total{process_id, process_start_key, process_name, protocol}`: Total bytes received per process and protocol.
 - With `enable_connection_stats`:
-    - `etw_network_connections_attempted_total{process_name, protocol}`
-    - `etw_network_connections_accepted_total{process_name, protocol}`
-    - `etw_network_connections_failed_total{process_name, protocol, failure_code}`
+    - `etw_network_connections_attempted_total{process_id, process_start_key, process_name, protocol}`
+    - `etw_network_connections_accepted_total{process_id, process_start_key, process_name, protocol}`
+    - `etw_network_connections_failed_total{process_id, process_start_key, process_name, protocol, failure_code}`
 - With `enable_by_protocol`:
     - `etw_network_traffic_bytes_total{protocol, direction}`
 - With `enable_retrasmission_rate`:
-    - `etw_network_retransmissions_total{process_name}`
-    - `etw_network_retransmission_ratio{process_name}`
+    - `etw_network_retransmissions_total{process_id, process_start_key, process_name}`
+
+### Memory Collector
+
+The `memory` collector tracks memory-related kernel events, such as page faults.
+
+```toml
+[collectors.memory]
+enabled = true
+enable_per_process = true
+```
+
+- **enabled**: Enables the memory collector.
+- **enable_per_process**: Enables per-process hard page fault metrics.
+
+**Metrics Provided:**
+- `etw_memory_hard_pagefaults_total`: Total number of hard page faults system-wide.
+- With `enable_per_process`:
+    - `etw_memory_hard_pagefaults_per_process_total{process_id, process_name}`: Total hard page faults by process.

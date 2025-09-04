@@ -285,8 +285,7 @@ func (c *DiskCollector) collectData() DiskIOMetricsData {
 	stateManager := statemanager.GetGlobalStateManager()
 	for key, countPtr := range c.processIOCount {
 		if countPtr != nil {
-			// Only create metrics for processes that are still known at scrape time
-			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
 				count := atomic.LoadInt64(countPtr)
 				data.ProcessIOCount[key] = ProcessIOCountData{
 					ProcessID:   key.ProcessID,
@@ -303,8 +302,7 @@ func (c *DiskCollector) collectData() DiskIOMetricsData {
 	// Collect process bytes
 	for key, countPtr := range c.processBytesRead {
 		if countPtr != nil {
-			// Only create metrics for processes that are still known at scrape time
-			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesRead[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
@@ -320,8 +318,7 @@ func (c *DiskCollector) collectData() DiskIOMetricsData {
 	// Collect process bytes written
 	for key, countPtr := range c.processBytesWritten {
 		if countPtr != nil {
-			// Only create metrics for processes that are still known at scrape time
-			if processName, isKnown := stateManager.GetProcessName(key.ProcessID); isKnown {
+			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
 				bytes := atomic.LoadInt64(countPtr)
 				data.ProcessBytesWritten[key] = ProcessBytesData{
 					ProcessID:   key.ProcessID,
@@ -382,7 +379,7 @@ func (c *DiskCollector) RecordDiskIO(
 
 	// Record process-level metrics (only for known processes with valid names)
 	if processID > 0 {
-		// Check if process is known by the global state manager
+		// Check if process is tracked by the global state manager
 		stateManager := statemanager.GetGlobalStateManager()
 		if stateManager.IsKnownProcess(processID) {
 			// Record process I/O count

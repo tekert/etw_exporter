@@ -1,9 +1,11 @@
 package statemanager
 
 import (
+	"regexp"
 	"sync"
 	"time"
 
+	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -29,6 +31,11 @@ type KernelStateManager struct {
 	pidToTids         sync.Map // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
 	terminatedThreads sync.Map // key: TID (uint32), value: time.Time
 
+	// Process filtering state
+	processFilterEnabled bool
+	processNameFilters   []*regexp.Regexp
+	trackedStartKeys     sync.Map // key: uint64 (startKey), value: struct{}
+
 	log *phusluadapter.SampledLogger
 	mu  sync.Mutex // Protects cleanup logic
 }
@@ -47,6 +54,27 @@ func GetGlobalStateManager() *KernelStateManager {
 		}
 	})
 	return globalStateManager
+}
+
+// ApplyConfig applies collector configuration to the state manager.
+// This is where regex patterns for process filtering are compiled.
+func (sm *KernelStateManager) ApplyConfig(cfg *config.CollectorConfig) {
+	sm.processFilterEnabled = cfg.ProcessFilter.Enabled
+	if !sm.processFilterEnabled {
+		sm.log.Debug().Msg("Process filtering is disabled. All processes will be tracked.")
+		return
+	}
+
+	sm.processNameFilters = make([]*regexp.Regexp, 0, len(cfg.ProcessFilter.IncludeNames))
+	for _, pattern := range cfg.ProcessFilter.IncludeNames {
+		re, err := regexp.Compile(pattern)
+		if err != nil {
+			sm.log.Error().Err(err).Str("pattern", pattern).Msg("Failed to compile process name filter regex, pattern will be ignored.")
+			continue
+		}
+		sm.processNameFilters = append(sm.processNameFilters, re)
+	}
+	sm.log.Info().Int("patterns", len(sm.processNameFilters)).Msg("Process filtering enabled with patterns.")
 }
 
 // --- Sentinel Collector ---
@@ -221,6 +249,7 @@ func (sm *KernelStateManager) removeProcessStartKeyMapping(pid uint32) {
 	if skVal, skExists := sm.pidToStartKey.Load(pid); skExists {
 		startKey := skVal.(uint64)
 		sm.pidToStartKey.Delete(pid)
+		sm.trackedStartKeys.Delete(startKey) // Also remove from tracked keys
 
 		if pidsVal, pidsExist := sm.startKeyToPids.Load(startKey); pidsExist {
 			pidsMap := pidsVal.(*sync.Map)

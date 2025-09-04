@@ -10,6 +10,7 @@ The exporter provides several categories of metrics, which can be enabled via th
 - **Thread Scheduling**: Collects data on context switches, thread states, and scheduling latency.
 - **Interrupt & DPC Latency**: Measures low-level kernel latencies, including ISR-to-DPC latency and DPC execution time by driver.
 - **Network**: Monitors TCP/UDP traffic, connection stats, and retransmissions by process.
+- **Memory**: Tracks memory events like hard page faults.
 
 > If you need more metrics just open an issue, there is tons of additional info from the kernel, the config exposed here is the one that requieres less cardinality for metrics.
 
@@ -18,6 +19,8 @@ Configurable per process filters will be in v0.4
 ## Configuration
 
 The exporter is configured using a TOML file. Below is an example configuration. For a full list of options, see `config/CONFIG.md` and `config/LOGCONFIG.md`.
+
+**Note:** The exporter supports filtering metrics by process name using regular expressions. See the `[collectors.process_filter]` section in `config/CONFIG.md` for details.
 
 ```toml
 # Example config.toml
@@ -28,6 +31,11 @@ metrics_path = "/metrics"
 pprof_enabled = true
 
 [collectors]
+# Enable process filtering to only collect metrics for specific processes
+[collectors.process_filter]
+enabled = true
+include_names = ["svchost.exe", "my_app.*"]
+
 [collectors.disk_io]
 enabled = true
 
@@ -42,6 +50,9 @@ enable_per_driver = true # Useful for debugging driver latency
 enabled = true
 enable_connection_stats = true
 
+[collectors.memory]
+enabled = true
+
 [logging.defaults]
 level = "info"
 
@@ -53,10 +64,12 @@ enabled = true
 ### Configuration Options
 - **`[server]`**: Configures the HTTP endpoint for Prometheus scrapes and `pprof`.
 - **`[collectors]`**: Enables or disables specific metric collectors.
+  - `process_filter`: Filters all per-process metrics based on regular expressions.
   - `disk_io`: Disk activity metrics.
   - `threadcs`: Thread context switch and state metrics.
   - `perfinfo`: Kernel interrupt and DPC latency metrics.
   - `network`: TCP/UDP network metrics.
+  - `memory`: Memory management metrics, like hard page faults.
 - **`[logging]`**: Configures logging outputs. Supported types include `console`, `file`, `syslog`, and `eventlog`. See `config/LOGCONFIG.md` for details.
 
 ## Usage

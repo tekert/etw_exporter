@@ -248,7 +248,7 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 		if countPtr != nil {
 			// Only create metrics for processes that are still known at scrape time
 			// PID-Name mappings are retained until after scrap by the state manager.
-			if processName, isKnown := stateManager.GetProcessName(pid); isKnown {
+			if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
 				count := atomic.LoadInt64(countPtr)
 				data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
 					ProcessID:   pid,
@@ -308,8 +308,7 @@ func (c *ThreadCollector) RecordContextSwitch(
 	// Record context switch per process (concurrent map)
 	if processID > 0 {
 		stateManager := statemanager.GetGlobalStateManager()
-		// Only create metrics for processes that are still known at scrape time
-		// PID-Name mappings are retained until after scrap by the state manager.
+		// Only create metrics for processes that are tracked
 		if stateManager.IsKnownProcess(processID) {
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)

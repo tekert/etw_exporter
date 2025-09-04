@@ -41,8 +41,22 @@ type ServerConfig struct {
 	PprofEnabled bool `toml:"pprof_enabled"`
 }
 
+// ProcessFilterConfig contains settings for filtering metrics by process.
+type ProcessFilterConfig struct {
+	// Enable process filtering (default: false). If false, metrics for all processes are collected.
+	Enabled bool `toml:"enabled"`
+
+	// List of regular expressions to match against process names (e.g., "svchost.exe", "sqlservr.*").
+	// If enabled, only metrics for processes whose names match one of these patterns will be collected.
+	// The format is Go's standard regular expression syntax.
+	IncludeNames []string `toml:"include_names"`
+}
+
 // CollectorConfig defines which collectors are enabled and their settings
 type CollectorConfig struct {
+	// ProcessFilter configuration
+	ProcessFilter ProcessFilterConfig `toml:"process_filter"`
+
 	// Disk I/O collector configuration
 	DiskIO DiskIOConfig `toml:"disk_io"`
 
@@ -253,6 +267,10 @@ func DefaultConfig() *AppConfig {
 			PprofEnabled:  true,
 		},
 		Collectors: CollectorConfig{
+			ProcessFilter: ProcessFilterConfig{
+				Enabled:      false,
+				IncludeNames: []string{},
+			},
 			DiskIO: DiskIOConfig{
 				Enabled: true,
 			},

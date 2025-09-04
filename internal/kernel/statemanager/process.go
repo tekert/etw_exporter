@@ -38,7 +38,21 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 // AddProcess adds or updates process information. If the process already exists,
 // it updates its details and refreshes its LastSeen timestamp. This handles both
 // new processes and updates from rundown events.
-func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, name string, parentPID uint32, eventTimestamp time.Time) {
+func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, imageName string, parentPID uint32, eventTimestamp time.Time) {
+	// If process filtering is enabled, check if this process should be tracked.
+	if sm.processFilterEnabled && startKey != 0 {
+		// Check if the start key is already tracked to avoid re-evaluating regex.
+		if _, isTracked := sm.trackedStartKeys.Load(startKey); !isTracked {
+			for _, re := range sm.processNameFilters {
+				if re.MatchString(imageName) {
+					sm.trackedStartKeys.Store(startKey, struct{}{})
+					sm.log.Debug().Str("process_name", imageName).Uint64("start_key", startKey).Msg("Process start key is now tracked due to name match.")
+					break // Found a match, no need to check other patterns.
+				}
+			}
+		}
+	}
+
 	// If the process was recently terminated, remove it from the terminated list
 	// as it might be a PID reuse scenario.
 	sm.terminatedProcesses.Delete(pid)
@@ -54,7 +68,7 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, name strin
 		// Update existing process information
 		info := val.(*ProcessInfo)
 		info.mu.Lock()
-		info.Name = name
+		info.Name = imageName
 		info.ParentPID = parentPID
 		info.LastSeen = eventTimestamp
 		if startKey != 0 {
@@ -67,7 +81,7 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, name strin
 	sm.processes.Store(pid, &ProcessInfo{
 		PID:       pid,
 		StartKey:  startKey,
-		Name:      name,
+		Name:      imageName,
 		StartTime: eventTimestamp,
 		LastSeen:  eventTimestamp,
 		ParentPID: parentPID,
@@ -75,7 +89,7 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, name strin
 
 	sm.log.Debug().
 		Uint32("pid", pid).
-		Str("name", name).
+		Str("name", imageName).
 		Uint32("parent_pid", parentPID).
 		Msg("Process added to collector")
 }
@@ -94,8 +108,30 @@ func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32) {
 // This is a fast, allocation-free check used by collectors to decide whether
 // to create metrics for a given process.
 func (sm *KernelStateManager) IsKnownProcess(pid uint32) bool {
-	_, exists := sm.processes.Load(pid)
-	return exists
+	// If filtering is not enabled, track all known processes.
+	if !sm.processFilterEnabled {
+		_, exists := sm.processes.Load(pid)
+		return exists
+	}
+
+	// If filtering is enabled, only track processes with a matching start key.
+	startKey, ok := sm.GetProcessStartKey(pid)
+	if !ok {
+		return false // Cannot track if we don't know its start key.
+	}
+
+	_, isTracked := sm.trackedStartKeys.Load(startKey)
+	return isTracked
+}
+
+// GetKnownProcessName is a convenience helper that combines checking if a process
+// is known (and tracked) with retrieving its name. It returns the name and true
+// only if the process is known/tracked and its name can be resolved.
+func (sm *KernelStateManager) GetKnownProcessName(pid uint32) (string, bool) {
+	if !sm.IsKnownProcess(pid) {
+		return "", false
+	}
+	return sm.GetProcessName(pid)
 }
 
 // GetProcessName returns the process name for a given PID.

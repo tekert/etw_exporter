@@ -59,6 +59,9 @@ func (e *ETWExporter) setupETW() {
 	e.eventHandler = etwmain.NewEventHandler(&e.config.Collectors)
 	e.log.Debug().Msg("- Event handler created")
 
+	// Apply process filter configuration to the state manager
+	e.eventHandler.GetStateManager().ApplyConfig(&e.config.Collectors)
+
 	e.log.Debug().Msg("- ETW session manager creation started")
 	e.etwSession = etwmain.NewSessionManager(e.eventHandler, &e.config.Collectors)
 	e.log.Debug().Msg("- ETW session manager created")

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -73,9 +74,17 @@ filename = "app.log"
 			name:   "invalid no collectors enabled",
 			config: DefaultConfig(),
 			setupFunc: func(c *AppConfig) {
-				c.Collectors.DiskIO.Enabled = false
-				c.Collectors.ThreadCS.Enabled = false
-				c.Collectors.PerfInfo.Enabled = false
+				// Use reflection to iterate over all fields in the Collectors struct
+				collectorsValue := reflect.ValueOf(&c.Collectors).Elem()
+				for i := 0; i < collectorsValue.NumField(); i++ {
+					field := collectorsValue.Field(i)
+					if field.Kind() == reflect.Struct {
+						enabledField := field.FieldByName("Enabled")
+						if enabledField.IsValid() && enabledField.CanSet() && enabledField.Kind() == reflect.Bool {
+							enabledField.SetBool(false)
+						}
+					}
+				}
 			},
 			expectErr: true,
 		},
@@ -111,6 +120,28 @@ enabled = false
 				}
 				if !c.Collectors.DiskIO.Enabled {
 					t.Error("Expected DiskIO to be enabled")
+				}
+			},
+		},
+		{
+			name: "valid process filter config",
+			configTOML: `
+[collectors.process_filter]
+enabled = true
+include_names = ["svchost.exe", "test.*"]
+
+[collectors.disk_io]
+enabled = true
+`,
+			validate: func(t *testing.T, c *AppConfig) {
+				if !c.Collectors.ProcessFilter.Enabled {
+					t.Error("Expected ProcessFilter to be enabled")
+				}
+				if len(c.Collectors.ProcessFilter.IncludeNames) != 2 {
+					t.Errorf("Expected 2 include names, got %d", len(c.Collectors.ProcessFilter.IncludeNames))
+				}
+				if c.Collectors.ProcessFilter.IncludeNames[0] != "svchost.exe" {
+					t.Errorf("Expected 'svchost.exe', got %s", c.Collectors.ProcessFilter.IncludeNames[0])
 				}
 			},
 		},

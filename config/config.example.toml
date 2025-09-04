@@ -11,20 +11,32 @@ metrics_path = "/metrics"
 pprof_enabled = true
 
 [collectors]
+
+[collectors.process_filter]
+enabled = false
+include_names = []
+
 [collectors.disk_io]
 enabled = true
+
 [collectors.threadcs]
 enabled = false
+
 [collectors.perfinfo]
-enabled = true
-enable_per_cpu = false
+enabled = false
 enable_per_driver = false
+enable_per_cpu = false
 enable_smi_detection = false
+
 [collectors.network]
 enabled = false
 enable_connection_stats = false
 enable_by_protocol = false
 enable_retrasmission_rate = false
+
+[collectors.memory]
+enabled = true
+enable_per_process = true
 
 [logging]
 lib_level = "warn"
@@ -41,7 +53,7 @@ enabled = true
 [logging.outputs.console]
 fast_io = false
 format = "auto"
-color_output = true
+color_output = false
 quote_string = true
 writer = "stderr"
 async = false
