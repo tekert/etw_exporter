@@ -42,7 +42,7 @@ func NewMemoryCollector(config *config.MemoryConfig) *MemCollector {
 		c.hardPageFaultsPerProcessDesc = prometheus.NewDesc(
 			"etw_memory_hard_pagefaults_per_process_total",
 			"Total hard page faults by process.",
-			[]string{"process_id", "process_name"}, nil)
+			[]string{"process_id", "process_start_key", "process_name"}, nil)
 	}
 
 	return c
@@ -70,11 +70,13 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 			pid := key.(uint32)
 			count := atomic.LoadUint64(val.(*uint64))
 			if processName, ok := stateManager.GetKnownProcessName(pid); ok {
+				startKey, _ := stateManager.GetProcessStartKey(pid)
 				ch <- prometheus.MustNewConstMetric(
 					c.hardPageFaultsPerProcessDesc,
 					prometheus.CounterValue,
 					float64(count),
 					strconv.FormatUint(uint64(pid), 10),
+					strconv.FormatUint(startKey, 10),
 					processName,
 				)
 			}

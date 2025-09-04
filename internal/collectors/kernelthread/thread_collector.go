@@ -51,7 +51,7 @@ type ThreadCollector struct {
 // ThreadMetricsData holds a snapshot of aggregated data for a single scrape.
 type ThreadMetricsData struct {
 	ContextSwitchesPerCPU     map[uint16]int64
-	ContextSwitchesPerProcess map[uint32]ProcessContextSwitches
+	ContextSwitchesPerProcess []ProcessContextSwitches
 	ThreadStates              map[ThreadStateKey]int64
 	ContextSwitchIntervals    map[uint16]*IntervalStats // Use pointer to avoid copying the lock
 }
@@ -59,6 +59,7 @@ type ThreadMetricsData struct {
 // ProcessContextSwitches holds context switch data for a process.
 type ProcessContextSwitches struct {
 	ProcessID   uint32
+	StartKey    uint64
 	ProcessName string
 	Count       int64
 }
@@ -137,7 +138,7 @@ func NewThreadCSCollector() *ThreadCollector {
 		contextSwitchesPerProcessDesc: prometheus.NewDesc(
 			"etw_thread_context_switches_process_total",
 			"Total number of context switches per process",
-			[]string{"process_id", "process_name"}, nil,
+			[]string{"process_id", "process_start_key", "process_name"}, nil,
 		),
 		contextSwitchIntervalsDesc: prometheus.NewDesc(
 			"etw_thread_context_switch_interval_milliseconds",
@@ -190,6 +191,7 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(procData.Count),
 			strconv.FormatUint(uint64(procData.ProcessID), 10),
+			strconv.FormatUint(procData.StartKey, 10),
 			procData.ProcessName,
 		)
 	}
@@ -228,7 +230,7 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 func (c *ThreadCollector) collectData() ThreadMetricsData {
 	data := ThreadMetricsData{
 		ContextSwitchesPerCPU:     make(map[uint16]int64),
-		ContextSwitchesPerProcess: make(map[uint32]ProcessContextSwitches),
+		ContextSwitchesPerProcess: make([]ProcessContextSwitches, 0),
 		ThreadStates:              make(map[ThreadStateKey]int64),
 		ContextSwitchIntervals:    make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
 	}
@@ -250,11 +252,13 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 			// PID-Name mappings are retained until after scrap by the state manager.
 			if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
 				count := atomic.LoadInt64(countPtr)
-				data.ContextSwitchesPerProcess[pid] = ProcessContextSwitches{
+				startKey, _ := stateManager.GetProcessStartKey(pid)
+				data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
 					ProcessID:   pid,
+					StartKey:    startKey,
 					ProcessName: processName,
 					Count:       count,
-				}
+				})
 			}
 		}
 		return true

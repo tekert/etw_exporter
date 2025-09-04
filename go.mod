@@ -3,11 +3,9 @@ module etw_exporter
 go 1.24.5
 
 
-replace github.com/phuslu/log => github.com/tekert/phuslulog v1.0.120-beta
-
 require (
 	github.com/BurntSushi/toml v1.5.0
-	github.com/phuslu/log v1.0.119
+	github.com/phuslu/log v1.0.120
 	github.com/prometheus/client_golang v1.23.0
 	github.com/tekert/goetw v0.7.9-beta1
 	golang.org/x/sys v0.33.0
