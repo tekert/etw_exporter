@@ -18,6 +18,20 @@ type processIdentifier struct {
 	StartKey uint64
 }
 
+
+// Key Correlations Between Disk and File Events:
+// [File Event]						[Disk Event] 			[Points To]
+// Irp 								IORequestPacket			Same _IRP structure
+// FileObject 						FileObject				Same _FILE_OBJECT structures
+// IOFlags 							IrpFlags				Same IRP.Flags field
+//
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_irp
+// typedef struct _IRP
+//
+// https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ns-wdm-_file_object
+// typedef struct _FILE_OBJECT
+//
+
 // Handler handles disk I/O events from ETW providers.
 // This handler processes ETW events from multiple providers related to disk and file operations:
 //
