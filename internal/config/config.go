@@ -309,7 +309,7 @@ func DefaultConfig() *AppConfig {
 					Console: &ConsoleConfig{
 						FastIO:      false,
 						Format:      "auto",
-						ColorOutput: false,
+						ColorOutput: true,
 						QuoteString: true,
 						Writer:      "stderr",
 						Async:       false,
