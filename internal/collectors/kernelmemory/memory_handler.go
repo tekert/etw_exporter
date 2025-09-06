@@ -61,10 +61,9 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 	}
 
 	// Resolve Thread ID to Process ID using the global thread handler.
-	// This is reliable because the 'memory' provider group now enables the THREAD kernel flag.
 	pid, isKnown := h.stateManager.GetProcessIDForThread(uint32(threadID))
 	if !isKnown {
-		h.log.Debug().Uint32("tid", uint32(threadID)).Msg("Could not resolve PID for thread causing page fault")
+		h.log.SampledWarn("pagefault_pid_error").Uint32("tid", uint32(threadID)).Msg("Could not resolve PID for thread causing page fault")
 		return nil // Cannot attribute the fault without a known PID.
 	}
 

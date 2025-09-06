@@ -503,7 +503,7 @@ func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 	}
 
 	driverName := imageInfo.ImageName
-	c.log.Debug().Str("driver_name", driverName).Msg("Image unloaded, removing associated metrics")
+	c.log.Trace().Str("driver_name", driverName).Msg("Image unloaded, removing associated metrics")
 
 	// Remove all metrics associated with this driver.
 	c.removeDriverMetrics(driverName)
