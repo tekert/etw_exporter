@@ -60,34 +60,32 @@ func (c *Handler) GetCustomCollector() *ThreadCollector {
 	return c.customCollector
 }
 
-// // GetProcessID resolves a thread ID to its parent process ID.
-// // It returns the process ID and a boolean indicating if the mapping was found.
-// func (c *ThreadHandler) GetProcessID(threadID uint32) (uint32, bool) {
-// 	pid, exists := c.threadToProcess.Load(threadID)
-// 	if !exists {
-// 		return 0, false
-// 	}
-// 	return pid.(uint32), true
-// }
-
 // HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
 // This is a high-performance "fast path" that reads directly from the UserData
 // buffer using known offsets, bypassing the creation of an EventRecordHelper and
 // the associated parsing overhead.
 //
-// CSwitch MOF Layout (V2-V4):
-// - NewThreadId (uint32): offset 0
-// - OldThreadId (uint32): offset 4
-// - NewThreadPriority (int8): offset 8
-// - OldThreadPriority (int8): offset 9
-// - PreviousCState (uint8): offset 10
-// - SpareByte (int8): offset 11
-// - OldThreadWaitReason (int8): offset 12
-// - OldThreadWaitMode (int8): offset 13
-// - OldThreadState (int8): offset 14
-// - OldThreadWaitIdealProcessor (int8): offset 15
-// - NewThreadWaitTime (uint32): offset 16
-// - Reserved (uint32): offset 20
+// ETW Event Details:
+//   - Provider Name: NT Kernel Logger
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 36
+//   - Event Name(s): CSwitch
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
+//
+// Schema (from MOF):
+//   - NewThreadId (uint32): The thread identifier of the thread being switched to. Offset: 0.
+//   - OldThreadId (uint32): The thread identifier of the thread being switched out. Offset: 4.
+//   - NewThreadPriority (int8): The priority of the new thread. Offset: 8.
+//   - OldThreadPriority (int8): The priority of the old thread. Offset: 9.
+//   - PreviousCState (uint8): The C-state that was last used by the processor. Offset: 10.
+//   - SpareByte (int8): Not used. Offset: 11.
+//   - OldThreadWaitReason (int8): The reason why the old thread was waiting. Offset: 12.
+//   - OldThreadWaitMode (int8): The wait mode (KernelMode or UserMode) of the old thread. Offset: 13.
+//   - OldThreadState (int8): The state of the old thread (e.g., Waiting, Terminated). Offset: 14.
+//   - OldThreadWaitIdealProcessor (int8): The ideal processor for the old thread to wait on. Offset: 15.
+//   - NewThreadWaitTime (uint32): The wait time for the new thread. Offset: 16.
+//   - Reserved (uint32): Reserved for future use. Offset: 20.
 func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// Read properties using direct offsets.
 	newThreadID, err := er.GetUint32At(0)
@@ -137,25 +135,26 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 // which occur when the Windows scheduler switches execution from one thread to another.
 //
 // ETW Event Details:
-// - Provider: NT Kernel Logger (CSwitch)
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Event Type: 36
-// - Event Class: CSwitch_V2, CSwitch_V3, CSwitch_V4 (varies by Windows version)
+//   - Provider Name: NT Kernel Logger
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 36
+//   - Event Name(s): CSwitch
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
 //
-// MOF Class Definition (from gen_mof_kerneldef.go):
-// CSwitch event properties:
-// - NewThreadId (uint32): Thread ID being switched to (format: hex)
-// - OldThreadId (uint32): Thread ID being switched from (format: hex)
-// - NewThreadPriority (int8): Priority of incoming thread
-// - OldThreadPriority (int8): Priority of outgoing thread
-// - PreviousCState (uint8): Previous C-state of the processor
-// - SpareByte (int8): Reserved/spare byte
-// - OldThreadWaitReason (int8): Why the old thread was waiting
-// - OldThreadWaitMode (int8): Wait mode of old thread
-// - OldThreadState (int8): State of the old thread
-// - OldThreadWaitIdealProcessor (int8): Ideal processor for old thread
-// - NewThreadWaitTime (uint32): Wait time for new thread (format: hex)
-// - Reserved (uint32): Reserved field
+// Schema (from MOF):
+//   - NewThreadId (uint32): The thread identifier of the thread being switched to.
+//   - OldThreadId (uint32): The thread identifier of the thread being switched out.
+//   - NewThreadPriority (int8): The priority of the new thread.
+//   - OldThreadPriority (int8): The priority of the old thread.
+//   - PreviousCState (uint8): The C-state that was last used by the processor.
+//   - SpareByte (int8): Not used.
+//   - OldThreadWaitReason (int8): The reason why the old thread was waiting.
+//   - OldThreadWaitMode (int8): The wait mode (KernelMode or UserMode) of the old thread.
+//   - OldThreadState (int8): The state of the old thread (e.g., Waiting, Terminated).
+//   - OldThreadWaitIdealProcessor (sint8): The ideal processor for the old thread to wait on.
+//   - NewThreadWaitTime (uint32): The wait time for the new thread.
+//   - Reserved (uint32): Reserved for future use.
 //
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
@@ -203,18 +202,19 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 // (transitions from a waiting state to ready state).
 //
 // ETW Event Details:
-// - Provider: NT Kernel Logger (CSwitch)
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Event Type: 50
-// - Event Class: ReadyThread
+//   - Provider Name: NT Kernel Logger
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 50
+//   - Event Name(s): ReadyThread
+//   - Event Version(s): 2
+//   - Schema: MOF
 //
-// MOF Class Definition (from gen_mof_kerneldef.go):
-// ReadyThread event properties:
-// - TThreadId (uint32): Thread ID becoming ready (format: hex)
-// - AdjustReason (int8): Reason for any priority adjustment
-// - AdjustIncrement (int8): Amount of priority adjustment
-// - Flag (int8): Additional state flags
-// - Reserved (int8): Reserved field
+// Schema (from MOF):
+//   - TThreadId (uint32): The thread identifier of the thread being readied for execution.
+//   - AdjustReason (sint8): The reason for the priority boost.
+//   - AdjustIncrement (sint8): The value by which the priority is being adjusted.
+//   - Flag (sint8): State flags indicating if the kernel stack or process address space is swapped out.
+//   - Reserved (sint8): Reserved for future use.
 //
 // This event indicates a thread is transitioning from a wait state to ready state,
 // meaning it's eligible for scheduling but not yet running.
@@ -224,33 +224,35 @@ func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	return nil
 }
 
-// HandleThreadStart processes thread start events.
-// This handler processes ETW events when a new thread is created and started
-// within a process.
+// HandleThreadStart processes thread creation and rundown events.
+// This handler processes ETW events when a new thread is created (Start) or when
+// an existing thread is enumerated during a session start (DCStart/Rundown).
+// The rundown events are crucial for populating the initial state of all running
+// threads when the exporter starts, preventing "unknown thread" errors.
 //
 // ETW Event Details:
-// - Provider: NT Kernel Logger (CSwitch)
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Event Types: 1, 3 (Thread start events)
-// - Event Class: Thread_V2_TypeGroup1, Thread_V3_TypeGroup1, Thread_TypeGroup1
+//   - Provider Name: NT Kernel Logger
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 1 (Start), 3 (DCStart/Rundown)
+//   - Event Name(s): Thread_V2_TypeGroup1, Thread_V3_TypeGroup1, Thread_TypeGroup1
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// Thread start event properties:
-// - ProcessId (uint32): Process ID that owns the thread (format: hex)
-// - TThreadId (uint32): Thread ID of the new thread (format: hex)
-// - StackBase (pointer): Base address of the thread stack
-// - StackLimit (pointer): Limit address of the thread stack
-// - UserStackBase (pointer): User-mode stack base address
-// - UserStackLimit (pointer): User-mode stack limit address
-// - StartAddr (pointer): Thread start address
-// - Win32StartAddr (pointer): Win32 start address for the thread
-// - TebBase (pointer): Thread Environment Block base address
-// - SubProcessTag (uint32): Sub-process tag (format: hex)
-// - BasePriority (uint8): Base priority of the thread
-// - PagePriority (uint8): Page priority
-// - IoPriority (uint8): I/O priority
-// - ThreadFlags (uint8): Thread creation flags
-// - ThreadName (string): Thread name (if available, V4+ only)
+// Schema (from MOF):
+//   - ProcessId (uint32): Process identifier of the thread's parent process.
+//   - TThreadId (uint32): Thread identifier of the newly created or enumerated thread.
+//   - StackBase (pointer): Base address of the thread's kernel-mode stack.
+//   - StackLimit (pointer): Limit of the thread's kernel-mode stack.
+//   - UserStackBase (pointer): Base address of the thread's user-mode stack.
+//   - UserStackLimit (pointer): Limit of the thread's user-mode stack.
+//   - Affinity (uint32): The set of processors on which the thread is allowed to run.
+//   - Win32StartAddr (pointer): Starting address of the function to be executed by this thread.
+//   - TebBase (pointer): Thread Environment Block (TEB) base address.
+//   - SubProcessTag (uint32): Identifies the service if the thread is owned by a service.
+//   - BasePriority (uint8): The scheduler priority of the thread.
+//   - PagePriority (uint8): A memory page priority hint for memory pages accessed by the thread.
+//   - IoPriority (uint8): An I/O priority hint for scheduling I/O generated by the thread.
+//   - ThreadFlags (uint8): Not used.
 //
 // This handler maintains the thread-to-process mapping for context switch tracking.
 func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
@@ -266,20 +268,33 @@ func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	return nil
 }
 
-// HandleThreadEnd processes thread end events.
-// This handler processes ETW events when a thread terminates and is cleaned up.
+// HandleThreadEnd processes thread termination and rundown-end events.
+// This handler processes ETW events when a thread terminates (End) or when the
+// enumeration of existing threads concludes at the end of a session (DCEnd).
 //
 // ETW Event Details:
-// - Provider: NT Kernel Logger (CSwitch)
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Event Types: 2, 4 (Thread end events)
-// - Event Class: Thread_V2_TypeGroup1, Thread_V3_TypeGroup1, Thread_TypeGroup1
+//   - Provider Name: NT Kernel Logger
+//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
+//   - Event ID(s): 2 (End), 4 (DCEnd)
+//   - Event Name(s): Thread_V2_TypeGroup1, Thread_V3_TypeGroup1, Thread_TypeGroup1
+//   - Event Version(s): 2, 3, 4
+//   - Schema: MOF
 //
-// MOF Class Definition:
-// Thread end events have the same structure as start events but indicate termination.
-// Key properties used:
-// - TThreadId (uint32): Thread ID being terminated (format: hex)
-// - ProcessId (uint32): Process ID that owned the thread (format: hex)
+// Schema (from MOF):
+//   - ProcessId (uint32): Process identifier of the thread's parent process.
+//   - TThreadId (uint32): Thread identifier of the terminated thread.
+//   - StackBase (pointer): Base address of the thread's kernel-mode stack.
+//   - StackLimit (pointer): Limit of the thread's kernel-mode stack.
+//   - UserStackBase (pointer): Base address of the thread's user-mode stack.
+//   - UserStackLimit (pointer): Limit of the thread's user-mode stack.
+//   - Affinity (uint32): The set of processors on which the thread is allowed to run.
+//   - Win32StartAddr (pointer): Starting address of the function to be executed by this thread.
+//   - TebBase (pointer): Thread Environment Block (TEB) base address.
+//   - SubProcessTag (uint32): Identifies the service if the thread is owned by a service.
+//   - BasePriority (uint8): The scheduler priority of the thread.
+//   - PagePriority (uint8): A memory page priority hint for memory pages accessed by the thread.
+//   - IoPriority (uint8): An I/O priority hint for scheduling I/O generated by the thread.
+//   - ThreadFlags (uint8): Not used.
 //
 // This handler cleans up the thread-to-process mapping and records termination metrics.
 func (c *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
@@ -354,13 +369,13 @@ func GetWaitReasonString(waitReason uint8) string {
 	case 20:
 		return "WrRendezvous"
 	case 21:
-		return "Spare2"
+		return "WrKeyedEvent"
 	case 22:
-		return "Spare3"
+		return "WrTerminated"
 	case 23:
-		return "Spare4"
+		return "WrProcessInSwap"
 	case 24:
-		return "Spare5"
+		return "WrCpuRateControl"
 	case 25:
 		return "WrCalloutStack"
 	case 26:
@@ -385,6 +400,8 @@ func GetWaitReasonString(waitReason uint8) string {
 		return "WrGuardedMutex"
 	case 36:
 		return "WrRundown"
+	case 37:
+		return "MaximumWaitReason"
 	default:
 		return "Unknown"
 	}
@@ -399,8 +416,9 @@ func GetAllWaitReasonStrings() []string {
 		"Suspended", "UserRequest", "WrExecutive", "WrFreePage", "WrPageIn",
 		"WrPoolAllocation", "WrDelayExecution", "WrSuspended", "WrUserRequest",
 		"WrEventPair", "WrQueue", "WrLpcReceive", "WrLpcReply", "WrVirtualMemory",
-		"WrPageOut", "WrRendezvous", "WrCalloutStack", "WrKernel", "WrResource",
+		"WrPageOut", "WrRendezvous", "WrKeyedEvent", "WrTerminated", "WrProcessInSwap",
+		"WrCpuRateControl", "WrCalloutStack", "WrKernel", "WrResource",
 		"WrPushLock", "WrMutex", "WrQuantumEnd", "WrDispatchInt", "WrPreempted",
-		"WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown",
+		"WrYieldExecution", "WrFastMutex", "WrGuardedMutex", "WrRundown", "MaximumWaitReason",
 	}
 }
