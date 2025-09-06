@@ -18,7 +18,6 @@ type processIdentifier struct {
 	StartKey uint64
 }
 
-
 // Key Correlations Between Disk and File Events:
 // [File Event]						[Disk Event] 			[Points To]
 // Irp 								IORequestPacket			Same _IRP structure
@@ -299,13 +298,13 @@ func (d *Handler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {edd08927-9cc4-4e65-b970-c2560fb5c289}
 //   - Event ID(s): 12
 //   - Event Name(s): Create
-//   - Event Version(s): 2
+//   - Event Version(s): 0, 1
 //   - Schema: Manifest (XML)
 //
-// Schema (from manifest):
+// Schema (from manifest, v1):
 //   - Irp (win:Pointer): Pointer to the I/O request packet.
 //   - FileObject (win:Pointer): Pointer to the file object for correlation.
-//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O (V1 template).
+//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O.
 //   - CreateOptions (win:UInt32): Create options.
 //   - CreateAttributes (win:UInt32): Create attributes.
 //   - ShareAccess (win:UInt32): Share access.
@@ -344,14 +343,14 @@ func (d *Handler) HandleFileCreate(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {edd08927-9cc4-4e65-b970-c2560fb5c289}
 //   - Event ID(s): 14
 //   - Event Name(s): Close
-//   - Event Version(s): 2
+//   - Event Version(s): 0, 1
 //   - Schema: Manifest (XML)
 //
-// Schema (from manifest):
+// Schema (from manifest, v1):
 //   - Irp (win:Pointer): Pointer to the I/O request packet.
 //   - FileObject (win:Pointer): Pointer to the file object for correlation.
 //   - FileKey (win:Pointer): File key.
-//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O (V1 template).
+//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O.
 //
 // This handler removes the FileObject-to-ProcessID mapping when a file handle is
 // closed to prevent the map from growing indefinitely and holding stale entries.
@@ -380,18 +379,18 @@ func (d *Handler) HandleFileClose(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {edd08927-9cc4-4e65-b970-c2560fb5c289}
 //   - Event ID(s): 16
 //   - Event Name(s): Write
-//   - Event Version(s): 2
+//   - Event Version(s): 0, 1
 //   - Schema: Manifest (XML)
 //
-// Schema (from manifest):
+// Schema (from manifest, v1):
 //   - ByteOffset (win:UInt64): Offset into the file where the I/O begins.
 //   - Irp (win:Pointer): Pointer to the I/O request packet.
 //   - FileObject (win:Pointer): Pointer to the file object for correlation.
 //   - FileKey (win:Pointer): File key.
-//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O (V1 template).
+//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O.
 //   - IOSize (win:UInt32): I/O size in bytes.
 //   - IOFlags (win:UInt32): I/O flags.
-//   - ExtraFlags (win:UInt32): Extra flags (V1 template).
+//   - ExtraFlags (win:UInt32): Extra flags.
 //
 // This handler ensures the FileObject-to-ProcessID mapping is kept up-to-date, as
 // a file handle might be used by a process long after it was created.
@@ -425,18 +424,18 @@ func (d *Handler) HandleFileWrite(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {edd08927-9cc4-4e65-b970-c2560fb5c289}
 //   - Event ID(s): 15
 //   - Event Name(s): Read
-//   - Event Version(s): 2
+//   - Event Version(s): 0, 1
 //   - Schema: Manifest (XML)
 //
-// Schema (from manifest):
+// Schema (from manifest, v1):
 //   - ByteOffset (win:UInt64): Offset into the file where the I/O begins.
 //   - Irp (win:Pointer): Pointer to the I/O request packet.
 //   - FileObject (win:Pointer): Pointer to the file object for correlation.
 //   - FileKey (win:Pointer): File key.
-//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O (V1 template).
+//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O.
 //   - IOSize (win:UInt32): I/O size in bytes.
 //   - IOFlags (win:UInt32): I/O flags.
-//   - ExtraFlags (win:UInt32): Extra flags (V1 template).
+//   - ExtraFlags (win:UInt32): Extra flags.
 //
 // This handler ensures the FileObject-to-ProcessID mapping is kept up-to-date, as
 // a file handle might be used by a process long after it was created.
@@ -470,15 +469,15 @@ func (d *Handler) HandleFileRead(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {edd08927-9cc4-4e65-b970-c2560fb5c289}
 //   - Event ID(s): 26
 //   - Event Name(s): DeletePath
-//   - Event Version(s): 2
+//   - Event Version(s): 0, 1
 //   - Schema: Manifest (XML)
 //
-// Schema (from manifest):
+// Schema (from manifest, v1):
 //   - Irp (win:Pointer): Pointer to the I/O request packet.
 //   - FileObject (win:Pointer): Pointer to the file object for correlation.
 //   - FileKey (win:Pointer): File key.
 //   - ExtraInformation (win:Pointer): Extra information.
-//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O (V1 template).
+//   - IssuingThreadId (win:UInt32): Thread ID that issued the I/O.
 //   - InfoClass (win:UInt32): Information class.
 //   - FilePath (win:UnicodeString): File path.
 //

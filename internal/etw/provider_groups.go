@@ -97,7 +97,7 @@ var AllProviderGroups = []*ProviderGroup{
 				GUID: *MicrosoftWindowsKernelFileGUID,
 				// Enable file I/O events for process correlation
 				EnableLevel:      0xFF,  // All levels
-				MatchAnyKeyword:  0x300, // KERNEL_FILE_KEYWORD_FILEIO | KERNEL_FILE_KEYWORD_READ | KERNEL_FILE_KEYWORD_WRITE
+				MatchAnyKeyword:  0x7A0, // KERNEL_FILE_KEYWORD_FILEIO (0x20) | KERNEL_FILE_KEYWORD_CREATE (0x80) | KERNEL_FILE_KEYWORD_READ (0x100) | KERNEL_FILE_KEYWORD_WRITE (0x200) | KERNEL_FILE_KEYWORD_DELETE_PATH (0x400)
 				MatchAllKeyword:  0x0,
 				EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
 				Filters: []etw.ProviderFilter{ // NOTE: comment this when doing profiling for pgo, causes lots of events.
