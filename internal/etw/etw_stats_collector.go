@@ -283,4 +283,11 @@ func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metri
 		float64(c.eventHandler.GetNetworkEventCount()),
 		"microsoft-windows-kernel-network",
 	)
+
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(c.eventHandler.GetSessionWatcherEventCount()),
+		"microsoft-windows-kernel-eventtracing",
+	)
 }

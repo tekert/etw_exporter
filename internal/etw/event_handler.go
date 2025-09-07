@@ -22,37 +22,44 @@ import (
 // eventRoute defines a unique key for an ETW event for routing.
 type eventRoute struct {
 	ProviderGUID etw.GUID
-	EventID      uint16
+	EventID      uint16 // Opcode for MOF events, ID for manifest events
 }
 
 // eventHandlerFunc is a generic function signature for all event handlers.
 type eventHandlerFunc func(helper *etw.EventRecordHelper) error
+
+// SessionWatcher defines the interface for a session watcher handler.
+type SessionWatcher interface {
+	HandleSessionStop(helper *etw.EventRecordHelper) error
+}
 
 // EventHandler encapsulates state and logic for ETW event processing.
 // This handler routes events to specialized sub-handlers based on a data-driven map.
 type EventHandler struct {
 	// Collectors for different metric categories
 	diskHandler     *kerneldiskio.Handler
-	threadHandler *kernelthread.Handler
+	threadHandler   *kernelthread.Handler
 	perfinfoHandler *kernelperf.Handler
 	networkHandler  *kernelnetwork.Handler
 	memoryHandler   *kernelmemory.Handler
 
 	// Shared state and caches for callbacks
 	config       *config.CollectorConfig
+	appConfig    *config.AppConfig            // Add AppConfig to access SessionWatcher settings
 	log          *phusluadapter.SampledLogger // Event handler logger
 	stateManager *statemanager.KernelStateManager
 
 	// Event counters by provider - atomic counters for thread safety
-	diskEventCount         atomic.Uint64
-	processEventCount      atomic.Uint64
-	threadEventCount       atomic.Uint64
-	fileEventCount         atomic.Uint64
-	perfinfoEventCount     atomic.Uint64
-	systemConfigEventCount atomic.Uint64
-	imageEventCount        atomic.Uint64
-	pageFaultEventCount    atomic.Uint64
-	networkEventCount      atomic.Uint64
+	diskEventCount           atomic.Uint64
+	processEventCount        atomic.Uint64
+	threadEventCount         atomic.Uint64
+	fileEventCount           atomic.Uint64
+	perfinfoEventCount       atomic.Uint64
+	systemConfigEventCount   atomic.Uint64
+	imageEventCount          atomic.Uint64
+	pageFaultEventCount      atomic.Uint64
+	networkEventCount        atomic.Uint64
+	sessionWatcherEventCount atomic.Uint64
 
 	// ROUTING TABLES for hot path optimized routing
 	routeMap      map[eventRoute]eventHandlerFunc
@@ -62,9 +69,10 @@ type EventHandler struct {
 // NewEventHandler creates a new central event handler. It initializes all collectors
 // that are enabled in the provided configuration, registers them for Prometheus
 // metrics where applicable, and sets up the internal routing maps.
-func NewEventHandler(config *config.CollectorConfig) *EventHandler {
+func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	eh := &EventHandler{
-		config:        config,
+		config:        &appConfig.Collectors,
+		appConfig:     appConfig,
 		log:           logger.NewSampledLoggerCtx("event_handler"),
 		routeMap:      make(map[eventRoute]eventHandlerFunc),
 		guidToCounter: make(map[etw.GUID]*atomic.Uint64),
@@ -83,6 +91,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	eh.guidToCounter[*ImageKernelGUID] = &eh.imageEventCount
 	eh.guidToCounter[*PageFaultKernelGUID] = &eh.pageFaultEventCount
 	eh.guidToCounter[*MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
+	eh.guidToCounter[*MicrosoftWindowsKernelEventTracingGUID] = &eh.sessionWatcherEventCount
 
 	// --- Register Routes for All Handlers ---
 
@@ -102,8 +111,8 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	eh.log.Debug().Msg("Registered global system config handler routes")
 
 	// Initialize enabled collectors and register their routes.
-	if config.DiskIO.Enabled {
-		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&config.DiskIO)
+	if eh.config.DiskIO.Enabled {
+		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&eh.config.DiskIO)
 		prometheus.MustRegister(eh.diskHandler.GetCustomCollector())
 
 		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271})
@@ -125,7 +134,7 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		)
 	}
 
-	if config.ThreadCS.Enabled {
+	if eh.config.ThreadCS.Enabled {
 		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
 		prometheus.MustRegister(eh.threadHandler.GetCustomCollector())
 
@@ -139,8 +148,8 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
 	}
 
-	if config.PerfInfo.Enabled {
-		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&config.PerfInfo)
+	if eh.config.PerfInfo.Enabled {
+		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&eh.config.PerfInfo)
 		prometheus.MustRegister(eh.perfinfoHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (PerfInfo) ({ce1dbfb4-137e-4da6-87b0-3f59aa102cbc})
@@ -161,8 +170,8 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
 	}
 
-	if config.Network.Enabled {
-		eh.networkHandler = kernelnetwork.NewNetworkHandler(&config.Network)
+	if eh.config.Network.Enabled {
+		eh.networkHandler = kernelnetwork.NewNetworkHandler(&eh.config.Network)
 		prometheus.MustRegister(eh.networkHandler.GetCustomCollector())
 
 		// Provider: Microsoft-Windows-Kernel-Network ({7dd42a49-5329-4832-8dfd-43d979153a88})
@@ -185,8 +194,8 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 		eh.log.Debug().Msg("Network collector enabled and routes registered")
 	}
 
-	if config.Memory.Enabled {
-		eh.memoryHandler = kernelmemory.NewMemoryHandler(&config.Memory, eh.stateManager)
+	if eh.config.Memory.Enabled {
+		eh.memoryHandler = kernelmemory.NewMemoryHandler(&eh.config.Memory, eh.stateManager)
 		prometheus.MustRegister(eh.memoryHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
@@ -205,6 +214,12 @@ func NewEventHandler(config *config.CollectorConfig) *EventHandler {
 	return eh
 }
 
+// RegisterWatcherRoutes registers the event routes for the session watcher.
+func (h *EventHandler) RegisterWatcherRoutes(watcher SessionWatcher) {
+	h.routeMap[eventRoute{*MicrosoftWindowsKernelEventTracingGUID, 11}] = watcher.HandleSessionStop // Session Stop
+	h.log.Debug().Msg("Registered session watcher handler routes")
+}
+
 // GetStateManager returns the shared state manager instance.
 func (h *EventHandler) GetStateManager() *statemanager.KernelStateManager {
 	return h.stateManager
@@ -221,6 +236,9 @@ func (h *EventHandler) GetSystemConfigEventCount() uint64 { return h.systemConfi
 func (h *EventHandler) GetImageEventCount() uint64        { return h.imageEventCount.Load() }
 func (h *EventHandler) GetPageFaultEventCount() uint64    { return h.pageFaultEventCount.Load() }
 func (h *EventHandler) GetNetworkEventCount() uint64      { return h.networkEventCount.Load() }
+func (h *EventHandler) GetSessionWatcherEventCount() uint64 {
+	return h.sessionWatcherEventCount.Load()
+}
 
 // ETW Callback Methods
 

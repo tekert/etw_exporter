@@ -35,10 +35,11 @@ var (
 
 	// # Manifest provider GUIDs - Modern providers with better event parsing
 
-	MicrosoftWindowsKernelDiskGUID    = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
-	MicrosoftWindowsKernelProcessGUID = etw.MustParseGUID("{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}") // Microsoft-Windows-Kernel-Process
-	MicrosoftWindowsKernelFileGUID    = etw.MustParseGUID("{edd08927-9cc4-4e65-b970-c2560fb5c289}") // Microsoft-Windows-Kernel-File
-	MicrosoftWindowsKernelNetworkGUID = etw.MustParseGUID("{7dd42a49-5329-4832-8dfd-43d979153a88}") // Microsoft-Windows-Kernel-Network
+	MicrosoftWindowsKernelEventTracingGUID = etw.MustParseGUID("{b675ec37-bdb6-4648-bc92-f3fdc74d3ca2}") // Microsoft-Windows-Kernel-EventTracing
+	MicrosoftWindowsKernelDiskGUID         = etw.MustParseGUID("{c7bde69a-e1e0-4177-b6ef-283ad1525271}") // Microsoft-Windows-Kernel-Disk
+	MicrosoftWindowsKernelProcessGUID      = etw.MustParseGUID("{22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716}") // Microsoft-Windows-Kernel-Process
+	MicrosoftWindowsKernelFileGUID         = etw.MustParseGUID("{edd08927-9cc4-4e65-b970-c2560fb5c289}") // Microsoft-Windows-Kernel-File
+	MicrosoftWindowsKernelNetworkGUID      = etw.MustParseGUID("{7dd42a49-5329-4832-8dfd-43d979153a88}") // Microsoft-Windows-Kernel-Network
 
 	// # MOF Providers (Win10 and below) (NT  Kernel Logger) - require kernel session
 

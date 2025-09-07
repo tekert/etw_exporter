@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/phuslu/log"
@@ -19,6 +20,10 @@ import (
 // TODO(tekert): If in windows 11, use System Config Provider instead of NT Kernel Logger
 // TODO(tekert): Explain that in Windows 10 only 1 NT Kernel Logger session can be active at a time.
 
+var (
+	EtwExporterGuid = etw.MustParseGUID("{c47d5c06-89e7-11f0-bbb7-6045cb9e9a44}")
+)
+
 // SessionManager orchestrates the entire lifecycle of ETW (Event Tracing for Windows)
 // data collection.
 type SessionManager struct {
@@ -32,23 +37,28 @@ type SessionManager struct {
 	kernelSession   *etw.RealTimeSession // Aditional session needed for win10 and below
 	eventHandler    *EventHandler
 	config          *config.CollectorConfig
-	log             log.Logger // Session manager logger
+	appConfig       *config.AppConfig // Add AppConfig to access SessionWatcher settings
+	log             log.Logger        // Session manager logger
 
-	running bool
+	running            bool
+	isStopping         atomic.Bool // Flag to indicate the manager is in the process of shutting down.
+	restartingSessions sync.Map    // Tracks sessions currently being restarted to prevent race conditions.
 }
 
 // NewSessionManager creates and initializes a new ETW session manager.
-func NewSessionManager(eventHandler *EventHandler, config *config.CollectorConfig) *SessionManager {
+func NewSessionManager(eventHandler *EventHandler, appConfig *config.AppConfig) *SessionManager {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	manager := &SessionManager{
 		ctx:          ctx,
 		cancel:       cancel,
 		eventHandler: eventHandler,
-		config:       config,
+		config:       &appConfig.Collectors,
+		appConfig:    appConfig,
 		log:          logger.NewLoggerWithContext("etw_session"),
 	}
 
+	manager.restartingSessions = sync.Map{}
 	manager.log.Debug().Msg("SessionManager created")
 	return manager
 }
@@ -121,6 +131,7 @@ func (s *SessionManager) Start() error {
 		s.startScrapeSafetyNet()
 	}()
 
+	s.isStopping.Store(false) // Ensure shutdown flag is cleared on start
 	s.running = true
 	s.log.Info().Msg("✅ ETW session/s started successfully")
 	return nil
@@ -184,6 +195,126 @@ func isSystemProviderSupported() bool {
 	return v.MajorVersion >= 10 && v.BuildNumber >= 20348
 }
 
+// RestartSession attempts to restart a stopped ETW session in a separate goroutine.
+// It implements a retry mechanism with backoff and a locking mechanism to prevent
+// concurrent restart attempts for the same session.
+func (s *SessionManager) RestartSession(sessionGUID etw.GUID) {
+	go func() {
+		// Immediately ignore events if we are in the process of a planned shutdown.
+		if s.isStopping.Load() {
+			s.log.Debug().Str("guid", sessionGUID.String()).Msg("Ignoring session stop event during shutdown.")
+			return
+		}
+
+		s.mu.RLock()
+		if !s.running {
+			s.mu.RUnlock()
+			s.log.Warn().Str("guid", sessionGUID.String()).Msg("Session restart requested, but manager is not running. Ignoring.")
+			return
+		}
+
+		var sessionToRestart *etw.RealTimeSession
+		var sessionName string
+
+		isKernel := s.kernelSession != nil && sessionGUID == *etw.SystemTraceControlGuid
+		isManifest := s.manifestSession != nil && sessionGUID == *EtwExporterGuid
+
+		if !isKernel && !isManifest {
+			s.mu.RUnlock()
+			s.log.Warn().Str("guid", sessionGUID.String()).Msg("Restart requested for an unknown or unmanaged session GUID.")
+			return
+		}
+
+		if isKernel {
+			sessionToRestart = s.kernelSession
+			sessionName = s.kernelSession.TraceName()
+		} else {
+			sessionToRestart = s.manifestSession
+			sessionName = s.manifestSession.TraceName()
+		}
+		s.mu.RUnlock()
+
+		// TODO: refactor the retry mechanism and maybe use goetw StoppedTraces() channel and the Context to
+		//   with this, or replacing this method entirely with that channel, think later.
+
+		// This loop ensures that only one goroutine can attempt a restart for a given session at a time.
+		// If a restart is already in progress, this goroutine will wait, and then re-check the session's health
+		// after the other restart attempt has finished.
+		for {
+			if _, alreadyRestarting := s.restartingSessions.LoadOrStore(sessionName, true); !alreadyRestarting {
+				// We've acquired the "lock". Break the loop to proceed with the restart attempt.
+				break
+			}
+
+			// A restart is already in progress. Wait for a moment.
+			s.log.Debug().Str("session", sessionName).Msg("Another restart is in progress, waiting...")
+			time.Sleep(500 * time.Millisecond) // Wait for the other operation to complete.
+
+			// After waiting, check if the session is now running. If it is, the other restart was successful,
+			// and our work is done.
+			if s.consumer != nil && s.consumer.IsTraceRunning(sessionName) {
+				s.log.Debug().Str("session", sessionName).Msg("Session is now running after waiting; aborting redundant restart.")
+				return
+			}
+
+			// If the session is still not running, the other restart might have failed or finished.
+			// The loop will continue, and we'll try to acquire the lock again.
+		}
+		// We now hold the "lock" for this session. Ensure it's released on exit.
+		defer s.restartingSessions.Delete(sessionName)
+
+		// Poll for a short duration to confirm the trace has actually stopped. This handles
+		// the race condition where we receive the stop event before the ProcessTrace
+		// goroutine has fully exited.
+		const pollInterval = 250 * time.Millisecond
+		const maxWait = 2 * time.Second
+		waited := 0 * time.Millisecond
+		for s.consumer != nil && s.consumer.IsTraceRunning(sessionName) && waited < maxWait {
+			time.Sleep(pollInterval)
+			waited += pollInterval
+		}
+
+		// After waiting, if the trace is still running, it was a stale "echo" event
+		// from a previous successful restart. The session is healthy, so we ignore it.
+		if s.consumer != nil && s.consumer.IsTraceRunning(sessionName) {
+			s.log.Debug().Str("session", sessionName).Msg("Ignoring stop event as trace is still running after wait period; assuming healthy.")
+			return
+		}
+
+		s.log.Warn().Str("session", sessionName).Msg("Session stopped externally. Attempting to restart...")
+
+		// Retry logic
+		for i := 0; i < 10; i++ { // Try up to 10 times
+			err := s.consumer.RestartSessions(sessionToRestart)
+
+			if err == nil {
+				s.log.Info().Str("session", sessionName).Msg("Session restarted successfully.")
+				return
+			}
+
+			s.log.Error().Err(err).Str("session", sessionName).Int("attempt", i+1).
+				Msg("Failed to restart session.")
+
+			var waitTime time.Duration
+			if i < 3 {
+				waitTime = 1 * time.Second
+			} else {
+				waitTime = 10 * time.Second
+			}
+
+			select {
+			case <-time.After(waitTime):
+			// continue loop
+			case <-s.ctx.Done():
+				s.log.Info().Str("session", sessionName).
+					Msg("Session manager is shutting down, aborting restart attempt.")
+				return
+			}
+		}
+		s.log.Error().Str("session", sessionName).Msg("Failed to restart session after multiple attempts.")
+	}()
+}
+
 // setupSessions creates and configures the required ETW sessions based on the
 // enabled collectors in the user's configuration. It intelligently chooses between
 // modern System Providers (on Win11+) and legacy Kernel Flags (on Win10).
@@ -191,6 +322,21 @@ func (s *SessionManager) setupSessions() error {
 	var sessions []etw.Session
 
 	manifestProviders := GetEnabledManifestProviders(s.config)
+
+	// If the session watcher is enabled, add its provider to the manifest session.
+	if s.appConfig.SessionWatcher.Enabled {
+		s.log.Info().Msg("Session watcher is enabled. Monitoring session status.")
+		watcherProvider := etw.Provider{
+			Name:            "Microsoft-Windows-Kernel-EventTracing",
+			GUID:            *MicrosoftWindowsKernelEventTracingGUID,
+			MatchAnyKeyword: 0x10, // ETW_KEYWORD_SESSION
+			Filters: []etw.ProviderFilter{
+				etw.NewEventIDFilter(true, 10, 11),
+			},
+		}
+		manifestProviders = append(manifestProviders, watcherProvider)
+	}
+
 	if isSystemProviderSupported() {
 		// --- Win11+ Path ---
 		s.log.Info().Msg("Using System Providers for kernel events.")
@@ -199,18 +345,21 @@ func (s *SessionManager) setupSessions() error {
 		if len(manifestProviders) > 0 {
 			// Mark the session as a "system logger"
 			// to allow enabling System Providers.
-			s.manifestSession = etw.NewSystemTraceProviderSession("etw_exporter")
+			s.manifestSession = etw.NewSystemTraceSession("etw_exporter")
+			s.manifestSession.SetGuid(*EtwExporterGuid)
 		}
 	} else {
 		// --- Legacy (Win10) Path ---
 		s.log.Warn().Msg("System Providers not supported on this OS version, falling back to NT Kernel Logger session for kernel events.")
 		if len(manifestProviders) > 0 {
 			s.manifestSession = etw.NewRealTimeSession("etw_exporter")
+			s.manifestSession.SetGuid(*EtwExporterGuid)
 		}
 		// Setup additional kernel session
 		kernelFlags := GetEnabledKernelFlags(s.config)
 		if kernelFlags != 0 {
 			s.kernelSession = etw.NewKernelRealTimeSession(kernelFlags)
+			// guid is set to SystemTraceControlGuid: {9e814aad-3204-11d2-9a82-006008a86939}
 			// IMPORTANT: Kernel sessions must be explicitly started (unlike manifest providers)
 			if err := s.kernelSession.Start(); err != nil {
 				return fmt.Errorf("failed to start kernel session: %w", err)
@@ -278,6 +427,7 @@ func (s *SessionManager) Stop() error {
 	if !s.running {
 		return nil
 	}
+	s.isStopping.Store(true) // Signal that we are shutting down BEFORE stopping sessions.
 
 	// Stop sessions first
 	if err := s.stopSessions(); err != nil {
@@ -356,7 +506,7 @@ func (s *SessionManager) startScrapeSafetyNet() {
 	log.Info().
 		Str("interval", checkInterval.String()).
 		Str("max_age", hardCapMaxAge.String()).
-		Msg("🧹 Starting scrape safety net routine")
+		Msg("Starting scrape safety net routine")
 
 	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()

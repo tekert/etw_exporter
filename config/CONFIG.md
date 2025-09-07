@@ -155,3 +155,18 @@ enable_per_process = true
 - `etw_memory_hard_pagefaults_total`: Total number of hard page faults system-wide.
 - With `enable_per_process`:
     - `etw_memory_hard_pagefaults_per_process_total{process_id, process_name}`: Total hard page faults by process.
+
+## Session Watcher Configuration
+
+The `[session_watcher]` section configures the automatic restart of ETW sessions if they are stopped by an external process. This ensures the exporter remains resilient.
+
+```toml
+[session_watcher]
+enabled = true
+restart_kernel_session = true
+restart_exporter_session = true
+```
+
+- **enabled**: Set to `true` to enable the session watcher.
+- **restart_kernel_session**: If `true`, the watcher will attempt to restart the `NT Kernel Logger` session if it is stopped.
+- **restart_exporter_session**: If `true`, the watcher will attempt to restart the main `etw_exporter` session if it is stopped.

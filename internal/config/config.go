@@ -25,6 +25,9 @@ type AppConfig struct {
 	// Collector configurations
 	Collectors CollectorConfig `toml:"collectors"`
 
+	// Session Watcher configuration
+	SessionWatcher SessionWatcherConfig `toml:"session_watcher"`
+
 	// Logging configuration
 	Logging LoggingConfig `toml:"logging"`
 }
@@ -39,6 +42,18 @@ type ServerConfig struct {
 
 	// Enable pprof endpoint for debugging (default: true)
 	PprofEnabled bool `toml:"pprof_enabled"`
+}
+
+// SessionWatcherConfig contains settings for monitoring and restarting ETW sessions.
+type SessionWatcherConfig struct {
+	// Enable the session watcher to automatically restart sessions if they are stopped externally.
+	Enabled bool `toml:"enabled"`
+
+	// Automatically restart the NT Kernel Logger session if it stops.
+	RestartKernelSession bool `toml:"restart_kernel_session"`
+
+	// Automatically restart the main exporter (manifest) session if it stops.
+	RestartExporterSession bool `toml:"restart_exporter_session"`
 }
 
 // ProcessFilterConfig contains settings for filtering metrics by process.
@@ -293,6 +308,11 @@ func DefaultConfig() *AppConfig {
 				Enabled:          true,
 				EnablePerProcess: true,
 			},
+		},
+		SessionWatcher: SessionWatcherConfig{
+			Enabled:              true,
+			RestartKernelSession: true,
+			RestartExporterSession: true,
 		},
 		Logging: LoggingConfig{
 			Defaults: LogDefaults{

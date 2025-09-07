@@ -18,6 +18,7 @@ import (
 	"etw_exporter/internal/debug"
 
 	etwmain "etw_exporter/internal/etw"
+	"etw_exporter/internal/etw/watcher"
 )
 
 // ETWExporter encapsulates the core components of the application.
@@ -56,15 +57,21 @@ func NewETWExporter(config *config.AppConfig) (*ETWExporter, error) {
 // setupETW initializes the ETW session manager and event handlers.
 func (e *ETWExporter) setupETW() {
 	e.log.Debug().Msg("- Event handler creation started")
-	e.eventHandler = etwmain.NewEventHandler(&e.config.Collectors)
+	e.eventHandler = etwmain.NewEventHandler(e.config)
 	e.log.Debug().Msg("- Event handler created")
 
 	// Apply process filter configuration to the state manager
 	e.eventHandler.GetStateManager().ApplyConfig(&e.config.Collectors)
 
 	e.log.Debug().Msg("- ETW session manager creation started")
-	e.etwSession = etwmain.NewSessionManager(e.eventHandler, &e.config.Collectors)
+	e.etwSession = etwmain.NewSessionManager(e.eventHandler, e.config)
 	e.log.Debug().Msg("- ETW session manager created")
+
+	// If the session watcher is enabled, create it and register its routes with the event handler.
+	if e.config.SessionWatcher.Enabled {
+		sessionWatcher := watcher.New(e.etwSession, e.config)
+		e.eventHandler.RegisterWatcherRoutes(sessionWatcher)
+	}
 
 	// Log enabled providers in the config
 	enabledGroups := e.etwSession.GetEnabledProviderGroups()
@@ -115,7 +122,8 @@ func (e *ETWExporter) Run() error {
 			// Recover from panics in this goroutine to trigger a graceful shutdown.
 			defer func() {
 				if r := recover(); r != nil {
-					e.log.Error().Interface("panic", r).Msg("Panic recovered in pprof server, initiating shutdown")
+					e.log.Error().Interface("panic", r).
+						Msg("Panic recovered in pprof server, initiating shutdown")
 					stop()
 				}
 			}()
@@ -127,7 +135,7 @@ func (e *ETWExporter) Run() error {
 		}()
 	}
 
-	e.log.Info().Msg("Starting ETW trace session...")
+	e.log.Debug().Msg("Starting ETW trace session...")
 	if err := e.etwSession.Start(); err != nil {
 		return fmt.Errorf("failed to start ETW session: %w", err)
 	}
@@ -156,7 +164,7 @@ func (e *ETWExporter) Run() error {
 
 	// --- Graceful shutdown sequence ---
 
-	httpCtx, cancelhttp := context.WithTimeout(context.Background(), 5*time.Second)
+	httpCtx, cancelhttp := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancelhttp()
 
 	if err := e.httpServer.Shutdown(httpCtx); err != nil {
