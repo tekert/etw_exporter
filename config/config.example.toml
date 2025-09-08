@@ -38,6 +38,14 @@ enable_retrasmission_rate = false
 enabled = true
 enable_per_process = true
 
+[collectors.registry]
+enabled = false
+enable_per_process = true
+
+[session_watcher]
+enabled = true
+restart_kernel_session = true
+
 [logging]
 lib_level = "warn"
 [logging.defaults]

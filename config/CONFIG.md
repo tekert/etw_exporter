@@ -156,6 +156,24 @@ enable_per_process = true
 - With `enable_per_process`:
     - `etw_memory_hard_pagefaults_per_process_total{process_id, process_name}`: Total hard page faults by process.
 
+### Registry Collector
+
+The `registry` collector tracks registry operations such as key creation, deletion, and value setting.
+
+```toml
+[collectors.registry]
+enabled = false
+enable_per_process = true
+```
+
+- **enabled**: Set to `true` to enable this collector. This can be a high-frequency collector.
+- **enable_per_process**: Enables per-process registry operation metrics.
+
+**Metrics Provided:**
+- `etw_registry_operations_total{operation, result}`: Total number of registry operations by type (e.g., `create_key`, `set_value`) and result (`success`/`failure`).
+- With `enable_per_process`:
+    - `etw_registry_operations_process_total{process_id, process_start_key, process_name, operation, result}`: Total number of registry operations per process.
+
 ## Session Watcher Configuration
 
 The `[session_watcher]` section configures the automatic restart of ETW sessions if they are stopped by an external process. This ensures the exporter remains resilient.

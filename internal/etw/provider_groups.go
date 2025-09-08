@@ -32,6 +32,8 @@ var (
 	SystemSchedulerProviderGuid = etw.MustParseGUID("{599a2a76-4d91-4910-9ac7-7d33f2e97a6c}")
 	SystemInterruptProviderGuid = etw.MustParseGUID("{d4bbee17-b545-4888-858b-744169015b25}")
 	SystemMemoryProviderGuid    = etw.MustParseGUID("{82958ca9-b6cd-47f8-a3a8-03ae85a4bc24}")
+	SystemIoProviderGuid        = etw.MustParseGUID("{3d5c43e3-0f1c-4202-b817-174c0070dc79}")
+	SystemRegistryProviderGuid  = etw.MustParseGUID("{16156bd9-fab4-4cfa-a232-89d1099058e3}")
 
 	// # Manifest provider GUIDs - Modern providers with better event parsing
 
@@ -61,6 +63,10 @@ var (
 	// PageFault_V2 MOF class - handles page fault events
 	// [Guid("{3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c}"), EventVersion(2)]
 	PageFaultKernelGUID = etw.MustParseGUID("{3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c}")
+
+	// Registry MOF class - handles registry events
+	// [Guid("{ae53722e-c863-11d2-8659-00c04fa321a1}"), EventVersion(1)]
+	RegistryKernelGUID = etw.MustParseGUID("{ae53722e-c863-11d2-8659-00c04fa321a1}")
 )
 
 // newProcessCorrelationProvider is a helper to create a standard provider
@@ -160,9 +166,11 @@ var AllProviderGroups = []*ProviderGroup{
 				GUID:            *etw.SystemSchedulerProviderGuid,
 				MatchAnyKeyword: etw.SYSTEM_SCHEDULER_KW_CONTEXT_SWITCH,
 			},
-			// Note: Image Load events still come from the NT Kernel Logger provider even on Win11
-			// when using System Providers. So we keep the legacy flag for that.
-			// This is a nuance of the new system.
+			{
+				Name:            "SystemProcessProvider", // For Image Load events
+				GUID:            *etw.SystemProcessProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_LOADER,
+			},
 		},
 		//etw.EVENT_TRACE_FLAG_PROFILE, // For Testing
 		ManifestProviders: []etw.Provider{}, // No manifest providers
@@ -216,6 +224,27 @@ var AllProviderGroups = []*ProviderGroup{
 		},
 		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.Memory.Enabled
+		},
+	},
+
+	// RegistryGroup uses kernel session for registry access events.
+	{
+		Name: "registry",
+		// --- Legacy (Win10) ---
+		KernelFlags: etw.EVENT_TRACE_FLAG_REGISTRY,
+		// --- Modern (Win11+) ---
+		SystemProviders: []etw.Provider{
+			{
+				Name:            "SystemRegistryProvider",
+				GUID:            *SystemRegistryProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_REGISTRY_KW_GENERAL,
+			},
+		},
+		ManifestProviders: []etw.Provider{
+			newProcessCorrelationProvider(), // For process name correlation
+		},
+		IsEnabled: func(config *config.CollectorConfig) bool {
+			return config.Registry.Enabled
 		},
 	},
 }

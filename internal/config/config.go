@@ -86,6 +86,9 @@ type CollectorConfig struct {
 
 	// Memory collector configuration
 	Memory MemoryConfig `toml:"memory"`
+
+	// Registry collector configuration
+	Registry RegistryConfig `toml:"registry"`
 }
 
 // DiskIOConfig contains disk I/O collector settings
@@ -138,6 +141,15 @@ type MemoryConfig struct {
 	Enabled bool `toml:"enabled"`
 
 	// Enable per-process hard page fault metrics (default: true)
+	EnablePerProcess bool `toml:"enable_per_process"`
+}
+
+// RegistryConfig contains registry collector settings
+type RegistryConfig struct {
+	// Enable registry event collection (default: false)
+	Enabled bool `toml:"enabled"`
+
+	// Enable per-process registry metrics (default: true)
 	EnablePerProcess bool `toml:"enable_per_process"`
 }
 
@@ -306,6 +318,10 @@ func DefaultConfig() *AppConfig {
 			},
 			Memory: MemoryConfig{
 				Enabled:          true,
+				EnablePerProcess: true,
+			},
+			Registry: RegistryConfig{
+				Enabled:          false,
 				EnablePerProcess: true,
 			},
 		},
