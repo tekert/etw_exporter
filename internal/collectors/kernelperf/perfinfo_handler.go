@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -332,22 +333,25 @@ func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 	var imageBase uint64
 	var imageSize uint64
 	var fileName string
+	var processID uint32
 
 	// Extract properties using proper helper methods
 	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
 		imageBase = base
 	}
-
 	if size, err := helper.GetPropertyUint("ImageSize"); err == nil {
 		imageSize = size
 	}
-
 	if name, err := helper.GetPropertyString("FileName"); err == nil {
 		fileName = name
 	}
+	if pid, err := helper.GetPropertyUint("ProcessId"); err == nil {
+		processID = uint32(pid)
+	}
 
-	// Process the image load event
-	h.collector.ProcessImageLoadEvent(imageBase, imageSize, fileName)
+	// Add the image to the central state manager.
+	// The collector no longer needs to process this event itself.
+	statemanager.GetGlobalStateManager().AddImage(processID, imageBase, imageSize, fileName)
 
 	return nil
 }
@@ -386,7 +390,15 @@ func (h *Handler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 		return nil // Cannot process without image base
 	}
 
+	// Notify the collector first so it can clear its caches before the state is gone.
+	// The collector needs to do this synchronously to prevent using stale cache entries.
 	h.collector.ProcessImageUnloadEvent(imageBase)
+
+	// Mark the image for deletion in the central state manager.
+	// The actual removal will happen post-scrape, ensuring that any in-flight
+	// events can still resolve addresses to this image.
+	statemanager.GetGlobalStateManager().MarkImageForDeletion(imageBase)
+
 	return nil
 }
 

@@ -5,6 +5,7 @@ go 1.24.5
 
 require (
 	github.com/BurntSushi/toml v1.5.0
+	github.com/cornelk/hashmap v1.0.8
 	github.com/phuslu/log v1.0.120
 	github.com/prometheus/client_golang v1.23.0
 	github.com/tekert/goetw v0.8.4-beta

@@ -99,7 +99,7 @@ type ProcessBytesData struct {
 
 // NewDiskIOCustomCollector creates a new disk I/O metrics custom collector.
 func NewDiskIOCustomCollector() *DiskCollector {
-	return &DiskCollector{
+	collector := &DiskCollector{
 		diskIOCount:         make(map[DiskIOKey]*int64),
 		diskBytesRead:       make(map[uint32]*int64),
 		diskBytesWritten:    make(map[uint32]*int64),
@@ -140,6 +140,11 @@ func NewDiskIOCustomCollector() *DiskCollector {
 			[]string{"process_id", "process_start_key", "process_name", "disk"}, nil,
 		),
 	}
+
+	// Register for post-scrape cleanup.
+	statemanager.GetGlobalStateManager().RegisterCleaner(collector)
+
+	return collector
 }
 
 // Describe implements prometheus.Collector.
@@ -420,4 +425,34 @@ func (c *DiskCollector) RecordDiskFlush(diskNumber uint32) {
 		c.diskIOCount[diskIOKey] = new(int64)
 	}
 	atomic.AddInt64(c.diskIOCount[diskIOKey], 1)
+}
+
+// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
+// This method is called by the KernelStateManager after a scrape is complete to
+// allow the collector to safely clean up its internal state for terminated processes.
+func (c *DiskCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	cleanedCount := 0
+	for key := range c.processIOCount {
+		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
+			delete(c.processIOCount, key)
+			cleanedCount++
+		}
+	}
+	for key := range c.processBytesRead {
+		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
+			delete(c.processBytesRead, key)
+		}
+	}
+	for key := range c.processBytesWritten {
+		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
+			delete(c.processBytesWritten, key)
+		}
+	}
+
+	if cleanedCount > 0 {
+		c.log.Debug().Int("count", len(terminatedProcs)).Msg("Cleaned up disk I/O counters for terminated processes")
+	}
 }

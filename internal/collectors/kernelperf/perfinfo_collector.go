@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/phuslu/log"
@@ -61,9 +62,8 @@ type PerfCollector struct {
 	// Pending ISR tracking for latency correlation
 	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
 
-	// Image database for address-to-driver mapping
-	imageDatabase map[uint64]ImageInfo // ImageBase -> driver info
-	driverNames   map[uint64]string    // Routine address -> driver name (cached)
+	// Cached driver name lookups to reduce state manager queries on the hot path
+	routineAddressToDriverName map[uint64]string
 
 	// Performance metrics data
 	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
@@ -145,20 +145,19 @@ var (
 // NewPerfInfoCollector creates a new interrupt latency collector
 func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfCollector {
 	collector := &PerfCollector{
-		config:                 config,
-		pendingISRs:            make(map[ISRKey]*ISREvent, 256),  // Pre-size for performance
-		imageDatabase:          make(map[uint64]ImageInfo, 1000), // Pre-size for typical driver count
-		driverNames:            make(map[uint64]string, 2000),    // Cached driver name lookups
-		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
-		isrToDpcLatencyCount:   0,
-		isrToDpcLatencySum:     0.0,
-		dpcQueuedCount:         make(map[uint16]int64, 64), // Pre-size for max CPU count
-		dpcExecutedCount:       make(map[uint16]int64, 64),
-		driverLastSeen:         make(map[string]time.Time, 100), // Track driver activity for bounded set
-		driverTimeout:          15 * time.Minute,                // Prune drivers inactive for 15 mins
-		log:                    logger.NewLoggerWithContext("perfinfo_collector"),
-		lastPruneTime:          time.Now(),
-		pruneInterval:          5 * time.Minute,
+		config:                     config,
+		pendingISRs:                make(map[ISRKey]*ISREvent, 256), // Pre-size for performance
+		routineAddressToDriverName: make(map[uint64]string, 2000),   // Cached driver name lookups
+		isrToDpcLatencyBuckets:     make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
+		isrToDpcLatencyCount:       0,
+		isrToDpcLatencySum:         0.0,
+		dpcQueuedCount:             make(map[uint16]int64, 64), // Pre-size for max CPU count
+		dpcExecutedCount:           make(map[uint16]int64, 64),
+		driverLastSeen:             make(map[string]time.Time, 100), // Track driver activity for bounded set
+		driverTimeout:              15 * time.Minute,                // Prune drivers inactive for 15 mins
+		log:                        logger.NewLoggerWithContext("perfinfo_collector"),
+		lastPruneTime:              time.Now(),
+		pruneInterval:              5 * time.Minute,
 
 		cpuStringCache: make(map[uint16]string, 64), // Cache for formatCPU to reduce allocations
 	}
@@ -470,52 +469,37 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 	}
 }
 
-// ProcessImageLoadEvent processes image load events to build driver database
+// ProcessImageLoadEvent is now a NO-OP. The state manager handles this directly.
 func (c *PerfCollector) ProcessImageLoadEvent(imageBase, imageSize uint64, fileName string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	imageName := extractDriverName(fileName)
-
-	c.imageDatabase[imageBase] = ImageInfo{
-		ImageBase: imageBase,
-		ImageSize: imageSize,
-		FileName:  fileName,
-		ImageName: imageName,
-	}
-
-	c.log.Trace().
-		Str("image_name", imageName).
-		Str("file_name", fileName).
-		Uint64("base", imageBase).
-		Uint64("size", imageSize).
-		Msg("Image loaded")
+	// This is intentionally left blank.
+	// The KernelStateManager is now the source of truth for image information.
+	// The handler will call KernelStateManager.AddImage directly.
 }
 
-// ProcessImageUnloadEvent processes image unload events to remove driver metrics.
+// ProcessImageUnloadEvent processes image unload events to clear internal caches.
 func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	imageInfo, exists := c.imageDatabase[imageBase]
-	if !exists {
-		return // We weren't tracking this image.
+	// The state manager handles the actual removal. We just need to clear our local cache
+	// to prevent using stale routine->driver mappings.
+	// We don't know the image size here, but we can iterate our cache.
+	// This is inefficient but unload events are rare.
+	sm := statemanager.GetGlobalStateManager()
+	info, ok := sm.GetImageForAddress(imageBase) // Get info before it's deleted
+	if !ok {
+		return
 	}
 
-	driverName := imageInfo.ImageName
-	c.log.Trace().Str("driver_name", driverName).Msg("Image unloaded, removing associated metrics")
+	c.log.Trace().Str("driver_name", info.ImageName).Msg("Image unloaded, clearing local caches")
 
 	// Remove all metrics associated with this driver.
-	c.removeDriverMetrics(driverName)
-
-	// Remove the image from the database.
-	delete(c.imageDatabase, imageBase)
+	c.removeDriverMetrics(info.ImageName)
 
 	// Invalidate the routine-to-driver name cache for all routines within this image's address space.
-	// This is important to prevent stale cache entries if the same memory is reused.
-	for routineAddr, name := range c.driverNames {
-		if name == driverName {
-			delete(c.driverNames, routineAddr)
+	for routineAddr := range c.routineAddressToDriverName {
+		if routineAddr >= info.ImageBase && routineAddr < (info.ImageBase+info.ImageSize) {
+			delete(c.routineAddressToDriverName, routineAddr)
 		}
 	}
 }
@@ -523,25 +507,25 @@ func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 // resolveDriverNameUnsafe is an optimized version for use within locked contexts
 // Assumes caller already holds the mutex
 func (c *PerfCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
-	// Check cache first
-	if driverName, exists := c.driverNames[routineAddress]; exists {
+	// Check cache first for a positive hit.
+	if driverName, exists := c.routineAddressToDriverName[routineAddress]; exists {
 		return driverName
 	}
 
-	// Binary search through image database
-	for imageBase, imageInfo := range c.imageDatabase {
-		if routineAddress >= imageBase && routineAddress < imageBase+imageInfo.ImageSize {
-			driverName := imageInfo.ImageName
-
-			// Cache the result for future lookups
-			c.driverNames[routineAddress] = driverName
-			return driverName
-		}
+	// If not in cache, query the state manager.
+	sm := statemanager.GetGlobalStateManager()
+	imageInfo, ok := sm.GetImageForAddress(routineAddress)
+	if !ok {
+		// Do NOT cache the negative result. The ImageLoad event might be delayed.
+		// Returning "unknown" for this single event is correct. We will try the
+		// full lookup again if this address is seen in a future event.
+		return "unknown"
 	}
 
-	// Unknown driver - cache the result to avoid repeated lookups
-	c.driverNames[routineAddress] = "unknown"
-	return "unknown"
+	// Cache the positive result for future lookups.
+	driverName := imageInfo.ImageName
+	c.routineAddressToDriverName[routineAddress] = driverName
+	return driverName
 }
 
 // pruneStaleDrivers removes metrics for drivers that have been inactive for a configured timeout.
@@ -573,6 +557,13 @@ func (c *PerfCollector) removeDriverMetrics(driverName string) {
 	// Remove from histogram data if per-driver metrics are enabled
 	if c.config.EnablePerDriver {
 		delete(c.dpcDurationHistograms, DPCDriverKey{ImageName: driverName})
+	}
+
+	// Also remove any cached routine addresses associated with this driver.
+	for routineAddr, name := range c.routineAddressToDriverName {
+		if name == driverName {
+			delete(c.routineAddressToDriverName, routineAddr)
+		}
 	}
 }
 

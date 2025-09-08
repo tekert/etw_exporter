@@ -31,13 +31,24 @@ type KernelStateManager struct {
 	pidToTids         sync.Map // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
 	terminatedThreads sync.Map // key: TID (uint32), value: time.Time
 
+	// Image state
+	images           sync.Map // key: uint64 (ImageBase), value: *ImageInfo
+	pidToImages      sync.Map // key: uint32 (PID), value: *sync.Map (of ImageBases -> struct{})
+	imageToPid       sync.Map // key: uint64 (ImageBase), value: uint32 (PID)
+	terminatedImages sync.Map // key: uint64 (ImageBase), value: time.Time
+
+	// DiskIO state for FileObject correlation
+	fileObjectToProcess sync.Map // key: uint64 (FileObject), value: processIdentifier
+	processToFileObjects sync.Map // key: uint32 (PID), value: *sync.Map (of FileObjects -> struct{})
+
 	// Process filtering state
 	processFilterEnabled bool
 	processNameFilters   []*regexp.Regexp
 	trackedStartKeys     sync.Map // key: uint64 (startKey), value: struct{}
 
-	log *phusluadapter.SampledLogger
-	mu  sync.Mutex // Protects cleanup logic
+	cleaners []PostScrapeCleaner // Collectors that need post-scrape cleanup.
+	log      *phusluadapter.SampledLogger
+	mu       sync.Mutex // Protects cleanup logic and cleaners slice
 }
 
 var (
@@ -45,15 +56,32 @@ var (
 	initOnce           sync.Once
 )
 
+// PostScrapeCleaner is an interface for collectors that need to perform cleanup
+// of their internal state after a Prometheus scrape is complete.
+type PostScrapeCleaner interface {
+	// CleanupTerminatedProcesses is called with a map of terminated processes,
+	// where the key is the PID and the value is the unique Process Start Key.
+	CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64)
+}
+
 // GetGlobalStateManager returns the singleton KernelStateManager instance, ensuring
 // that all parts of the application share the same state information.
 func GetGlobalStateManager() *KernelStateManager {
 	initOnce.Do(func() {
 		globalStateManager = &KernelStateManager{
-			log: logger.NewSampledLoggerCtx("state_manager"),
+			log:      logger.NewSampledLoggerCtx("state_manager"),
+			cleaners: make([]PostScrapeCleaner, 0),
 		}
 	})
 	return globalStateManager
+}
+
+// RegisterCleaner allows a collector to register for post-scrape cleanup notifications.
+// This should be called once during collector initialization.
+func (sm *KernelStateManager) RegisterCleaner(cleaner PostScrapeCleaner) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.cleaners = append(sm.cleaners, cleaner)
 }
 
 // ApplyConfig applies collector configuration to the state manager.
@@ -113,79 +141,67 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
-	var cleanedCount int
-
-	// 1. Clean up processes that were marked for deletion.
+	// 1. Identify all processes marked for deletion and their start keys.
+	procsToClean := make(map[uint32]uint64)
 	sm.terminatedProcesses.Range(func(key, value any) bool {
 		pid := key.(uint32)
-		sm.processes.Delete(pid)
-		sm.terminatedProcesses.Delete(pid)
-		sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
-		cleanedCount++
-
-		// 2. Atomically clean up all threads associated with the terminated process.
-		if val, exists := sm.pidToTids.Load(pid); exists {
-			tidSet := val.(*sync.Map)
-			tidSet.Range(func(key, value any) bool {
-				tid := key.(uint32)
-				sm.tidToPid.Delete(tid)
-				sm.terminatedThreads.Delete(tid) // Also remove from terminated list if present
-				return true
-			})
-			sm.pidToTids.Delete(pid)
-		}
+		// Get the start key for the terminated process. It will be 0 if not found.
+		startKey, _ := sm.GetProcessStartKey(pid)
+		procsToClean[pid] = startKey
 		return true
 	})
 
-	// 3. Clean up individually terminated threads.
+	// 2. Execute the shared cleanup logic for the identified processes.
+	cleanedProcs := sm.cleanupProcesses(procsToClean)
+
+	// 3. Clean up individually terminated threads (that weren't part of a terminated process).
+	var cleanedThreads int
 	sm.terminatedThreads.Range(func(key, value any) bool {
-		tid := key.(uint32)
-		if val, exists := sm.tidToPid.Load(tid); exists {
-			pid := val.(uint32)
-			if pVal, pExists := sm.pidToTids.Load(pid); pExists {
-				pVal.(*sync.Map).Delete(tid)
-			}
-		}
-		sm.tidToPid.Delete(tid)
-		sm.terminatedThreads.Delete(tid)
-		cleanedCount++
+		sm.removeThread(key.(uint32))
+		sm.terminatedThreads.Delete(key)
+		cleanedThreads++
 		return true
 	})
 
-	if cleanedCount > 0 {
-		sm.log.Debug().Int("count", cleanedCount).Msg("Post-scrape cleanup of terminated processes complete")
+	// 4. Clean up individually unloaded images.
+	var cleanedImages int
+	sm.terminatedImages.Range(func(key, value any) bool {
+		sm.RemoveImage(key.(uint64))
+		cleanedImages++
+		return true
+	})
+
+	if cleanedProcs > 0 || cleanedThreads > 0 || cleanedImages > 0 {
+		sm.log.Debug().Int("processes", cleanedProcs).Int("threads", cleanedThreads).Int("images", cleanedImages).Msg("Post-scrape cleanup complete")
 	}
 }
 
 // ForceCleanupOldEntries is a safety net to prevent memory leaks if scrapes stop.
 // It removes any process or thread that was marked for deletion more than the maxAge ago.
 // This is called periodically by a background goroutine in the SessionManager.
+// It follows the same cleanup protocol as PostScrapeCleanup, ensuring collectors are notified.
 func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
-	cutoff := time.Now().Add(-maxAge)
-	var cleanedProcs, cleanedThreads int
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
 
-	// Force clean old terminated processes (and their threads)
+	cutoff := time.Now().Add(-maxAge)
+	procsToClean := make(map[uint32]uint64)
+
+	// 1. Identify old terminated processes to be forcibly cleaned.
 	sm.terminatedProcesses.Range(func(key, value any) bool {
 		if value.(time.Time).Before(cutoff) {
 			pid := key.(uint32)
-			sm.processes.Delete(pid)
-			sm.terminatedProcesses.Delete(pid)
-			sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
-			cleanedProcs++
-
-			// Cascade delete to threads
-			if val, exists := sm.pidToTids.Load(pid); exists {
-				val.(*sync.Map).Range(func(k, v any) bool {
-					sm.tidToPid.Delete(k.(uint32))
-					return true
-				})
-				sm.pidToTids.Delete(pid)
-			}
+			startKey, _ := sm.GetProcessStartKey(pid)
+			procsToClean[pid] = startKey
 		}
 		return true
 	})
 
-	// Force clean old individually terminated threads
+	// 2. Cleanup the identified processes.
+	cleanedProcs := sm.cleanupProcesses(procsToClean)
+
+	// 3. Force clean old individually terminated threads (that weren't part of a process cleanup).
+	var cleanedThreads int
 	sm.terminatedThreads.Range(func(key, value any) bool {
 		if value.(time.Time).Before(cutoff) {
 			sm.removeThread(key.(uint32))
@@ -195,12 +211,79 @@ func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
 		return true
 	})
 
-	if cleanedProcs > 0 || cleanedThreads > 0 {
+	// 4. Force clean old individually unloaded images.
+	var cleanedImages int
+	sm.terminatedImages.Range(func(key, value any) bool {
+		if value.(time.Time).Before(cutoff) {
+			sm.RemoveImage(key.(uint64))
+			cleanedImages++
+		}
+		return true
+	})
+
+	if cleanedProcs > 0 || cleanedThreads > 0 || cleanedImages > 0 {
 		sm.log.Warn().
 			Int("processes", cleanedProcs).
 			Int("threads", cleanedThreads).
-			Msg("Forcibly cleaned up stale entries older than max age (scrape likely stopped)")
+			Int("images", cleanedImages).
+			Dur("max_age", maxAge).
+			Msg("Forcibly cleaned up stale entries (scrape likely stopped)")
 	}
+}
+
+// cleanupProcesses is the centralized private helper for process deletion.
+// It notifies collectors and then removes processes and their associated threads.
+// This method MUST be called with the state manager's mutex held.
+// It returns the number of processes that were cleaned.
+func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) int {
+	if len(procsToClean) == 0 {
+		return 0
+	}
+
+	// Notify registered collectors to clean up their state for these PIDs.
+	// This happens BEFORE the state manager removes the process info, allowing
+	// collectors to perform any final lookups if needed.
+	for _, cleaner := range sm.cleaners {
+		cleaner.CleanupTerminatedProcesses(procsToClean)
+	}
+
+	// Perform the state manager's own cleanup for the identified processes.
+	for pid := range procsToClean {
+		sm.processes.Delete(pid)
+		sm.terminatedProcesses.Delete(pid)
+		sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
+
+		// Cascade delete to threads
+		if val, exists := sm.pidToTids.Load(pid); exists {
+			val.(*sync.Map).Range(func(k, v any) bool {
+				tid := k.(uint32)
+				sm.tidToPid.Delete(tid)
+				sm.terminatedThreads.Delete(tid) // Also remove from other terminated list
+				return true
+			})
+			sm.pidToTids.Delete(pid)
+		}
+
+		// Cascade delete to images loaded by this process
+		if imagesVal, exists := sm.pidToImages.LoadAndDelete(pid); exists {
+			imagesVal.(*sync.Map).Range(func(k, v any) bool {
+				imageBase := k.(uint64)
+				sm.images.Delete(imageBase)
+				sm.imageToPid.Delete(imageBase)
+				return true
+			})
+		}
+
+		// Cascade delete to FileObject mappings owned by this process
+		if fileObjectsVal, exists := sm.processToFileObjects.LoadAndDelete(pid); exists {
+			fileObjectsVal.(*sync.Map).Range(func(k, v any) bool {
+				fileObject := k.(uint64)
+				sm.fileObjectToProcess.Delete(fileObject)
+				return true
+			})
+		}
+	}
+	return len(procsToClean)
 }
 
 // CleanupStaleProcesses marks processes that have not been seen for a specified duration for deletion.

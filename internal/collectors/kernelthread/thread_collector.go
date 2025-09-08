@@ -121,7 +121,7 @@ func NewThreadCSCollector() *ThreadCollector {
 		threadStateCounters[i] = new(int64)
 	}
 
-	return &ThreadCollector{
+	collector := &ThreadCollector{
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
 		threadStateCounters:    threadStateCounters,
@@ -151,6 +151,11 @@ func NewThreadCSCollector() *ThreadCollector {
 			[]string{"state", "wait_reason"}, nil,
 		),
 	}
+
+	// Register the collector with the state manager for post-scrape cleanup.
+	statemanager.GetGlobalStateManager().RegisterCleaner(collector)
+
+	return collector
 }
 
 // Describe implements prometheus.Collector.
@@ -198,10 +203,12 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// Create context switch interval histograms
 	for cpu, stats := range data.ContextSwitchIntervals {
-		// Convert the bucket slice to the map format required by Prometheus
+		// Convert the individual bucket counts to the cumulative counts required by Prometheus.
 		buckets := make(map[float64]uint64, len(csIntervalBuckets))
+		var cumulativeCount uint64
 		for i, count := range stats.Buckets {
-			buckets[csIntervalBuckets[i]] = uint64(count)
+			cumulativeCount += uint64(count)
+			buckets[csIntervalBuckets[i]] = cumulativeCount
 		}
 
 		ch <- prometheus.MustNewConstHistogram(
@@ -248,10 +255,16 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 		pid := key.(uint32)
 		countPtr := val.(*int64)
 		if countPtr != nil {
-			// Only create metrics for processes that are still known at scrape time
-			// PID-Name mappings are retained until after scrap by the state manager.
+			// Only create metrics for processes that are still known at scrape time.
+			// The state manager retains information about terminated processes until
+			// AFTER the scrape is complete, ensuring we can report final metrics.
 			if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
 				count := atomic.LoadInt64(countPtr)
+				// TODO: This has a race condition with PID reuse. If a PID is reused before
+				// this scrape happens, we might fetch the StartKey of the NEW process and
+				// attribute the context switches of the OLD process to it.
+				// The fix is to store the StartKey along with the PID in contextSwitchesPerProcess
+				// at the time the event occurs.
 				startKey, _ := stateManager.GetProcessStartKey(pid)
 				data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
 					ProcessID:   pid,
@@ -314,6 +327,9 @@ func (c *ThreadCollector) RecordContextSwitch(
 		stateManager := statemanager.GetGlobalStateManager()
 		// Only create metrics for processes that are tracked
 		if stateManager.IsKnownProcess(processID) {
+			// TODO: This is vulnerable to a PID reuse race condition. The fix is to use a
+			// composite key of {PID, StartKey} here, which would require the handler
+			// to resolve and pass the StartKey on this hot path.
 			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
 			atomic.AddInt64(val.(*int64), 1)
 		}
@@ -344,9 +360,12 @@ func (c *ThreadCollector) RecordContextSwitch(
 		}
 		// For intervals smaller than the first bucket, idx remains 0.
 
-		// Increment all buckets from that index onwards.
-		for i := idx; i < len(csIntervalBuckets); i++ {
-			stats.Buckets[i]++
+		// Increment the single correct bucket. Prometheus handles the cumulative sum.
+		if idx < len(stats.Buckets) {
+			stats.Buckets[idx]++
+		} else {
+			// If the interval is larger than our largest bucket, increment the last bucket (+Inf).
+			stats.Buckets[len(stats.Buckets)-1]++
 		}
 		stats.mu.Unlock()
 	}
@@ -375,4 +394,19 @@ func (c *ThreadCollector) RecordThreadCreation() {
 // This is a convenience method that records a "terminated" state transition.
 func (c *ThreadCollector) RecordThreadTermination() {
 	c.RecordThreadStateTransition("terminated", "none")
+}
+
+// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
+// This method is called by the KernelStateManager after a scrape is complete to
+// allow the collector to safely clean up its internal state for terminated processes.
+func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+	cleanedCount := 0
+	for pid := range terminatedProcs {
+		if _, loaded := c.contextSwitchesPerProcess.LoadAndDelete(pid); loaded {
+			cleanedCount++
+		}
+	}
+	if cleanedCount > 0 {
+		c.log.Debug().Int("count", cleanedCount).Msg("Cleaned up context switch counters for terminated processes")
+	}
 }

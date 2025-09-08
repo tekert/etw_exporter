@@ -60,14 +60,33 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 		return err
 	}
 
-	// Resolve Thread ID to Process ID using the global thread handler.
+	// First, try to resolve the PID from the TID. This is the most reliable method.
 	pid, isKnown := h.stateManager.GetProcessIDForThread(uint32(threadID))
+
+	// If the TID is not known (due to event ordering races), fall back to the PID in the event header.
 	if !isKnown {
-		h.log.SampledWarn("pagefault_pid_error").Uint32("tid", uint32(threadID)).Msg("Could not resolve PID for thread causing page fault")
-		return nil // Cannot attribute the fault without a known PID.
+		fallbackPID := helper.EventRec.EventHeader.ProcessId
+		// Check if the fallback PID is a process we are actually tracking.
+		if h.stateManager.IsKnownProcess(fallbackPID) {
+			h.log.SampledDebug("pagefault_pid_fallback").
+				Uint32("tid", uint32(threadID)).
+				Uint32("fallback_pid", fallbackPID).
+				Msg("Could not resolve PID for thread, using fallback PID from event header")
+			pid = fallbackPID
+		} else {
+			// Both methods failed. We cannot attribute this event.
+			h.log.SampledWarn("pagefault_pid_error").
+				Uint32("tid", uint32(threadID)).
+				Uint32("fallback_pid", fallbackPID).
+				Msg("Could not resolve PID for thread and fallback PID is not a known process")
+			return nil
+		}
 	}
 
-	h.collector.ProcessHardPageFaultEvent(pid)
+	// Get the start key for the resolved PID to ensure correct attribution.
+	startKey, _ := h.stateManager.GetProcessStartKey(pid)
+
+	h.collector.ProcessHardPageFaultEvent(pid, startKey)
 	return nil
 }
 
@@ -85,12 +104,12 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 //	// TODO
 func (h *Handler) HandleManifestHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 	// Manifest events often provide the PID directly, simplifying the logic.
-	pid, err := helper.GetPropertyUint("ProcessID")
-	if err != nil {
-		h.log.SampledWarn("pagefault_pid_error").Err(err).Msg("Failed to get ProcessID from manifest HardFault event")
-		return err
-	}
+	// pid, err := helper.GetPropertyUint("ProcessID")
+	// if err != nil {
+	// 	h.log.SampledWarn("pagefault_pid_error").Err(err).Msg("Failed to get ProcessID from manifest HardFault event")
+	// 	return err
+	// }
 
-	h.collector.ProcessHardPageFaultEvent(uint32(pid))
+	// h.collector.ProcessHardPageFaultEvent(uint32(pid))
 	return nil
 }

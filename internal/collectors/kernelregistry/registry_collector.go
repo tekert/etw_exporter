@@ -32,14 +32,17 @@ type OperationKey struct {
 // ProcessOperationKey is a key for per-process registry operations.
 type ProcessOperationKey struct {
 	ProcessID uint32
-	// StartKey is omitted here and looked up during Collect for performance.
+	// TODO: StartKey is omitted here for performance on the hot path, but this creates a
+	// race condition. If a PID is reused before a scrape occurs, operations from the
+	// old process could be attributed to the new process. A future optimization
+	// should find a low-overhead way to get the StartKey in the handler.
 	Operation string
 	Result    string
 }
 
 // NewRegistryCollector creates a new registry metrics collector.
 func NewRegistryCollector(config *config.RegistryConfig) *RegistryCollector {
-	return &RegistryCollector{
+	c := &RegistryCollector{
 		operationsTotal:        make(map[OperationKey]*int64),
 		processOperationsTotal: make(map[ProcessOperationKey]*int64),
 
@@ -55,6 +58,11 @@ func NewRegistryCollector(config *config.RegistryConfig) *RegistryCollector {
 		),
 		config: config,
 	}
+
+	// Register for post-scrape cleanup.
+	statemanager.GetGlobalStateManager().RegisterCleaner(c)
+
+	return c
 }
 
 // Describe sends the descriptors of all metrics to the provided channel.
@@ -83,6 +91,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 	for key, countPtr := range c.processOperationsTotal {
 		// Look up process details during scrape time to avoid overhead in the hot path.
 		if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
+			// TODO: This lookup is subject to a race condition. See ProcessOperationKey TODO.
 			if startKey, hasStartKey := stateManager.GetProcessStartKey(key.ProcessID); hasStartKey {
 				ch <- prometheus.MustNewConstMetric(
 					c.processOperationsTotalDesc,
@@ -131,6 +140,21 @@ func (c *RegistryCollector) RecordRegistryOperation(processID uint32, operation 
 				c.processOperationsTotal[procOpKey] = new(int64)
 			}
 			atomic.AddInt64(c.processOperationsTotal[procOpKey], 1)
+		}
+	}
+}
+
+// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
+func (c *RegistryCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+	if !c.config.EnablePerProcess {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for key := range c.processOperationsTotal {
+		if _, exists := terminatedProcs[key.ProcessID]; exists {
+			delete(c.processOperationsTotal, key)
 		}
 	}
 }

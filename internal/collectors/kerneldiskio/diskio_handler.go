@@ -1,8 +1,6 @@
 package kerneldiskio
 
 import (
-	"sync"
-
 	"github.com/tekert/goetw/etw"
 
 	"etw_exporter/internal/config"
@@ -11,12 +9,6 @@ import (
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
-
-// processIdentifier holds the PID and unique StartKey for a process.
-type processIdentifier struct {
-	PID      uint32
-	StartKey uint64
-}
 
 // Key Correlations Between Disk and File Events:
 // [File Event]						[Disk Event] 			[Points To]
@@ -54,9 +46,7 @@ type processIdentifier struct {
 type Handler struct {
 	customCollector *DiskCollector       // High-performance custom collector
 	config          *config.DiskIOConfig // Collector configuration
-
-	fileObjectMutex sync.RWMutex
-	fileObjectMap   map[uint64]processIdentifier // FileObject -> {PID, StartKey} mapping
+	stateManager    *statemanager.KernelStateManager
 
 	log *phusluadapter.SampledLogger // Disk I/O handler logger
 }
@@ -70,9 +60,8 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *Handler {
 	return &Handler{
 		customCollector: NewDiskIOCustomCollector(),
 		config:          config,
-		fileObjectMap:   make(map[uint64]processIdentifier),
-		//log:             logger.NewLoggerWithContext("diskio_handler"),
-		log: logger.NewSampledLoggerCtx("diskio_handler"),
+		stateManager:    statemanager.GetGlobalStateManager(),
+		log:             logger.NewSampledLoggerCtx("diskio_handler"),
 	}
 }
 
@@ -129,39 +118,30 @@ func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	// Get FileObject for process correlation
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
-		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect)
-		pid := helper.EventRec.EventHeader.ProcessId
-		startKey, _ := statemanager.GetGlobalStateManager().GetProcessStartKey(pid)
+		// If we can't get FileObject, we cannot reliably attribute this I/O to a process.
+		// We still record the system-wide metrics but with a PID of 0.
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
-			Uint32("process_id", pid).
-			Msg("Disk read - no FileObject, using EventHeader ProcessId")
-		d.customCollector.RecordDiskIO(uint32(diskNumber), pid, startKey, uint32(transferSize), false)
+			Msg("Disk read - no FileObject, cannot attribute to a specific process")
+		d.customCollector.RecordDiskIO(uint32(diskNumber), 0, 0, uint32(transferSize), false)
 		return nil
 	}
 
 	// Look up the real process ID using FileObject correlation
-	d.fileObjectMutex.RLock()
-	ident, exists := d.fileObjectMap[fileObject]
-	d.fileObjectMutex.RUnlock()
-
-	var pid uint32
-	var startKey uint64
+	pid, startKey, exists := d.stateManager.GetProcessForFileObject(fileObject)
 
 	if !exists {
-		// If no mapping exists, fall back to EventHeader ProcessId (may be incorrect) // TODO(tekert): check this case.
-		pid = helper.EventRec.EventHeader.ProcessId
-		startKey, _ = statemanager.GetGlobalStateManager().GetProcessStartKey(pid)
+		// If no mapping exists, we cannot attribute the I/O.
+		// Record the system-wide metrics but not the per-process metrics.
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
 			Uint64("file_object", fileObject).
-			Uint32("fallback_process_id", pid).
-			Msg("Disk read - no FileObject mapping, using fallback ProcessId")
+			Msg("Disk read - no FileObject mapping, cannot attribute to a specific process")
+		pid = 0
+		startKey = 0
 	} else {
-		pid = ident.PID
-		startKey = ident.StartKey
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
@@ -214,39 +194,30 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 	// Get FileObject for process correlation
 	fileObject, err := helper.GetPropertyUint("FileObject")
 	if err != nil {
-		// If we can't get FileObject, fall back to EventHeader ProcessId (may be incorrect) // TODO(tekert): check this.
-		pid := helper.EventRec.EventHeader.ProcessId
-		startKey, _ := statemanager.GetGlobalStateManager().GetProcessStartKey(pid)
+		// If we can't get FileObject, we cannot reliably attribute this I/O to a process.
+		// We still record the system-wide metrics but with a PID of 0.
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
-			Uint32("process_id", pid).
-			Msg("Disk write - no FileObject, using EventHeader ProcessId")
-		d.customCollector.RecordDiskIO(uint32(diskNumber), pid, startKey, uint32(transferSize), true)
+			Msg("Disk write - no FileObject, cannot attribute to a specific process")
+		d.customCollector.RecordDiskIO(uint32(diskNumber), 0, 0, uint32(transferSize), true)
 		return nil
 	}
 
 	// Look up the real process ID using FileObject correlation
-	d.fileObjectMutex.RLock()
-	ident, exists := d.fileObjectMap[fileObject]
-	d.fileObjectMutex.RUnlock()
-
-	var pid uint32
-	var startKey uint64
+	pid, startKey, exists := d.stateManager.GetProcessForFileObject(fileObject)
 
 	if !exists {
-		// If no mapping exists, fall back to EventHeader ProcessId (may be incorrect) // TODO(tekert): check this.
-		pid = helper.EventRec.EventHeader.ProcessId
-		startKey, _ = statemanager.GetGlobalStateManager().GetProcessStartKey(pid)
+		// If no mapping exists, we cannot attribute the I/O.
+		// Record the system-wide metrics but not the per-process metrics.
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
 			Uint64("file_object", fileObject).
-			Uint32("fallback_process_id", pid).
-			Msg("Disk write - no FileObject mapping, using fallback ProcessId")
+			Msg("Disk write - no FileObject mapping, cannot attribute to a specific process")
+		pid = 0
+		startKey = 0
 	} else {
-		pid = ident.PID
-		startKey = ident.StartKey
 		d.log.Trace().
 			Uint32("disk_number", uint32(diskNumber)).
 			Uint32("transfer_size", uint32(transferSize)).
@@ -323,10 +294,8 @@ func (d *Handler) HandleFileCreate(helper *etw.EventRecordHelper) error {
 	processID := helper.EventRec.EventHeader.ProcessId
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	// Store the FileObject -> {PID, StartKey} mapping
-	d.fileObjectMutex.Lock()
-	d.fileObjectMap[fileObject] = processIdentifier{PID: processID, StartKey: startKey}
-	d.fileObjectMutex.Unlock()
+	// Store the FileObject -> {PID, StartKey} mapping in the central state manager
+	d.stateManager.AddFileObjectMapping(fileObject, processID, startKey)
 
 	d.log.Trace().
 		Uint64("file_object", fileObject).
@@ -361,9 +330,7 @@ func (d *Handler) HandleFileClose(helper *etw.EventRecordHelper) error {
 	}
 
 	// Remove the FileObject mapping to prevent stale entries
-	d.fileObjectMutex.Lock()
-	delete(d.fileObjectMap, fileObject)
-	d.fileObjectMutex.Unlock()
+	d.stateManager.RemoveFileObjectMapping(fileObject)
 
 	d.log.Trace().
 		Uint64("file_object", fileObject).
@@ -404,10 +371,8 @@ func (d *Handler) HandleFileWrite(helper *etw.EventRecordHelper) error {
 	processID := helper.EventRec.EventHeader.ProcessId
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	// Store/update the FileObject -> {PID, StartKey} mapping
-	d.fileObjectMutex.Lock()
-	d.fileObjectMap[fileObject] = processIdentifier{PID: processID, StartKey: startKey}
-	d.fileObjectMutex.Unlock()
+	// Store/update the FileObject -> {PID, StartKey} mapping in the central state manager
+	d.stateManager.AddFileObjectMapping(fileObject, processID, startKey)
 
 	d.log.Trace().
 		Uint64("file_object", fileObject).
@@ -449,10 +414,8 @@ func (d *Handler) HandleFileRead(helper *etw.EventRecordHelper) error {
 	processID := helper.EventRec.EventHeader.ProcessId
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	// Store/update the FileObject -> {PID, StartKey} mapping
-	d.fileObjectMutex.Lock()
-	d.fileObjectMap[fileObject] = processIdentifier{PID: processID, StartKey: startKey}
-	d.fileObjectMutex.Unlock()
+	// Store/update the FileObject -> {PID, StartKey} mapping in the central state manager
+	d.stateManager.AddFileObjectMapping(fileObject, processID, startKey)
 
 	d.log.Trace().
 		Uint64("file_object", fileObject).
@@ -489,9 +452,7 @@ func (d *Handler) HandleFileDelete(helper *etw.EventRecordHelper) error {
 	}
 
 	// Remove the FileObject mapping when file is deleted
-	d.fileObjectMutex.Lock()
-	delete(d.fileObjectMap, fileObject)
-	d.fileObjectMutex.Unlock()
+	d.stateManager.RemoveFileObjectMapping(fileObject)
 
 	d.log.Trace().
 		Uint64("file_object", fileObject).

@@ -16,10 +16,6 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// TODO(tekert): reopen NT Kernel Logger session if it closes, just a goroutine that checks every 5 seconds
-// TODO(tekert): If in windows 11, use System Config Provider instead of NT Kernel Logger
-// TODO(tekert): Explain that in Windows 10 only 1 NT Kernel Logger session can be active at a time.
-
 var (
 	EtwExporterGuid = etw.MustParseGUID("{c47d5c06-89e7-11f0-bbb7-6045cb9e9a44}")
 )
@@ -234,8 +230,8 @@ func (s *SessionManager) RestartSession(sessionGUID etw.GUID) {
 		}
 		s.mu.RUnlock()
 
-		// TODO: refactor the retry mechanism and maybe use goetw StoppedTraces() channel and the Context to
-		//   with this, or replacing this method entirely with that channel, think later.
+		// ! TODO: refactor the retry mechanism and maybe use goetw StoppedTraces() channel and the Context to
+		// !  with this, So in case we lose events we can get a signal that the consumer lost the session.
 
 		// This loop ensures that only one goroutine can attempt a restart for a given session at a time.
 		// If a restart is already in progress, this goroutine will wait, and then re-check the session's health

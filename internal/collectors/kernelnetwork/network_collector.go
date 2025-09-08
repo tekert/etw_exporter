@@ -129,6 +129,9 @@ func NewNetworkCollector(config *config.NetworkConfig) *NetCollector {
 		)
 	}
 
+	// Register for post-scrape cleanup.
+	statemanager.GetGlobalStateManager().RegisterCleaner(nc)
+
 	return nc
 }
 
@@ -322,5 +325,41 @@ func (nc *NetCollector) RecordRetransmission(pid uint32, startKey uint64) {
 		key := retransmissionKey{PID: pid, StartKey: startKey}
 		val, _ := nc.retransmissionsTotal.LoadOrStore(key, new(uint64))
 		atomic.AddUint64(val.(*uint64), 1)
+	}
+}
+
+// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
+// This method is called by the KernelStateManager after a scrape is complete to
+// allow the collector to safely clean up its internal state for terminated processes.
+func (nc *NetCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+	cleanedCount := 0
+
+	// Helper function to clean a sync.Map
+	cleanMap := func(m *sync.Map, getKeyInfo func(any) (uint32, uint64)) {
+		m.Range(func(key, _ any) bool {
+			pid, startKey := getKeyInfo(key)
+			if termStartKey, isTerminated := terminatedProcs[pid]; isTerminated && startKey == termStartKey {
+				m.Delete(key)
+				cleanedCount++
+			}
+			return true
+		})
+	}
+
+	cleanMap(&nc.bytesSentTotal, func(k any) (uint32, uint64) { key := k.(dataKey); return key.PID, key.StartKey })
+	cleanMap(&nc.bytesReceivedTotal, func(k any) (uint32, uint64) { key := k.(dataKey); return key.PID, key.StartKey })
+
+	if nc.config.ConnectionHealth {
+		cleanMap(&nc.connectionsAttemptedTotal, func(k any) (uint32, uint64) { key := k.(dataKey); return key.PID, key.StartKey })
+		cleanMap(&nc.connectionsAcceptedTotal, func(k any) (uint32, uint64) { key := k.(dataKey); return key.PID, key.StartKey })
+		cleanMap(&nc.connectionsFailedTotal, func(k any) (uint32, uint64) { key := k.(failureKey); return key.PID, key.StartKey })
+	}
+
+	if nc.config.RetransmissionRate {
+		cleanMap(&nc.retransmissionsTotal, func(k any) (uint32, uint64) { key := k.(retransmissionKey); return key.PID, key.StartKey })
+	}
+
+	if cleanedCount > 0 {
+		nc.log.Debug().Int("count", len(terminatedProcs)).Int("maps_cleaned", cleanedCount).Msg("Cleaned up network counters for terminated processes")
 	}
 }

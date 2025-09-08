@@ -160,12 +160,14 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 	}
 
 	processID := er.EventHeader.ProcessId
-	// MOF events do not have ExtProcessStartKey. The start key will be retrieved
-	// from the state manager during the Prometheus scrape (Collect phase) for efficiency.
+    // TODO: MOF events do not have an easily accessible Process Start Key. Passing only
+    // the PID to the collector creates a race condition with PID reuse. This is a
+    // known issue accepted for performance reasons on this high-throughput path.
+    // See the TODO in the RegistryCollector for more details.
 
-	h.customCollector.RecordRegistryOperation(processID, operation, status)
+    h.customCollector.RecordRegistryOperation(processID, operation, status)
 
-	return nil
+    return nil
 }
 
 // HandleRegistryEvent processes registry events to track operations.
