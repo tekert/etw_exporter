@@ -1,7 +1,7 @@
 package maps
 
 // mapImplementation controls the default concurrent map used across the application.
-// Valid options: "xsync", "sharded", "cornelk", "sync".
+// Valid options: "xsync", "sharded", "cornelk", "sync". (cornelk is not safe)
 const mapImplementation = "xsync"
 
 // Integer is a constraint that permits any integer type.
@@ -15,6 +15,8 @@ type Integer interface {
 // This abstraction allows swapping the underlying implementation without
 // changing the business logic in the collectors.
 type ConcurrentMap[K Integer, V any] interface {
+	// TODO: write documentation for each method
+	
 	Load(key K) (V, bool)
 	Store(key K, value V)
 	Delete(key K)

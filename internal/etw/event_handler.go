@@ -23,6 +23,9 @@ import (
 // eventHandlerFunc is a generic function signature for all event handlers.
 type eventHandlerFunc func(helper *etw.EventRecordHelper) error
 
+// rawEventHandlerFunc is a function signature for raw event handlers.
+type rawEventHandlerFunc func(record *etw.EventRecord) error
+
 // providerHandlers holds the routing table for a single provider.
 // It uses a slice for fast lookups of common, low-numbered event IDs,
 // and a map for rare, high-numbered event IDs to save memory.
@@ -118,6 +121,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	// Populate the GUID to counter map.
 	eh.guidToCounter[*SystemConfigGUID] = &eh.systemConfigEventCount
 	eh.guidToCounter[*MicrosoftWindowsKernelDiskGUID] = &eh.diskEventCount
+	eh.guidToCounter[*DiskIOKernelGUID] = &eh.diskEventCount // MOF provider uses the same counter
 	eh.guidToCounter[*MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
 	eh.guidToCounter[*MicrosoftWindowsKernelFileGUID] = &eh.fileEventCount
 	eh.guidToCounter[*ThreadKernelGUID] = &eh.threadEventCount
@@ -146,14 +150,19 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	eh.log.Debug().Msg("Registered global system config handler routes")
 
 	// Initialize enabled collectors and register their routes.
-	if eh.config.DiskIO.Enabled {
+	{
 		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&eh.config.DiskIO)
 		prometheus.MustRegister(eh.diskHandler.GetCustomCollector())
 
-		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271})
+		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271}) - MANIFEST
 		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskRead)   // DiskRead
 		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWrite) // DiskWrite
 		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush
+
+		// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
+		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskRead)   // DiskRead mof
+		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWrite) // DiskWrite mof
+		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush mof
 
 		// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
 		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 12, eh.diskHandler.HandleFileCreate) // Create
@@ -162,14 +171,16 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 16, eh.diskHandler.HandleFileWrite)  // Write
 		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 26, eh.diskHandler.HandleFileDelete) // DeletePath
 
-		eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
 		kernelsysconfig.GetGlobalSystemConfigCollector().RequestMetrics(
 			kernelsysconfig.PhysicalDiskInfoMetricName,
 			kernelsysconfig.LogicalDiskInfoMetricName,
 		)
+		if eh.config.DiskIO.Enabled {
+			eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
+		}
 	}
 
-	if eh.config.ThreadCS.Enabled {
+	{
 		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
 		prometheus.MustRegister(eh.threadHandler.GetCustomCollector())
 
@@ -180,10 +191,12 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.threadHandler.HandleThreadStart) // ThreadRundown
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.threadHandler.HandleThreadEnd)        // ThreadEnd
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadEnd)     // ThreadRundownEnd
-		eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
+		if eh.config.ThreadCS.Enabled {
+			eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
+		}
 	}
 
-	if eh.config.PerfInfo.Enabled {
+	{
 		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&eh.config.PerfInfo)
 		prometheus.MustRegister(eh.perfinfoHandler.GetCustomCollector())
 
@@ -202,10 +215,12 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 
 		// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
 		// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
-		eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
+		if eh.config.PerfInfo.Enabled {
+			eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
+		}
 	}
 
-	if eh.config.Network.Enabled {
+	{
 		eh.networkHandler = kernelnetwork.NewNetworkHandler(&eh.config.Network)
 		prometheus.MustRegister(eh.networkHandler.GetCustomCollector())
 
@@ -226,26 +241,34 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 43, eh.networkHandler.HandleUDPDataReceived)        // UDP Recv (IPv4)
 		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 59, eh.networkHandler.HandleUDPDataReceived)        // UDP Recv (IPv6)
 		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 49, eh.networkHandler.HandleUDPConnectionFailed)    // UDP Connect Failed
-		eh.log.Debug().Msg("Network collector enabled and routes registered")
+
+		if eh.config.Network.Enabled {
+			eh.log.Debug().Msg("Network collector enabled and routes registered")
+		}
 	}
 
-	if eh.config.Memory.Enabled {
+	{
 		eh.memoryHandler = kernelmemory.NewMemoryHandler(&eh.config.Memory, eh.stateManager)
 		prometheus.MustRegister(eh.memoryHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
 		eh.addRoute(*PageFaultKernelGUID, 32, eh.memoryHandler.HandleMofHardPageFaultEvent) // HardFault
-		eh.log.Debug().Msg("Memory collector enabled and routes registered")
+
+		if eh.config.Memory.Enabled {
+			eh.log.Debug().Msg("Memory collector enabled and routes registered")
+		}
 	}
 
-	if eh.config.Registry.Enabled {
+	{
 		eh.registryHandler = kernelregistry.NewRegistryHandler(&eh.config.Registry, eh.stateManager)
 		prometheus.MustRegister(eh.registryHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})
 		// NOTE: Registry events are now handled in the raw EventRecordCallback for performance.
 		// The routing map is no longer used for this provider.
-		eh.log.Debug().Msg("Registry collector enabled (raw handling)")
+		if eh.config.Registry.Enabled {
+			eh.log.Debug().Msg("Registry collector enabled (raw handling)")
+		}
 	}
 
 	// --- Sentinel Collector Registration ---
@@ -263,7 +286,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 func (h *EventHandler) addRoute(guid etw.GUID, eventID uint16, handler eventHandlerFunc) {
 	routes, ok := h.routeMap[guid]
 	if !ok {
-		routes = newProviderHandlers() // should set maxSliceEventID = 256
+		routes = newProviderHandlers()       // should set maxSliceEventID = 256
 		routes.maxSliceEventID = uint16(256) // just in case some refactors don't.
 		h.routeMap[guid] = routes
 	}
@@ -316,7 +339,7 @@ func (h *EventHandler) GetSessionWatcherEventCount() uint64 {
 // ETW Callback Methods
 
 // EventRecordCallback is the first-stage, hot-path callback for every event record.
-// It performs fast-path filtering for CSwitch events and routes them to raw handlers,
+// It performs fast-path filtering for events and routes them to raw handlers,
 // bypassing more expensive processing. It returns 'false' to stop further processing.
 func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	providerID := record.EventHeader.ProviderId
@@ -351,19 +374,33 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 		return false // Stop processing, we've handled it.
 	}
 
+	eventID := record.EventID()
+	// Disk I/O MOF Provider: {3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}
+	if providerID.Equals(DiskIOKernelGUID) {
+		if eventID == etw.EVENT_TRACE_TYPE_IO_READ ||
+			eventID == etw.EVENT_TRACE_TYPE_IO_WRITE ||
+			eventID == etw.EVENT_TRACE_TYPE_IO_FLUSH {
+			h.diskEventCount.Add(1)
+			if h.diskHandler != nil {
+				// Route to disk handler for raw disk I/O events.
+				switch eventID {
+				case etw.EVENT_TRACE_TYPE_IO_READ:
+					_ = h.diskHandler.HandleDiskReadMofRaw(record)
+				case etw.EVENT_TRACE_TYPE_IO_WRITE:
+					_ = h.diskHandler.HandleDiskWriteMofRaw(record)
+				case etw.EVENT_TRACE_TYPE_IO_FLUSH:
+					_ = h.diskHandler.HandleDiskFlushMofRaw(record)
+				}
+			}
+		}
+	}
+
 	// TODO.
-	// Determine the event ID. For MOF events, this is the Opcode.
-	// var eventID uint16
-	// if eventRecord.IsMof() {
-	// 	eventID = uint16(eventRecord.EventHeader.EventDescriptor.Opcode)
-	// } else {
-	// 	eventID = eventRecord.EventHeader.EventDescriptor.Id
-	// }
-	// --- Scalable Path (Hypothetical for other raw events) ---
-	// If I had more raw providers, I could add a map lookup here as a fallback.
-	// if rawProviderHandlers, ok := h.rawRouteMap[providerID]; ok {
-	// 	if handler, ok := rawProviderHandlers[eventID]; ok {
-	// 		handler(record)
+	// //--- Scalable Path (Hypothetical for other raw events) ---
+	// //If I had more raw providers, I could add a map lookup here as a fallback.
+	// if rawProviderHandlers, ok := h.routeMap[providerID]; ok {
+	// 	if handlerFunc := rawProviderHandlers.get(eventID); handlerFunc != nil {
+	// 		handlerFunc(record)
 	// 		return false // Stop processing
 	// 	}
 	// }

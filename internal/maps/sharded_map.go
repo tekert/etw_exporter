@@ -25,7 +25,7 @@ type ShardedMap[K Integer, V any] struct {
 // NewShardedMap creates and initializes a new ShardedMap, returning it as a ConcurrentMap.
 func NewShardedMap[K Integer, V any]() ConcurrentMap[K, V] {
 	m := &ShardedMap[K, V]{}
-	for i := 0; i < numShards; i++ {
+	for i := range numShards {
 		m.shards[i].m = make(map[K]V)
 	}
 	return m
