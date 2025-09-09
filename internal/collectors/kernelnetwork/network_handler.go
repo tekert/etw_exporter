@@ -60,7 +60,7 @@ func (nh *Handler) HandleTCPDataSent(helper *etw.EventRecordHelper) error {
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordDataSent(uint32(pid), startKey, "tcp", uint32(size))
+	nh.collector.RecordDataSent(uint32(pid), startKey, ProtocolTCP, uint32(size))
 	return nil
 }
 
@@ -95,7 +95,7 @@ func (nh *Handler) HandleTCPDataReceived(helper *etw.EventRecordHelper) error {
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordDataReceived(uint32(processID), startKey, "tcp", uint32(size))
+	nh.collector.RecordDataReceived(uint32(processID), startKey, ProtocolTCP, uint32(size))
 	return nil
 }
 
@@ -132,7 +132,7 @@ func (nh *Handler) HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) e
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordConnectionAttempted(uint32(pid), startKey, "tcp")
+	nh.collector.RecordConnectionAttempted(uint32(pid), startKey, ProtocolTCP)
 	return nil
 }
 
@@ -157,7 +157,7 @@ func (nh *Handler) HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) er
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordConnectionAccepted(uint32(pid), startKey, "tcp")
+	nh.collector.RecordConnectionAccepted(uint32(pid), startKey, ProtocolTCP)
 	return nil
 }
 
@@ -208,7 +208,7 @@ func (nh *Handler) HandleTCPConnectionFailed(helper *etw.EventRecordHelper) erro
 		return err
 	}
 
-	nh.collector.RecordConnectionFailed(0, 0, "tcp", uint16(failureCode))
+	nh.collector.RecordConnectionFailed(0, 0, ProtocolTCP, uint16(failureCode))
 	return nil
 }
 
@@ -238,7 +238,7 @@ func (nh *Handler) HandleUDPDataSent(helper *etw.EventRecordHelper) error {
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordDataSent(uint32(pid), startKey, "udp", uint32(size))
+	nh.collector.RecordDataSent(uint32(pid), startKey, ProtocolUDP, uint32(size))
 	return nil
 }
 
@@ -268,7 +268,7 @@ func (nh *Handler) HandleUDPDataReceived(helper *etw.EventRecordHelper) error {
 	}
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	nh.collector.RecordDataReceived(uint32(pid), startKey, "udp", uint32(size))
+	nh.collector.RecordDataReceived(uint32(pid), startKey, ProtocolUDP, uint32(size))
 	return nil
 }
 
@@ -294,6 +294,6 @@ func (nh *Handler) HandleUDPConnectionFailed(helper *etw.EventRecordHelper) erro
 		return err
 	}
 
-	nh.collector.RecordConnectionFailed(0, 0, "udp", uint16(failureCode))
+	nh.collector.RecordConnectionFailed(0, 0, ProtocolUDP, uint16(failureCode))
 	return nil
 }
