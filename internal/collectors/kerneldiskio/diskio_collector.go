@@ -9,25 +9,39 @@ import (
 
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/maps"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
+
+// processDiskMetrics holds I/O metrics for a single disk within a process.
+type processDiskMetrics struct {
+	IOCount      map[string]*atomic.Int64 // operation -> count
+	BytesRead    *atomic.Int64
+	BytesWritten *atomic.Int64
+}
+
+// processMetrics holds all disk I/O metrics for a single process instance.
+type processMetrics struct {
+	PID   uint32
+	mu    sync.RWMutex // Protects the Disks map below
+	Disks map[uint32]*processDiskMetrics
+}
 
 // DiskCollector implements prometheus.Collector for disk I/O related metrics.
 // This collector follows Prometheus best practices by creating new metrics on each scrape
 //
 // All metrics are designed for low cardinality to maintain performance at scale.
 type DiskCollector struct {
-	// Atomic counters for high-frequency operations
-	diskIOCount      map[DiskIOKey]*int64 // {diskNumber, operation} -> count
-	diskBytesRead    map[uint32]*int64    // diskNumber -> bytes read
-	diskBytesWritten map[uint32]*int64    // diskNumber -> bytes written
+	// System-wide metrics, using simple maps protected by the collector's mutex.
+	diskIOCount      map[uint32]map[string]*atomic.Int64 // disk -> {op -> count}
+	diskBytesRead    map[uint32]*atomic.Int64            // disk -> count
+	diskBytesWritten map[uint32]*atomic.Int64            // disk -> count
 
-	processIOCount      map[ProcessIOKey]*int64    // {processID, diskNumber, operation} -> count
-	processBytesRead    map[ProcessBytesKey]*int64 // {processID, diskNumber} -> bytes read
-	processBytesWritten map[ProcessBytesKey]*int64 // {processID, diskNumber} -> bytes written
+	// Per-process metrics, keyed by the unique process StartKey.
+	perProcessMetrics maps.ConcurrentMap[uint64, *processMetrics] // startKey -> metrics
 
-	// Synchronization
+	// Synchronization for system-wide maps.
 	mu  sync.RWMutex
 	log *phusluadapter.SampledLogger
 
@@ -40,73 +54,17 @@ type DiskCollector struct {
 	processWrittenBytesDesc *prometheus.Desc
 }
 
-// DiskIOKey represents a composite key for disk I/O operations.
-type DiskIOKey struct {
-	DiskNumber uint32
-	Operation  string
-}
-
-// ProcessIOKey represents a composite key for process I/O operations.
-type ProcessIOKey struct {
-	ProcessID  uint32
-	StartKey   uint64
-	DiskNumber uint32
-	Operation  string
-}
-
-// ProcessBytesKey represents a composite key for process bytes transferred.
-type ProcessBytesKey struct {
-	ProcessID  uint32
-	StartKey   uint64
-	DiskNumber uint32
-}
-
-// DiskIOMetricsData holds aggregated data for a single scrape
-type DiskIOMetricsData struct {
-	DiskIOCount         map[DiskIOKey]DiskIOCountData        // {diskNumber, operation} -> count data
-	DiskBytesRead       map[uint32]int64                     // diskNumber -> bytes read
-	DiskBytesWritten    map[uint32]int64                     // diskNumber -> bytes written
-	ProcessIOCount      map[ProcessIOKey]ProcessIOCountData  // {processID, diskNumber, operation} -> count data
-	ProcessBytesRead    map[ProcessBytesKey]ProcessBytesData // {processID, diskNumber} -> bytes read data
-	ProcessBytesWritten map[ProcessBytesKey]ProcessBytesData // {processID, diskNumber} -> bytes written data
-}
-
-// DiskIOCountData holds disk I/O count data with labels
-type DiskIOCountData struct {
-	DiskNumber uint32
-	Operation  string
-	Count      int64
-}
-
-// ProcessIOCountData holds process I/O count data with labels
-type ProcessIOCountData struct {
-	ProcessID   uint32
-	StartKey    uint64
-	ProcessName string
-	DiskNumber  uint32
-	Operation   string
-	Count       int64
-}
-
-// ProcessBytesData holds process bytes transfer data with labels
-type ProcessBytesData struct {
-	ProcessID   uint32
-	StartKey    uint64
-	ProcessName string
-	DiskNumber  uint32
-	Bytes       int64
-}
-
 // NewDiskIOCustomCollector creates a new disk I/O metrics custom collector.
 func NewDiskIOCustomCollector() *DiskCollector {
 	collector := &DiskCollector{
-		diskIOCount:         make(map[DiskIOKey]*int64),
-		diskBytesRead:       make(map[uint32]*int64),
-		diskBytesWritten:    make(map[uint32]*int64),
-		processIOCount:      make(map[ProcessIOKey]*int64),
-		processBytesRead:    make(map[ProcessBytesKey]*int64),
-		processBytesWritten: make(map[ProcessBytesKey]*int64),
-		log:                 logger.NewSampledLoggerCtx("diskio_collector"),
+		// Initialize system-wide maps
+		diskIOCount:      make(map[uint32]map[string]*atomic.Int64),
+		diskBytesRead:    make(map[uint32]*atomic.Int64),
+		diskBytesWritten: make(map[uint32]*atomic.Int64),
+
+		// Initialize per-process map
+		perProcessMetrics: maps.NewConcurrentMap[uint64, *processMetrics](),
+		log:               logger.NewSampledLoggerCtx("diskio_collector"),
 
 		// Disk I/O metrics
 		diskIOCountDesc: prometheus.NewDesc(
@@ -131,12 +89,12 @@ func NewDiskIOCustomCollector() *DiskCollector {
 		),
 		processReadBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_read_bytes_total",
-			"Total bytes read from disk per process",
+			"Total bytes read from disk per process and disk",
 			[]string{"process_id", "process_start_key", "process_name", "disk"}, nil,
 		),
 		processWrittenBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_written_bytes_total",
-			"Total bytes written to disk per process",
+			"Total bytes written to disk per process and disk",
 			[]string{"process_id", "process_start_key", "process_name", "disk"}, nil,
 		),
 	}
@@ -168,175 +126,94 @@ func (c *DiskCollector) Describe(ch chan<- *prometheus.Desc) {
 // Parameters:
 //   - ch: Channel to send metrics to
 func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
+	stateManager := statemanager.GetGlobalStateManager()
+
 	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	// Collect current data snapshot
-	data := c.collectData()
-
-	// Create disk I/O count metrics
-	for _, ioData := range data.DiskIOCount {
-		ch <- prometheus.MustNewConstMetric(
-			c.diskIOCountDesc,
-			prometheus.CounterValue,
-			float64(ioData.Count),
-			strconv.FormatUint(uint64(ioData.DiskNumber), 10),
-			ioData.Operation,
-		)
+	// --- System-Wide Metrics ---
+	for diskNumber, opMap := range c.diskIOCount {
+		diskStr := strconv.FormatUint(uint64(diskNumber), 10)
+		for op, count := range opMap {
+			ch <- prometheus.MustNewConstMetric(
+				c.diskIOCountDesc,
+				prometheus.CounterValue,
+				float64(count.Load()),
+				diskStr,
+				op,
+			)
+		}
 	}
-
-	// Create disk bytes read metrics
-	for diskNumber, bytes := range data.DiskBytesRead {
+	for diskNumber, bytes := range c.diskBytesRead {
 		ch <- prometheus.MustNewConstMetric(
 			c.diskReadBytesDesc,
 			prometheus.CounterValue,
-			float64(bytes),
+			float64(bytes.Load()),
 			strconv.FormatUint(uint64(diskNumber), 10),
 		)
 	}
-
-	// Create disk bytes written metrics
-	for diskNumber, bytes := range data.DiskBytesWritten {
+	for diskNumber, bytes := range c.diskBytesWritten {
 		ch <- prometheus.MustNewConstMetric(
 			c.diskWrittenBytesDesc,
 			prometheus.CounterValue,
-			float64(bytes),
+			float64(bytes.Load()),
 			strconv.FormatUint(uint64(diskNumber), 10),
 		)
 	}
+	c.mu.RUnlock()
 
-	// Create process I/O count metrics
-	for _, procData := range data.ProcessIOCount {
-		ch <- prometheus.MustNewConstMetric(
-			c.processIOCountDesc,
-			prometheus.CounterValue,
-			float64(procData.Count),
-			strconv.FormatUint(uint64(procData.ProcessID), 10),
-			strconv.FormatUint(procData.StartKey, 10),
-			procData.ProcessName,
-			strconv.FormatUint(uint64(procData.DiskNumber), 10),
-			procData.Operation,
-		)
-	}
+	// --- Per-Process Metrics ---
+	c.perProcessMetrics.Range(func(startKey uint64, metrics *processMetrics) bool {
+		if processName, ok := stateManager.GetKnownProcessName(metrics.PID); ok {
+			pidStr := strconv.FormatUint(uint64(metrics.PID), 10)
+			startKeyStr := strconv.FormatUint(startKey, 10)
 
-	// Create process bytes read metrics
-	for _, procData := range data.ProcessBytesRead {
-		ch <- prometheus.MustNewConstMetric(
-			c.processReadBytesDesc,
-			prometheus.CounterValue,
-			float64(procData.Bytes),
-			strconv.FormatUint(uint64(procData.ProcessID), 10),
-			strconv.FormatUint(procData.StartKey, 10),
-			procData.ProcessName,
-			strconv.FormatUint(uint64(procData.DiskNumber), 10),
-		)
-	}
+			metrics.mu.RLock()
+			for diskNumber, diskMetrics := range metrics.Disks {
+				diskStr := strconv.FormatUint(uint64(diskNumber), 10)
 
-	// Create process bytes written metrics
-	for _, procData := range data.ProcessBytesWritten {
-		ch <- prometheus.MustNewConstMetric(
-			c.processWrittenBytesDesc,
-			prometheus.CounterValue,
-			float64(procData.Bytes),
-			strconv.FormatUint(uint64(procData.ProcessID), 10),
-			strconv.FormatUint(procData.StartKey, 10),
-			procData.ProcessName,
-			strconv.FormatUint(uint64(procData.DiskNumber), 10),
-		)
-	}
-}
+				// I/O Operation Counts
+				for op, count := range diskMetrics.IOCount {
+					ch <- prometheus.MustNewConstMetric(
+						c.processIOCountDesc,
+						prometheus.CounterValue,
+						float64(count.Load()),
+						pidStr,
+						startKeyStr,
+						processName,
+						diskStr,
+						op,
+					)
+				}
 
-// collectData creates a snapshot of current metrics data.
-// This method is called during metric collection to ensure consistent data.
-//
-// Returns:
-//   - DiskIOMetricsData: Snapshot of current metric data
-func (c *DiskCollector) collectData() DiskIOMetricsData {
-	data := DiskIOMetricsData{
-		DiskIOCount:         make(map[DiskIOKey]DiskIOCountData),
-		DiskBytesRead:       make(map[uint32]int64),
-		DiskBytesWritten:    make(map[uint32]int64),
-		ProcessIOCount:      make(map[ProcessIOKey]ProcessIOCountData),
-		ProcessBytesRead:    make(map[ProcessBytesKey]ProcessBytesData),
-		ProcessBytesWritten: make(map[ProcessBytesKey]ProcessBytesData),
-	}
+				// Bytes Read
+				if bytes := diskMetrics.BytesRead.Load(); bytes > 0 {
+					ch <- prometheus.MustNewConstMetric(
+						c.processReadBytesDesc,
+						prometheus.CounterValue,
+						float64(bytes),
+						pidStr,
+						startKeyStr,
+						processName,
+						diskStr,
+					)
+				}
 
-	// Collect disk I/O counts
-	for key, countPtr := range c.diskIOCount {
-		if countPtr != nil {
-			count := atomic.LoadInt64(countPtr)
-			data.DiskIOCount[key] = DiskIOCountData{
-				DiskNumber: key.DiskNumber,
-				Operation:  key.Operation,
-				Count:      count,
-			}
-		}
-	}
-
-	// Collect disk bytes
-	for diskNumber, countPtr := range c.diskBytesRead {
-		if countPtr != nil {
-			data.DiskBytesRead[diskNumber] = atomic.LoadInt64(countPtr)
-		}
-	}
-
-	for diskNumber, countPtr := range c.diskBytesWritten {
-		if countPtr != nil {
-			data.DiskBytesWritten[diskNumber] = atomic.LoadInt64(countPtr)
-		}
-	}
-
-	// Collect process I/O counts
-	stateManager := statemanager.GetGlobalStateManager()
-	for key, countPtr := range c.processIOCount {
-		if countPtr != nil {
-			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
-				count := atomic.LoadInt64(countPtr)
-				data.ProcessIOCount[key] = ProcessIOCountData{
-					ProcessID:   key.ProcessID,
-					StartKey:    key.StartKey,
-					ProcessName: processName,
-					DiskNumber:  key.DiskNumber,
-					Operation:   key.Operation,
-					Count:       count,
+				// Bytes Written
+				if bytes := diskMetrics.BytesWritten.Load(); bytes > 0 {
+					ch <- prometheus.MustNewConstMetric(
+						c.processWrittenBytesDesc,
+						prometheus.CounterValue,
+						float64(bytes),
+						pidStr,
+						startKeyStr,
+						processName,
+						diskStr,
+					)
 				}
 			}
+			metrics.mu.RUnlock()
 		}
-	}
-
-	// Collect process bytes
-	for key, countPtr := range c.processBytesRead {
-		if countPtr != nil {
-			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
-				bytes := atomic.LoadInt64(countPtr)
-				data.ProcessBytesRead[key] = ProcessBytesData{
-					ProcessID:   key.ProcessID,
-					StartKey:    key.StartKey,
-					ProcessName: processName,
-					DiskNumber:  key.DiskNumber,
-					Bytes:       bytes,
-				}
-			}
-		}
-	}
-
-	// Collect process bytes written
-	for key, countPtr := range c.processBytesWritten {
-		if countPtr != nil {
-			if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
-				bytes := atomic.LoadInt64(countPtr)
-				data.ProcessBytesWritten[key] = ProcessBytesData{
-					ProcessID:   key.ProcessID,
-					StartKey:    key.StartKey,
-					ProcessName: processName,
-					DiskNumber:  key.DiskNumber,
-					Bytes:       bytes,
-				}
-			}
-		}
-	}
-
-	return data
+		return true
+	})
 }
 
 // RecordDiskIO records a disk I/O operation.
@@ -344,6 +221,7 @@ func (c *DiskCollector) collectData() DiskIOMetricsData {
 // Parameters:
 //   - diskNumber: Physical disk number where the I/O occurred
 //   - processID: Process ID that initiated the I/O operation
+//   - startKey: The unique start key of the process
 //   - transferSize: Number of bytes transferred in the operation
 //   - isWrite: True for write operations, false for read operations
 func (c *DiskCollector) RecordDiskIO(
@@ -353,61 +231,67 @@ func (c *DiskCollector) RecordDiskIO(
 	transferSize uint32,
 	isWrite bool) {
 
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// Determine operation type
 	operation := "read"
 	if isWrite {
 		operation = "write"
 	}
 
-	// Record disk-level I/O count
-	diskIOKey := DiskIOKey{DiskNumber: diskNumber, Operation: operation}
-	if c.diskIOCount[diskIOKey] == nil {
-		c.diskIOCount[diskIOKey] = new(int64)
+	// --- System-Wide Metrics ---
+	// Lock for the entire duration of map access and atomic updates to ensure correctness.
+	c.mu.Lock()
+	// Ensure nested map for disk number exists.
+	if _, ok := c.diskIOCount[diskNumber]; !ok {
+		c.diskIOCount[diskNumber] = make(map[string]*atomic.Int64)
+		c.diskBytesRead[diskNumber] = new(atomic.Int64)
+		c.diskBytesWritten[diskNumber] = new(atomic.Int64)
 	}
-	atomic.AddInt64(c.diskIOCount[diskIOKey], 1)
+	// Ensure counter for operation exists.
+	if _, ok := c.diskIOCount[diskNumber][operation]; !ok {
+		c.diskIOCount[diskNumber][operation] = new(atomic.Int64)
+	}
 
-	// Record disk-level bytes transferred
+	// Update counters while holding the lock.
+	c.diskIOCount[diskNumber][operation].Add(1)
 	if isWrite {
-		if c.diskBytesWritten[diskNumber] == nil {
-			c.diskBytesWritten[diskNumber] = new(int64)
-		}
-		atomic.AddInt64(c.diskBytesWritten[diskNumber], int64(transferSize))
+		c.diskBytesWritten[diskNumber].Add(int64(transferSize))
 	} else {
-		if c.diskBytesRead[diskNumber] == nil {
-			c.diskBytesRead[diskNumber] = new(int64)
-		}
-		atomic.AddInt64(c.diskBytesRead[diskNumber], int64(transferSize))
+		c.diskBytesRead[diskNumber].Add(int64(transferSize))
 	}
+	c.mu.Unlock()
 
-	// Record process-level metrics (only for known processes with valid names)
-	if processID > 0 {
-		// Check if process is tracked by the global state manager
-		stateManager := statemanager.GetGlobalStateManager()
-		if stateManager.IsKnownProcess(processID) {
-			// Record process I/O count
-			processIOKey := ProcessIOKey{ProcessID: processID, StartKey: startKey, DiskNumber: diskNumber, Operation: operation}
-			if c.processIOCount[processIOKey] == nil {
-				c.processIOCount[processIOKey] = new(int64)
+	// --- Per-Process Metrics ---
+	if processID > 0 && startKey > 0 && statemanager.GetGlobalStateManager().IsKnownProcess(processID) {
+		procMetrics := c.perProcessMetrics.LoadOrStore(startKey, func() *processMetrics {
+			return &processMetrics{
+				PID:   processID,
+				Disks: make(map[uint32]*processDiskMetrics),
 			}
-			atomic.AddInt64(c.processIOCount[processIOKey], 1)
+		})
 
-			// Record process bytes transferred
-			processBytesKey := ProcessBytesKey{ProcessID: processID, StartKey: startKey, DiskNumber: diskNumber}
-			if isWrite {
-				if c.processBytesWritten[processBytesKey] == nil {
-					c.processBytesWritten[processBytesKey] = new(int64)
-				}
-				atomic.AddInt64(c.processBytesWritten[processBytesKey], int64(transferSize))
-			} else {
-				if c.processBytesRead[processBytesKey] == nil {
-					c.processBytesRead[processBytesKey] = new(int64)
-				}
-				atomic.AddInt64(c.processBytesRead[processBytesKey], int64(transferSize))
+		// Lock for the entire duration of map access and atomic updates to ensure correctness.
+		procMetrics.mu.Lock()
+		diskMetrics, ok := procMetrics.Disks[diskNumber]
+		if !ok {
+			diskMetrics = &processDiskMetrics{
+				IOCount:      make(map[string]*atomic.Int64),
+				BytesRead:    new(atomic.Int64),
+				BytesWritten: new(atomic.Int64),
 			}
+			procMetrics.Disks[diskNumber] = diskMetrics
 		}
+		// The IOCount map is also protected by the same lock.
+		if _, ok := diskMetrics.IOCount[operation]; !ok {
+			diskMetrics.IOCount[operation] = new(atomic.Int64)
+		}
+
+		// Update counters while holding the lock.
+		diskMetrics.IOCount[operation].Add(1)
+		if isWrite {
+			diskMetrics.BytesWritten.Add(int64(transferSize))
+		} else {
+			diskMetrics.BytesRead.Add(int64(transferSize))
+		}
+		procMetrics.mu.Unlock()
 	}
 }
 
@@ -419,40 +303,31 @@ func (c *DiskCollector) RecordDiskFlush(diskNumber uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Record disk flush operation
-	diskIOKey := DiskIOKey{DiskNumber: diskNumber, Operation: "flush"}
-	if c.diskIOCount[diskIOKey] == nil {
-		c.diskIOCount[diskIOKey] = new(int64)
+	// Ensure nested map for disk number exists.
+	if _, ok := c.diskIOCount[diskNumber]; !ok {
+		c.diskIOCount[diskNumber] = make(map[string]*atomic.Int64)
 	}
-	atomic.AddInt64(c.diskIOCount[diskIOKey], 1)
+	// Ensure counter for flush operation exists.
+	if _, ok := c.diskIOCount[diskNumber]["flush"]; !ok {
+		c.diskIOCount[diskNumber]["flush"] = new(atomic.Int64)
+	}
+
+	// Update counter.
+	c.diskIOCount[diskNumber]["flush"].Add(1)
 }
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
 // This method is called by the KernelStateManager after a scrape is complete to
 // allow the collector to safely clean up its internal state for terminated processes.
 func (c *DiskCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	cleanedCount := 0
-	for key := range c.processIOCount {
-		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
-			delete(c.processIOCount, key)
+	for _, startKey := range terminatedProcs {
+		if _, deleted := c.perProcessMetrics.LoadAndDelete(startKey); deleted {
 			cleanedCount++
-		}
-	}
-	for key := range c.processBytesRead {
-		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
-			delete(c.processBytesRead, key)
-		}
-	}
-	for key := range c.processBytesWritten {
-		if termStartKey, isTerminated := terminatedProcs[key.ProcessID]; isTerminated && key.StartKey == termStartKey {
-			delete(c.processBytesWritten, key)
 		}
 	}
 
 	if cleanedCount > 0 {
-		c.log.Debug().Int("count", len(terminatedProcs)).Msg("Cleaned up disk I/O counters for terminated processes")
+		c.log.Debug().Int("count", cleanedCount).Msg("Cleaned up disk I/O counters for terminated processes")
 	}
 }

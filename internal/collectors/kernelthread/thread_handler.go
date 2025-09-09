@@ -115,12 +115,23 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
+	var startKey uint64
+	var ok bool
 	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
 		processID = pid
+		// Now that we have the PID, get its StartKey to form a unique identifier.
+		startKey, ok = c.stateManager.GetProcessStartKey(processID)
+	}
+
+	if !ok {
+		// If we can't resolve the full {PID, StartKey}, we cannot safely record
+		// the per-process metric. The per-CPU metric will still be recorded.
+		processID = 0
+		startKey = 0
 	}
 
 	// Record context switch in custom collector
-	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, interval)
+	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, startKey, interval)
 
 	// Track thread state transitions
 	waitReasonStr := GetWaitReasonString(oldThreadWaitReason)
@@ -182,12 +193,20 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 
 	// Get process ID for the NEW thread (incoming thread)
 	var processID uint32
+	var startKey uint64
+	var ok bool
 	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
 		processID = pid
+		startKey, ok = c.stateManager.GetProcessStartKey(processID)
+	}
+
+	if !ok {
+		processID = 0
+		startKey = 0
 	}
 
 	// Record context switch in custom collector (handles process name lookup internally)
-	c.customCollector.RecordContextSwitch(cpu, uint32(newThreadID), processID, interval)
+	c.customCollector.RecordContextSwitch(cpu, uint32(newThreadID), processID, startKey, interval)
 
 	// Track thread state transitions
 	waitReasonStr := GetWaitReasonString(uint8(waitReason))

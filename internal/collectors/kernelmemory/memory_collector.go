@@ -2,16 +2,22 @@ package kernelmemory
 
 import (
 	"strconv"
-	"sync"
 	"sync/atomic"
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/maps"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
+
+// processFaultData holds the PID and counter for a process instance.
+type processFaultData struct {
+	PID     uint32
+	Counter *atomic.Uint64
+}
 
 // MemCollector implements prometheus.Collector for memory-related metrics.
 // This collector is designed for high performance, using lock-free atomics.
@@ -19,24 +25,20 @@ type MemCollector struct {
 	config *config.MemoryConfig
 	log    *phusluadapter.SampledLogger
 
-	hardPageFaultsTotal      uint64
-	hardPageFaultsPerProcess sync.Map // key: ProcessFaultKey, value: *uint64
+	hardPageFaultsTotal      *atomic.Uint64
+	hardPageFaultsPerProcess maps.ConcurrentMap[uint64, *processFaultData] // key: StartKey
 
 	hardPageFaultsTotalDesc      *prometheus.Desc
 	hardPageFaultsPerProcessDesc *prometheus.Desc
 }
 
-// ProcessFaultKey uniquely identifies a process instance for fault counting.
-type ProcessFaultKey struct {
-	PID      uint32
-	StartKey uint64
-}
-
 // NewMemoryCollector creates a new memory metrics collector.
 func NewMemoryCollector(config *config.MemoryConfig) *MemCollector {
 	c := &MemCollector{
-		config: config,
-		log:    logger.NewSampledLoggerCtx("memory_collector"),
+		config:                   config,
+		log:                      logger.NewSampledLoggerCtx("memory_collector"),
+		hardPageFaultsTotal:      new(atomic.Uint64),
+		hardPageFaultsPerProcess: maps.NewConcurrentMap[uint64, *processFaultData](),
 	}
 
 	c.hardPageFaultsTotalDesc = prometheus.NewDesc(
@@ -70,22 +72,19 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(
 		c.hardPageFaultsTotalDesc,
 		prometheus.CounterValue,
-		float64(atomic.LoadUint64(&c.hardPageFaultsTotal)),
+		float64(c.hardPageFaultsTotal.Load()),
 	)
 
 	if c.config.EnablePerProcess {
 		stateManager := statemanager.GetGlobalStateManager()
-		c.hardPageFaultsPerProcess.Range(func(key, val any) bool {
-			pKey := key.(ProcessFaultKey)
-			pid := pKey.PID
-			count := atomic.LoadUint64(val.(*uint64))
-			if processName, ok := stateManager.GetKnownProcessName(pid); ok {
+		c.hardPageFaultsPerProcess.Range(func(startKey uint64, data *processFaultData) bool {
+			if processName, ok := stateManager.GetKnownProcessName(data.PID); ok {
 				ch <- prometheus.MustNewConstMetric(
 					c.hardPageFaultsPerProcessDesc,
 					prometheus.CounterValue,
-					float64(count),
-					strconv.FormatUint(uint64(pid), 10),
-					strconv.FormatUint(pKey.StartKey, 10),
+					float64(data.Counter.Load()),
+					strconv.FormatUint(uint64(data.PID), 10),
+					strconv.FormatUint(startKey, 10),
 					processName,
 				)
 			}
@@ -96,14 +95,17 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 
 // ProcessHardPageFaultEvent increments the hard page fault counters.
 func (c *MemCollector) ProcessHardPageFaultEvent(pid uint32, startKey uint64) {
-	atomic.AddUint64(&c.hardPageFaultsTotal, 1)
+	c.hardPageFaultsTotal.Add(1)
 
-	if c.config.EnablePerProcess {
-		stateManager := statemanager.GetGlobalStateManager()
-		if stateManager.IsKnownProcess(pid) {
-			key := ProcessFaultKey{PID: pid, StartKey: startKey}
-			val, _ := c.hardPageFaultsPerProcess.LoadOrStore(key, new(uint64))
-			atomic.AddUint64(val.(*uint64), 1)
+	if c.config.EnablePerProcess && startKey > 0 {
+		if statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
+			data := c.hardPageFaultsPerProcess.LoadOrStore(startKey, func() *processFaultData {
+				return &processFaultData{
+					PID:     pid,
+					Counter: new(atomic.Uint64),
+				}
+			})
+			data.Counter.Add(1)
 		}
 	}
 }
@@ -116,19 +118,11 @@ func (c *MemCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uin
 		return
 	}
 	cleanedCount := 0
-	c.hardPageFaultsPerProcess.Range(func(key, value any) bool {
-		pKey := key.(ProcessFaultKey)
-		// Check if the process ID is in the set of terminated processes.
-		if termStartKey, isTerminated := terminatedProcs[pKey.PID]; isTerminated {
-			// Additionally, ensure the start key matches for correctness. This handles
-			// the rare case where a PID is reused before cleanup.
-			if pKey.StartKey == termStartKey {
-				c.hardPageFaultsPerProcess.Delete(key)
-				cleanedCount++
-			}
+	for _, startKey := range terminatedProcs {
+		if _, deleted := c.hardPageFaultsPerProcess.LoadAndDelete(startKey); deleted {
+			cleanedCount++
 		}
-		return true
-	})
+	}
 
 	if cleanedCount > 0 {
 		c.log.Debug().Int("count", cleanedCount).Msg("Cleaned up page fault counters for terminated processes")

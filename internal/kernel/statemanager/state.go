@@ -7,6 +7,7 @@ import (
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/maps"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
@@ -19,17 +20,17 @@ import (
 // kernel state information.
 type KernelStateManager struct {
 	// Process state
-	processes           sync.Map // key: uint32 (PID), value: *ProcessInfo
-	terminatedProcesses sync.Map // key: uint32 (PID), value: time.Time
+	processes           maps.ConcurrentMap[uint32, *ProcessInfo] // key: uint32 (PID), value: *ProcessInfo
+	terminatedProcesses sync.Map                                 // key: uint32 (PID), value: time.Time
 
 	// Process Start Key state for robust tracking
-	startKeyToPids sync.Map // key: uint64 (startKey), value: *sync.Map (of PIDs -> struct{})
-	pidToStartKey  sync.Map // key: uint32 (PID), value: uint64 (startKey)
+	startKeyToPids sync.Map                           // key: uint64 (startKey), value: *sync.Map (of PIDs -> struct{})
+	pidToStartKey  maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (startKey)
 
 	// Thread state
-	tidToPid          sync.Map // key: TID (uint32), value: PID (uint32)
-	pidToTids         sync.Map // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
-	terminatedThreads sync.Map // key: TID (uint32), value: time.Time
+	tidToPid          maps.ConcurrentMap[uint32, uint32] // key: TID (uint32), value: PID (uint32)
+	pidToTids         sync.Map                           // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
+	terminatedThreads sync.Map                           // key: TID (uint32), value: time.Time
 
 	// Image state
 	images           sync.Map // key: uint64 (ImageBase), value: *ImageInfo
@@ -37,14 +38,10 @@ type KernelStateManager struct {
 	imageToPid       sync.Map // key: uint64 (ImageBase), value: uint32 (PID)
 	terminatedImages sync.Map // key: uint64 (ImageBase), value: time.Time
 
-	// DiskIO state for FileObject correlation
-	fileObjectToProcess sync.Map // key: uint64 (FileObject), value: processIdentifier
-	processToFileObjects sync.Map // key: uint32 (PID), value: *sync.Map (of FileObjects -> struct{})
-
 	// Process filtering state
 	processFilterEnabled bool
 	processNameFilters   []*regexp.Regexp
-	trackedStartKeys     sync.Map // key: uint64 (startKey), value: struct{}
+	trackedStartKeys     maps.ConcurrentMap[uint64, struct{}] // key: uint64 (startKey), value: struct{}
 
 	cleaners []PostScrapeCleaner // Collectors that need post-scrape cleanup.
 	log      *phusluadapter.SampledLogger
@@ -69,8 +66,12 @@ type PostScrapeCleaner interface {
 func GetGlobalStateManager() *KernelStateManager {
 	initOnce.Do(func() {
 		globalStateManager = &KernelStateManager{
-			log:      logger.NewSampledLoggerCtx("state_manager"),
-			cleaners: make([]PostScrapeCleaner, 0),
+			log:              logger.NewSampledLoggerCtx("state_manager"),
+			cleaners:         make([]PostScrapeCleaner, 0),
+			processes:        maps.NewConcurrentMap[uint32, *ProcessInfo](),
+			pidToStartKey:    maps.NewConcurrentMap[uint32, uint64](),
+			trackedStartKeys: maps.NewConcurrentMap[uint64, struct{}](),
+			tidToPid:         maps.NewConcurrentMap[uint32, uint32](),
 		}
 	})
 	return globalStateManager
@@ -275,13 +276,7 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 		}
 
 		// Cascade delete to FileObject mappings owned by this process
-		if fileObjectsVal, exists := sm.processToFileObjects.LoadAndDelete(pid); exists {
-			fileObjectsVal.(*sync.Map).Range(func(k, v any) bool {
-				fileObject := k.(uint64)
-				sm.fileObjectToProcess.Delete(fileObject)
-				return true
-			})
-		}
+		// This is no longer needed with IRP correlation as IRPs are transient.
 	}
 	return len(procsToClean)
 }
@@ -292,13 +287,12 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 func (sm *KernelStateManager) CleanupStaleProcesses(lastSeenIn time.Duration) {
 	cutoff := time.Now().Add(-lastSeenIn)
 	var pidsToMark []uint32
-	sm.processes.Range(func(key, value any) bool {
-		info := value.(*ProcessInfo)
+	sm.processes.Range(func(pid uint32, info *ProcessInfo) bool {
 		info.mu.Lock()
 		lastSeen := info.LastSeen
 		info.mu.Unlock()
 		if lastSeen.Before(cutoff) {
-			pidsToMark = append(pidsToMark, key.(uint32))
+			pidsToMark = append(pidsToMark, pid)
 		}
 		return true
 	})
@@ -317,8 +311,7 @@ func (sm *KernelStateManager) CleanupStaleProcesses(lastSeenIn time.Duration) {
 // removeThread is a private helper for thread cleanup that removes a thread's
 // entries from both the forward (TID->PID) and reverse (PID->TIDs) maps.
 func (sm *KernelStateManager) removeThread(tid uint32) {
-	if val, exists := sm.tidToPid.Load(tid); exists {
-		pid := val.(uint32)
+	if pid, exists := sm.tidToPid.Load(tid); exists {
 		if pVal, pExists := sm.pidToTids.Load(pid); pExists {
 			pVal.(*sync.Map).Delete(tid)
 		}
@@ -329,8 +322,7 @@ func (sm *KernelStateManager) removeThread(tid uint32) {
 // removeProcessStartKeyMapping cleans up the PID <-> StartKey mappings.
 // If a StartKey no longer has any associated PIDs, the key itself is removed.
 func (sm *KernelStateManager) removeProcessStartKeyMapping(pid uint32) {
-	if skVal, skExists := sm.pidToStartKey.Load(pid); skExists {
-		startKey := skVal.(uint64)
+	if startKey, skExists := sm.pidToStartKey.Load(pid); skExists {
 		sm.pidToStartKey.Delete(pid)
 		sm.trackedStartKeys.Delete(startKey) // Also remove from tracked keys
 

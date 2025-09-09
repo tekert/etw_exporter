@@ -16,6 +16,8 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// TODO: for win11 use the startkey from the manifest, if is mof, use from the state manager.
+
 var (
 	EtwExporterGuid = etw.MustParseGUID("{c47d5c06-89e7-11f0-bbb7-6045cb9e9a44}")
 )

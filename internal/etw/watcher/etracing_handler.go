@@ -94,15 +94,34 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 		return nil
 	}
 
-	sessionGUIDStr, err := helper.GetPropertyString("SessionGuid")
+	// sessionGUIDStr, err := helper.GetPropertyString("SessionGuid")
+	// if err != nil {
+	// 	w.log.SampledError("event-prov-handler").Err(err).Msg("Failed to get SessionGuid from session stop event")
+	// 	return err
+	// }
+
+	// sessionGUID, err := etw.ParseGUID(sessionGUIDStr)
+	// if err != nil {
+	// 	w.log.SampledError("event-prov-handler").Err(err).Str("guid_string", sessionGUIDStr).
+	// 		Msg("Failed to parse SessionGuid from session stop event")
+	// 	return err
+	// }
+
+	sessionName, err := helper.GetPropertyString("SessionName")
 	if err != nil {
-		w.log.SampledError("event-handler").Err(err).Msg("Failed to get SessionGuid from session stop event")
-		return err
+		w.log.SampledError("event-prov-handler").Err(err).
+			Msg("Failed to get SessionName from session stop event")
 	}
 
-	sessionGUID, err := etw.ParseGUID(sessionGUIDStr)
+	LoggerId, err := helper.GetPropertyUint("LoggerId")
 	if err != nil {
-		w.log.SampledError("event-handler").Err(err).Str("guid_string", sessionGUIDStr).
+		w.log.SampledError("event-prov-handler").Err(err).
+			Msg("Failed to get LoggerId from session stop event")
+	}
+
+	sessionGUID, err := helper.GetPropertyPGUID("SessionGuid")
+	if err != nil {
+		w.log.SampledError("event-prov-handler").Err(err).
 			Msg("Failed to parse SessionGuid from session stop event")
 		return err
 	}
@@ -113,6 +132,12 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 	} else if *sessionGUID == *etwmain.EtwExporterGuid && w.config.RestartExporterSession {
 		w.sessionManager.RestartSession(*sessionGUID)
 	}
+
+	w.log.Debug().
+		Uint64("LoggerId", LoggerId).
+		Str("SessionName", sessionName).
+		Str("SessionGUID", sessionGUID.String()).
+		Msg("Session stop event processing complete.")
 
 	return nil
 }
