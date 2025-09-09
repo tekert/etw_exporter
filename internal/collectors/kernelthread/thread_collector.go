@@ -13,7 +13,15 @@ import (
 
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/maps"
 )
+
+// ProcessSwitchCounter holds the data for a single process's context switches.
+// Storing the PID in the value allows us to use the unique StartKey as the map key.
+type ProcessSwitchCounter struct {
+	PID     uint32
+	Counter *atomic.Int64
+}
 
 // ThreadStateKey represents a composite key for thread state transitions.
 type ThreadStateKey struct {
@@ -30,9 +38,9 @@ type ThreadCollector struct {
 	contextSwitchesPerCPU  []*int64
 	contextSwitchIntervals []*IntervalStats
 
-	// A concurrent map is used for process-level metrics due to the dynamic
-	// and sparse nature of Process IDs.
-	contextSwitchesPerProcess sync.Map // key: uint32 (PID), value: *int64
+	// A concurrent map is used for process-level metrics. The key is the process StartKey (uint64)
+	// to uniquely identify a process instance and prevent PID reuse race conditions.
+	contextSwitchesPerProcess maps.ConcurrentMap[uint64, *ProcessSwitchCounter]
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
 	threadStateCounters []*int64
@@ -122,12 +130,13 @@ func NewThreadCSCollector() *ThreadCollector {
 	}
 
 	collector := &ThreadCollector{
-		contextSwitchesPerCPU:  csPerCPU,
-		contextSwitchIntervals: csIntervals,
-		threadStateCounters:    threadStateCounters,
-		stateKeyToIndex:        stateKeyToIndex,
-		indexToStateKey:        indexToStateKey,
-		log:                    logger.NewLoggerWithContext("thread_collector"),
+		contextSwitchesPerCPU:     csPerCPU,
+		contextSwitchIntervals:    csIntervals,
+		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *ProcessSwitchCounter](),
+		threadStateCounters:       threadStateCounters,
+		stateKeyToIndex:           stateKeyToIndex,
+		indexToStateKey:           indexToStateKey,
+		log:                       logger.NewLoggerWithContext("thread_collector"),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -251,30 +260,22 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 
 	// Collect process context switches
 	stateManager := statemanager.GetGlobalStateManager()
-	c.contextSwitchesPerProcess.Range(func(key, val any) bool {
-		pid := key.(uint32)
-		countPtr := val.(*int64)
-		if countPtr != nil {
+	c.contextSwitchesPerProcess.Range(func(startKey uint64, val *ProcessSwitchCounter) bool {
+		if val != nil {
 			// Only create metrics for processes that are still known at scrape time.
 			// The state manager retains information about terminated processes until
 			// AFTER the scrape is complete, ensuring we can report final metrics.
-			if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
-				count := atomic.LoadInt64(countPtr)
-				// TODO: This has a race condition with PID reuse. If a PID is reused before
-				// this scrape happens, we might fetch the StartKey of the NEW process and
-				// attribute the context switches of the OLD process to it.
-				// The fix is to store the StartKey along with the PID in contextSwitchesPerProcess
-				// at the time the event occurs.
-				startKey, _ := stateManager.GetProcessStartKey(pid)
+			if processName, isKnown := stateManager.GetKnownProcessName(val.PID); isKnown {
+				count := val.Counter.Load()
 				data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
-					ProcessID:   pid,
+					ProcessID:   val.PID,
 					StartKey:    startKey,
 					ProcessName: processName,
 					Count:       count,
 				})
 			}
 		}
-		return true
+		return true // Continue ranging
 	})
 
 	// Collect thread states from the pre-allocated slice
@@ -309,12 +310,14 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 // Parameters:
 // - cpu: CPU number where the context switch occurred
 // - newThreadID: Thread ID of the thread being switched to
-// - processID: Process ID that owns the new thread (0 if unknown)
+// - processID: Process ID that owns the new thread
+// - startKey: The unique start key of the process
 // - interval: Time since last context switch on this CPU
 func (c *ThreadCollector) RecordContextSwitch(
 	cpu uint16,
 	newThreadID uint32,
 	processID uint32,
+	startKey uint64,
 	interval time.Duration) {
 
 	// Record context switch per CPU (lock-free)
@@ -323,15 +326,18 @@ func (c *ThreadCollector) RecordContextSwitch(
 	}
 
 	// Record context switch per process (concurrent map)
-	if processID > 0 {
+	if processID > 0 && startKey > 0 {
 		stateManager := statemanager.GetGlobalStateManager()
 		// Only create metrics for processes that are tracked
 		if stateManager.IsKnownProcess(processID) {
-			// TODO: This is vulnerable to a PID reuse race condition. The fix is to use a
-			// composite key of {PID, StartKey} here, which would require the handler
-			// to resolve and pass the StartKey on this hot path.
-			val, _ := c.contextSwitchesPerProcess.LoadOrStore(processID, new(int64))
-			atomic.AddInt64(val.(*int64), 1)
+			// Use the unique StartKey as the key to prevent PID reuse race conditions.
+			counter := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *ProcessSwitchCounter {
+				return &ProcessSwitchCounter{
+					PID:     processID,
+					Counter: new(atomic.Int64),
+				}
+			})
+			counter.Counter.Add(1)
 		}
 	}
 
@@ -401,8 +407,10 @@ func (c *ThreadCollector) RecordThreadTermination() {
 // allow the collector to safely clean up its internal state for terminated processes.
 func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
 	cleanedCount := 0
-	for pid := range terminatedProcs {
-		if _, loaded := c.contextSwitchesPerProcess.LoadAndDelete(pid); loaded {
+	// The map of terminated processes gives us PID -> StartKey.
+	// We can now directly delete from our map using the StartKey.
+	for _, startKey := range terminatedProcs {
+		if _, deleted := c.contextSwitchesPerProcess.LoadAndDelete(startKey); deleted {
 			cleanedCount++
 		}
 	}

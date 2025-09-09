@@ -64,9 +64,8 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, imageName 
 		pidsMap.(*sync.Map).Store(pid, struct{}{})
 	}
 
-	if val, existed := sm.processes.Load(pid); existed {
+	if info, existed := sm.processes.Load(pid); existed {
 		// Update existing process information
-		info := val.(*ProcessInfo)
 		info.mu.Lock()
 		info.Name = imageName
 		info.ParentPID = parentPID
@@ -138,8 +137,7 @@ func (sm *KernelStateManager) GetKnownProcessName(pid uint32) (string, bool) {
 // It can resolve names for active processes and processes maked for deletetion (before a scrape).
 // If the process is not found, it returns a formatted "unknown" string and false.
 func (sm *KernelStateManager) GetProcessName(pid uint32) (string, bool) {
-	if val, exists := sm.processes.Load(pid); exists {
-		info := val.(*ProcessInfo)
+	if info, exists := sm.processes.Load(pid); exists {
 		info.mu.Lock()
 		name := info.Name
 		info.mu.Unlock()
@@ -150,8 +148,5 @@ func (sm *KernelStateManager) GetProcessName(pid uint32) (string, bool) {
 
 // GetProcessStartKey returns the unique process start key for a given PID.
 func (sm *KernelStateManager) GetProcessStartKey(pid uint32) (uint64, bool) {
-	if val, exists := sm.pidToStartKey.Load(pid); exists {
-		return val.(uint64), true
-	}
-	return 0, false
+	return sm.pidToStartKey.Load(pid)
 }

@@ -30,9 +30,9 @@ func (sm *KernelStateManager) MarkThreadForDeletion(tid uint32) {
 // This is a critical function used on the hot path by collectors (e.g., for context
 // switches) to enrich thread-level events with process information.
 func (sm *KernelStateManager) GetProcessIDForThread(tid uint32) (uint32, bool) {
-	val, exists := sm.tidToPid.Load(tid)
+	pid, exists := sm.tidToPid.Load(tid)
 	if !exists {
 		return 0, false
 	}
-	return val.(uint32), true
+	return pid, true
 }

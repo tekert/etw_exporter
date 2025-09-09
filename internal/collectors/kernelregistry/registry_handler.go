@@ -2,6 +2,7 @@ package kernelregistry
 
 import (
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/etw"
@@ -12,15 +13,17 @@ import (
 type Handler struct {
 	customCollector *RegistryCollector
 	config          *config.RegistryConfig
+	stateManager    *statemanager.KernelStateManager
 	log             *phusluadapter.SampledLogger
 	opcodeMap       [256]string // Opcode lookup table, encapsulated within the handler.
 }
 
 // NewRegistryHandler creates a new registry handler.
-func NewRegistryHandler(config *config.RegistryConfig) *Handler {
+func NewRegistryHandler(config *config.RegistryConfig, sm *statemanager.KernelStateManager) *Handler {
 	h := &Handler{
 		customCollector: NewRegistryCollector(config),
 		config:          config,
+		stateManager:    sm,
 		log:             logger.NewSampledLoggerCtx("registry_handler"),
 	}
 
@@ -160,14 +163,16 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 	}
 
 	processID := er.EventHeader.ProcessId
-    // TODO: MOF events do not have an easily accessible Process Start Key. Passing only
-    // the PID to the collector creates a race condition with PID reuse. This is a
-    // known issue accepted for performance reasons on this high-throughput path.
-    // See the TODO in the RegistryCollector for more details.
+	startKey, ok := h.stateManager.GetProcessStartKey(processID)
+	if !ok {
+		// Process is not known or has already terminated. We can't reliably attribute
+		// this event, so we skip it.
+		return nil
+	}
 
-    h.customCollector.RecordRegistryOperation(processID, operation, status)
+	h.customCollector.RecordRegistryOperation(processID, startKey, operation, status)
 
-    return nil
+	return nil
 }
 
 // HandleRegistryEvent processes registry events to track operations.
@@ -199,10 +204,12 @@ func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
 	}
 
 	processID := helper.EventRec.EventHeader.ProcessId
-	// MOF events do not have ExtProcessStartKey. The start key will be retrieved
-	// from the state manager during the Prometheus scrape (Collect phase) for efficiency.
+	startKey, ok := h.stateManager.GetProcessStartKey(processID)
+	if !ok {
+		return nil // Process not known, skip.
+	}
 
-	h.customCollector.RecordRegistryOperation(processID, operation, uint32(status))
+	h.customCollector.RecordRegistryOperation(processID, startKey, operation, uint32(status))
 
 	return nil
 }

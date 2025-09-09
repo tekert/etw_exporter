@@ -239,7 +239,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	}
 
 	if eh.config.Registry.Enabled {
-		eh.registryHandler = kernelregistry.NewRegistryHandler(&eh.config.Registry)
+		eh.registryHandler = kernelregistry.NewRegistryHandler(&eh.config.Registry, eh.stateManager)
 		prometheus.MustRegister(eh.registryHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})

@@ -7,8 +7,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
-	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/kernel/statemanager"
 )
 
 // RegistryCollector implements prometheus.Collector for registry related metrics.
@@ -32,10 +32,7 @@ type OperationKey struct {
 // ProcessOperationKey is a key for per-process registry operations.
 type ProcessOperationKey struct {
 	ProcessID uint32
-	// TODO: StartKey is omitted here for performance on the hot path, but this creates a
-	// race condition. If a PID is reused before a scrape occurs, operations from the
-	// old process could be attributed to the new process. A future optimization
-	// should find a low-overhead way to get the StartKey in the handler.
+	StartKey  uint64
 	Operation string
 	Result    string
 }
@@ -91,25 +88,23 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 	for key, countPtr := range c.processOperationsTotal {
 		// Look up process details during scrape time to avoid overhead in the hot path.
 		if processName, isKnown := stateManager.GetKnownProcessName(key.ProcessID); isKnown {
-			// TODO: This lookup is subject to a race condition. See ProcessOperationKey TODO.
-			if startKey, hasStartKey := stateManager.GetProcessStartKey(key.ProcessID); hasStartKey {
-				ch <- prometheus.MustNewConstMetric(
-					c.processOperationsTotalDesc,
-					prometheus.CounterValue,
-					float64(atomic.LoadInt64(countPtr)),
-					strconv.FormatUint(uint64(key.ProcessID), 10),
-					strconv.FormatUint(startKey, 10),
-					processName,
-					key.Operation,
-					key.Result,
-				)
-			}
+			// Only report metrics for known/tracked processes.
+			ch <- prometheus.MustNewConstMetric(
+				c.processOperationsTotalDesc,
+				prometheus.CounterValue,
+				float64(atomic.LoadInt64(countPtr)),
+				strconv.FormatUint(uint64(key.ProcessID), 10),
+				strconv.FormatUint(key.StartKey, 10),
+				processName,
+				key.Operation,
+				key.Result,
+			)
 		}
 	}
 }
 
 // RecordRegistryOperation records a single registry operation.
-func (c *RegistryCollector) RecordRegistryOperation(processID uint32, operation string, status uint32) {
+func (c *RegistryCollector) RecordRegistryOperation(processID uint32, startKey uint64, operation string, status uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -128,11 +123,11 @@ func (c *RegistryCollector) RecordRegistryOperation(processID uint32, operation 
 	// Per-process metric
 	if processID > 0 && c.config.EnablePerProcess {
 		stateManager := statemanager.GetGlobalStateManager()
-		// We only check IsKnownProcess here. The full details (name, startkey)
-		// are retrieved during the Collect phase.
+		// First, check if the process is one we are configured to track.
 		if stateManager.IsKnownProcess(processID) {
 			procOpKey := ProcessOperationKey{
 				ProcessID: processID,
+				StartKey:  startKey,
 				Operation: operation,
 				Result:    result,
 			}
