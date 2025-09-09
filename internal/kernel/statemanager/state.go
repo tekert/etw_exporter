@@ -38,10 +38,6 @@ type KernelStateManager struct {
 	imageToPid       sync.Map // key: uint64 (ImageBase), value: uint32 (PID)
 	terminatedImages sync.Map // key: uint64 (ImageBase), value: time.Time
 
-	// DiskIO state for FileObject correlation
-	fileObjectToProcess  maps.ConcurrentMap[uint64, processIdentifier]
-	processToFileObjects maps.ConcurrentMap[uint32, map[uint64]struct{}]
-
 	// Process filtering state
 	processFilterEnabled bool
 	processNameFilters   []*regexp.Regexp
@@ -70,14 +66,12 @@ type PostScrapeCleaner interface {
 func GetGlobalStateManager() *KernelStateManager {
 	initOnce.Do(func() {
 		globalStateManager = &KernelStateManager{
-			log:      logger.NewSampledLoggerCtx("state_manager"),
-			cleaners: make([]PostScrapeCleaner, 0),
-			processes:            maps.NewConcurrentMap[uint32, *ProcessInfo](),
-			pidToStartKey:        maps.NewConcurrentMap[uint32, uint64](),
-			trackedStartKeys:     maps.NewConcurrentMap[uint64, struct{}](),
-			tidToPid:             maps.NewConcurrentMap[uint32, uint32](),
-			fileObjectToProcess:  maps.NewConcurrentMap[uint64, processIdentifier](),
-			processToFileObjects: maps.NewConcurrentMap[uint32, map[uint64]struct{}](),
+			log:              logger.NewSampledLoggerCtx("state_manager"),
+			cleaners:         make([]PostScrapeCleaner, 0),
+			processes:        maps.NewConcurrentMap[uint32, *ProcessInfo](),
+			pidToStartKey:    maps.NewConcurrentMap[uint32, uint64](),
+			trackedStartKeys: maps.NewConcurrentMap[uint64, struct{}](),
+			tidToPid:         maps.NewConcurrentMap[uint32, uint32](),
 		}
 	})
 	return globalStateManager
@@ -282,17 +276,7 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 		}
 
 		// Cascade delete to FileObject mappings owned by this process
-		sm.processToFileObjects.Update(pid, func(fileObjects map[uint64]struct{}, exists bool) (map[uint64]struct{}, bool) {
-			if !exists {
-				return nil, false // Nothing to do
-			}
-
-			// For each file object, remove the forward mapping.
-			for fileObject := range fileObjects {
-				sm.fileObjectToProcess.Delete(fileObject)
-			}
-			return nil, false // Delete the entry for this PID
-		})
+		// This is no longer needed with IRP correlation as IRPs are transient.
 	}
 	return len(procsToClean)
 }
