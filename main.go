@@ -34,10 +34,12 @@ var (
 //  - Skip MOF Opcodes we dont need,
 //      and also Manifest provider using IDFilter on EnableProvider [DONE].
 //  - Security provider? and that's it for now.
+//     https://techcommunity.microsoft.com/blog/windows-itpro-blog/new-security-capabilities-in-event-tracing-for-windows/3949941
 //  - Reopen NT Kernel Logger if closed by another app, do config.
 //  - user suplied exe names to expand metric to per process. ( Use: EventRecord.ExtProcessStartKey works on mof?)
 //      for example the thread collector wait states.
 //      that would filter the per process of the other metrics.
+//  - Move Image events to image collector?
 //
 // link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (good article)
 
