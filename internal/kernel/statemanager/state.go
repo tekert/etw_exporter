@@ -21,22 +21,23 @@ import (
 type KernelStateManager struct {
 	// Process state
 	processes           maps.ConcurrentMap[uint32, *ProcessInfo] // key: uint32 (PID), value: *ProcessInfo
-	terminatedProcesses sync.Map                                 // key: uint32 (PID), value: time.Time
+	terminatedProcesses maps.ConcurrentMap[uint32, time.Time]    // key: uint32 (PID), value: time.Time
 
 	// Process Start Key state for robust tracking
-	startKeyToPids sync.Map                           // key: uint64 (startKey), value: *sync.Map (of PIDs -> struct{})
-	pidToStartKey  maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (startKey)
+	startKeyToPid maps.ConcurrentMap[uint64, uint32] // key: uint64 (startKey), value: uint32 (PID)
+	pidToStartKey maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (startKey)
 
 	// Thread state
-	tidToPid          maps.ConcurrentMap[uint32, uint32] // key: TID (uint32), value: PID (uint32)
-	pidToTids         sync.Map                           // key: PID (uint32), value: *sync.Map (of TIDs -> struct{})
-	terminatedThreads sync.Map                           // key: TID (uint32), value: time.Time
+	tidToPid          maps.ConcurrentMap[uint32, uint32]                               // key: TID (uint32), value: PID (uint32)
+	pidToTids         maps.ConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]] // key: PID (uint32), value: map of TIDs
+	terminatedThreads maps.ConcurrentMap[uint32, time.Time]                            // key: TID (uint32), value: time.Time
 
 	// Image state
-	images           sync.Map // key: uint64 (ImageBase), value: *ImageInfo
-	pidToImages      sync.Map // key: uint32 (PID), value: *sync.Map (of ImageBases -> struct{})
-	imageToPid       sync.Map // key: uint64 (ImageBase), value: uint32 (PID)
-	terminatedImages sync.Map // key: uint64 (ImageBase), value: time.Time
+	images           maps.ConcurrentMap[uint64, *ImageInfo]                           // key: uint64 (ImageBase), value: *ImageInfo
+	pidToImages      maps.ConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]] // key: uint32 (PID), value: map of ImageBases
+	imageToPid       maps.ConcurrentMap[uint64, uint32]                               // key: uint64 (ImageBase), value: uint32 (PID)
+	terminatedImages maps.ConcurrentMap[uint64, time.Time]                            // key: uint64 (ImageBase), value: time.Time
+	imageInfoPool    sync.Pool                                                        // Pool for recycling ImageInfo objects.
 
 	// Process filtering state
 	processFilterEnabled bool
@@ -66,12 +67,25 @@ type PostScrapeCleaner interface {
 func GetGlobalStateManager() *KernelStateManager {
 	initOnce.Do(func() {
 		globalStateManager = &KernelStateManager{
-			log:              logger.NewSampledLoggerCtx("state_manager"),
-			cleaners:         make([]PostScrapeCleaner, 0),
-			processes:        maps.NewConcurrentMap[uint32, *ProcessInfo](),
-			pidToStartKey:    maps.NewConcurrentMap[uint32, uint64](),
-			trackedStartKeys: maps.NewConcurrentMap[uint64, struct{}](),
-			tidToPid:         maps.NewConcurrentMap[uint32, uint32](),
+			log:                 logger.NewSampledLoggerCtx("state_manager"),
+			cleaners:            make([]PostScrapeCleaner, 0),
+			processes:           maps.NewConcurrentMap[uint32, *ProcessInfo](),
+			terminatedProcesses: maps.NewConcurrentMap[uint32, time.Time](),
+			pidToStartKey:       maps.NewConcurrentMap[uint32, uint64](),
+			startKeyToPid:       maps.NewConcurrentMap[uint64, uint32](),
+			trackedStartKeys:    maps.NewConcurrentMap[uint64, struct{}](),
+			tidToPid:            maps.NewConcurrentMap[uint32, uint32](),
+			pidToTids:           maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]](),
+			terminatedThreads:   maps.NewConcurrentMap[uint32, time.Time](),
+			images:              maps.NewConcurrentMap[uint64, *ImageInfo](),
+			pidToImages:         maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]](),
+			imageToPid:          maps.NewConcurrentMap[uint64, uint32](),
+			terminatedImages:    maps.NewConcurrentMap[uint64, time.Time](),
+			imageInfoPool: sync.Pool{
+				New: func() any {
+					return new(ImageInfo)
+				},
+			},
 		}
 	})
 	return globalStateManager
@@ -144,8 +158,7 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 
 	// 1. Identify all processes marked for deletion and their start keys.
 	procsToClean := make(map[uint32]uint64)
-	sm.terminatedProcesses.Range(func(key, value any) bool {
-		pid := key.(uint32)
+	sm.terminatedProcesses.Range(func(pid uint32, _ time.Time) bool {
 		// Get the start key for the terminated process. It will be 0 if not found.
 		startKey, _ := sm.GetProcessStartKey(pid)
 		procsToClean[pid] = startKey
@@ -157,17 +170,17 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 
 	// 3. Clean up individually terminated threads (that weren't part of a terminated process).
 	var cleanedThreads int
-	sm.terminatedThreads.Range(func(key, value any) bool {
-		sm.removeThread(key.(uint32))
-		sm.terminatedThreads.Delete(key)
+	sm.terminatedThreads.Range(func(tid uint32, _ time.Time) bool {
+		sm.removeThread(tid)
+		sm.terminatedThreads.Delete(tid)
 		cleanedThreads++
 		return true
 	})
 
 	// 4. Clean up individually unloaded images.
 	var cleanedImages int
-	sm.terminatedImages.Range(func(key, value any) bool {
-		sm.RemoveImage(key.(uint64))
+	sm.terminatedImages.Range(func(imageBase uint64, _ time.Time) bool {
+		sm.RemoveImage(imageBase)
 		cleanedImages++
 		return true
 	})
@@ -189,9 +202,8 @@ func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
 	procsToClean := make(map[uint32]uint64)
 
 	// 1. Identify old terminated processes to be forcibly cleaned.
-	sm.terminatedProcesses.Range(func(key, value any) bool {
-		if value.(time.Time).Before(cutoff) {
-			pid := key.(uint32)
+	sm.terminatedProcesses.Range(func(pid uint32, termTime time.Time) bool {
+		if termTime.Before(cutoff) {
 			startKey, _ := sm.GetProcessStartKey(pid)
 			procsToClean[pid] = startKey
 		}
@@ -203,10 +215,10 @@ func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
 
 	// 3. Force clean old individually terminated threads (that weren't part of a process cleanup).
 	var cleanedThreads int
-	sm.terminatedThreads.Range(func(key, value any) bool {
-		if value.(time.Time).Before(cutoff) {
-			sm.removeThread(key.(uint32))
-			sm.terminatedThreads.Delete(key)
+	sm.terminatedThreads.Range(func(tid uint32, termTime time.Time) bool {
+		if termTime.Before(cutoff) {
+			sm.removeThread(tid)
+			sm.terminatedThreads.Delete(tid)
 			cleanedThreads++
 		}
 		return true
@@ -214,9 +226,9 @@ func (sm *KernelStateManager) ForceCleanupOldEntries(maxAge time.Duration) {
 
 	// 4. Force clean old individually unloaded images.
 	var cleanedImages int
-	sm.terminatedImages.Range(func(key, value any) bool {
-		if value.(time.Time).Before(cutoff) {
-			sm.RemoveImage(key.(uint64))
+	sm.terminatedImages.Range(func(imageBase uint64, termTime time.Time) bool {
+		if termTime.Before(cutoff) {
+			sm.RemoveImage(imageBase)
 			cleanedImages++
 		}
 		return true
@@ -255,9 +267,8 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 		sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
 
 		// Cascade delete to threads
-		if val, exists := sm.pidToTids.Load(pid); exists {
-			val.(*sync.Map).Range(func(k, v any) bool {
-				tid := k.(uint32)
+		if tids, exists := sm.pidToTids.Load(pid); exists {
+			tids.Range(func(tid uint32, _ struct{}) bool {
 				sm.tidToPid.Delete(tid)
 				sm.terminatedThreads.Delete(tid) // Also remove from other terminated list
 				return true
@@ -266,10 +277,11 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 		}
 
 		// Cascade delete to images loaded by this process
-		if imagesVal, exists := sm.pidToImages.LoadAndDelete(pid); exists {
-			imagesVal.(*sync.Map).Range(func(k, v any) bool {
-				imageBase := k.(uint64)
-				sm.images.Delete(imageBase)
+		if images, exists := sm.pidToImages.LoadAndDelete(pid); exists {
+			images.Range(func(imageBase uint64, _ struct{}) bool {
+				if imgInfo, loaded := sm.images.LoadAndDelete(imageBase); loaded {
+					sm.imageInfoPool.Put(imgInfo)
+				}
 				sm.imageToPid.Delete(imageBase)
 				return true
 			})
@@ -313,7 +325,7 @@ func (sm *KernelStateManager) CleanupStaleProcesses(lastSeenIn time.Duration) {
 func (sm *KernelStateManager) removeThread(tid uint32) {
 	if pid, exists := sm.tidToPid.Load(tid); exists {
 		if pVal, pExists := sm.pidToTids.Load(pid); pExists {
-			pVal.(*sync.Map).Delete(tid)
+			pVal.Delete(tid)
 		}
 	}
 	sm.tidToPid.Delete(tid)
@@ -324,21 +336,7 @@ func (sm *KernelStateManager) removeThread(tid uint32) {
 func (sm *KernelStateManager) removeProcessStartKeyMapping(pid uint32) {
 	if startKey, skExists := sm.pidToStartKey.Load(pid); skExists {
 		sm.pidToStartKey.Delete(pid)
+		sm.startKeyToPid.Delete(startKey)    // Clean up the reverse mapping
 		sm.trackedStartKeys.Delete(startKey) // Also remove from tracked keys
-
-		if pidsVal, pidsExist := sm.startKeyToPids.Load(startKey); pidsExist {
-			pidsMap := pidsVal.(*sync.Map)
-			pidsMap.Delete(pid)
-
-			// Check if the map of PIDs for this start key is now empty.
-			isEmpty := true
-			pidsMap.Range(func(k, v any) bool {
-				isEmpty = false
-				return false // Stop iteration
-			})
-			if isEmpty {
-				sm.startKeyToPids.Delete(startKey)
-			}
-		}
 	}
 }

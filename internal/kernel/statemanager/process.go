@@ -10,7 +10,7 @@ import (
 // and parent PID. It is protected by a mutex to allow for safe concurrent updates.
 type ProcessInfo struct {
 	PID       uint32
-	StartKey  uint64 // Uniquely identifies a process instance during a boot session.
+	StartKey  uint64 // Uniquely identifies a process instance during a boot session. (it's not CreateTime)
 	Name      string
 	StartTime time.Time
 	LastSeen  time.Time
@@ -60,8 +60,7 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, imageName 
 	// Associate PID with its unique Start Key
 	if startKey != 0 {
 		sm.pidToStartKey.Store(pid, startKey)
-		pidsMap, _ := sm.startKeyToPids.LoadOrStore(startKey, &sync.Map{})
-		pidsMap.(*sync.Map).Store(pid, struct{}{})
+		sm.startKeyToPid.Store(startKey, pid) // Populate the new reverse mapping
 	}
 
 	if info, existed := sm.processes.Load(pid); existed {
@@ -149,4 +148,9 @@ func (sm *KernelStateManager) GetProcessName(pid uint32) (string, bool) {
 // GetProcessStartKey returns the unique process start key for a given PID.
 func (sm *KernelStateManager) GetProcessStartKey(pid uint32) (uint64, bool) {
 	return sm.pidToStartKey.Load(pid)
+}
+
+// GetPIDFromStartKey returns the process ID for a given unique process start key.
+func (sm *KernelStateManager) GetPIDFromStartKey(startKey uint64) (uint32, bool) {
+	return sm.startKeyToPid.Load(startKey)
 }

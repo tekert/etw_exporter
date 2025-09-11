@@ -1,8 +1,8 @@
 package statemanager
 
 import (
+	"etw_exporter/internal/maps"
 	"path/filepath"
-	"sync"
 	"time"
 )
 
@@ -21,17 +21,23 @@ type ImageInfo struct {
 func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, fileName string) {
 	// Store the primary image information, keyed by its base address.
 	imageName := filepath.Base(fileName)
-	sm.images.Store(imageBase, &ImageInfo{
-		ImageBase: imageBase,
-		ImageSize: imageSize,
-		FileName:  fileName,
-		ImageName: imageName,
-	})
+
+	// Get a recycled ImageInfo object from the pool to avoid heap allocation.
+	imgInfo := sm.imageInfoPool.Get().(*ImageInfo)
+	imgInfo.ImageBase = imageBase
+	imgInfo.ImageSize = imageSize
+	imgInfo.FileName = fileName
+	imgInfo.ImageName = imageName
+
+	sm.images.Store(imageBase, imgInfo)
 
 	// Associate the image with the process that loaded it.
 	// This is crucial for cascading cleanup when the process terminates.
-	pidImages, _ := sm.pidToImages.LoadOrStore(pid, &sync.Map{})
-	pidImages.(*sync.Map).Store(imageBase, struct{}{})
+	// The factory function here captures no variables, preventing heap allocations.
+	pidImages := sm.pidToImages.LoadOrStore(pid, func() maps.ConcurrentMap[uint64, struct{}] {
+		return maps.NewConcurrentMap[uint64, struct{}]()
+	})
+	pidImages.Store(imageBase, struct{}{})
 
 	// Create the reverse mapping for efficient cleanup on image unload.
 	sm.imageToPid.Store(imageBase, pid)
@@ -58,15 +64,16 @@ func (sm *KernelStateManager) MarkImageForDeletion(imageBase uint64) {
 // This should only be called from post-scrape cleanup routines.
 func (sm *KernelStateManager) RemoveImage(imageBase uint64) {
 	// Find the owning process to clean up the pid->image association.
-	if pidVal, ok := sm.imageToPid.Load(imageBase); ok {
-		pid := pidVal.(uint32)
-		if imagesVal, ok := sm.pidToImages.Load(pid); ok {
-			imagesVal.(*sync.Map).Delete(imageBase)
+	if pid, ok := sm.imageToPid.Load(imageBase); ok {
+		if images, ok := sm.pidToImages.Load(pid); ok {
+			images.Delete(imageBase)
 		}
 	}
 
-	// Remove the primary image info and the reverse mapping.
-	sm.images.Delete(imageBase)
+	// Remove the primary image info, returning the object to the pool for reuse.
+	if imgInfo, loaded := sm.images.LoadAndDelete(imageBase); loaded {
+		sm.imageInfoPool.Put(imgInfo)
+	}
 	sm.imageToPid.Delete(imageBase)
 
 	// Also remove it from the terminated list to make the cleanup idempotent.
@@ -79,10 +86,9 @@ func (sm *KernelStateManager) GetImageForAddress(address uint64) (*ImageInfo, bo
 	var foundImage *ImageInfo
 	// This Range is not ideal for performance, but image loads are infrequent.
 	// A more complex data structure (like an interval tree) would be overkill.
-	sm.images.Range(func(key, value any) bool {
-		info := value.(*ImageInfo)
-		if address >= info.ImageBase && address < (info.ImageBase+info.ImageSize) {
-			foundImage = info
+	sm.images.Range(func(key uint64, value *ImageInfo) bool {
+		if address >= value.ImageBase && address < (value.ImageBase+value.ImageSize) {
+			foundImage = value
 			return false // Stop iterating
 		}
 		return true
