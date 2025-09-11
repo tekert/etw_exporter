@@ -160,11 +160,10 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	// Helper to egister the thread handler for thread name mappings.
 	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
 	addThreadMappingRoutes := func() {
-		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, eh.threadHandler.HandleThreadStart)    // ThreadStart
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.threadHandler.HandleThreadStart) // ThreadRundown
+		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadStart)   // ThreadRundownEnd (Go to Start to refresh)
 		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.threadHandler.HandleThreadEnd)        // ThreadEnd
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadEnd)     // ThreadRundownEnd
 	}
 
 	// TODO: maybe move these to the handler? gonna have to decouple the GUID definitions first.
@@ -180,7 +179,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush
 
 		// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
-		// These are now handled as raw events for testing.
+		// These are now handled as raw events for testing. choose this or manifest, not both.
 		//addThreadMappingRoutes() // Ensure thread routes are added if not already.
 		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskReadMofRaw)
 		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWriteMofRaw)
