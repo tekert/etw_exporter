@@ -154,10 +154,9 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// Record context switch in custom collector
 	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, startKey, interval)
 
-	// Track thread state transitions
-	waitReasonStr := GetWaitReasonString(oldThreadWaitReason)
-	c.customCollector.RecordThreadStateTransition("waiting", waitReasonStr)
-	c.customCollector.RecordThreadStateTransition("running", "none")
+	// Track thread state transitions using integer constants for maximum performance.
+	c.customCollector.RecordThreadStateTransition(StateWaiting, int8(oldThreadWaitReason))
+	c.customCollector.RecordThreadStateTransition(StateRunning, 0)
 
 	return nil
 }
@@ -230,9 +229,8 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	c.customCollector.RecordContextSwitch(cpu, uint32(newThreadID), processID, startKey, interval)
 
 	// Track thread state transitions
-	waitReasonStr := GetWaitReasonString(int8(waitReason))
-	c.customCollector.RecordThreadStateTransition("waiting", waitReasonStr)
-	c.customCollector.RecordThreadStateTransition("running", "none")
+	c.customCollector.RecordThreadStateTransition(StateWaiting, int8(waitReason))
+	c.customCollector.RecordThreadStateTransition(StateRunning, 0)
 
 	return nil
 }
@@ -260,7 +258,7 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 // meaning it's eligible for scheduling but not yet running.
 func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	// Track thread state transition to ready
-	c.customCollector.RecordThreadStateTransition("ready", "none")
+	c.customCollector.RecordThreadStateTransition(StateReady, 0)
 	return nil
 }
 

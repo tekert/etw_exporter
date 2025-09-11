@@ -1,19 +1,31 @@
 package kernelthread
 
 import (
-	"math"
+	"math/bits"
 	"runtime"
 	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 	"etw_exporter/internal/maps"
+)
+
+// Define constants for thread states to be used as array indices.
+const (
+	StateCreated = iota
+	StateRunning
+	StateReady
+	StateTerminated
+	StateWaiting // Must be last of the simple states
+
+	// The offset for waiting states. Wait reasons (0-37) will be added to this.
+	StateWaitingOffset = 40
 )
 
 // ProcessSwitchCounter holds the data for a single process's context switches.
@@ -45,10 +57,9 @@ type ThreadCollector struct {
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
 	threadStateCounters []*int64
-	stateKeyToIndex     map[ThreadStateKey]int
 	indexToStateKey     []ThreadStateKey
 
-	log log.Logger
+	log *phusluadapter.SampledLogger
 
 	// Metric Descriptors
 	contextSwitchesPerCPUDesc     *prometheus.Desc
@@ -100,34 +111,37 @@ func NewThreadCSCollector() *ThreadCollector {
 	}
 
 	// Pre-build structures for allocation-free thread state tracking.
-	// The set of states and wait reasons is small and fixed.
-	states := []string{"created", "running", "waiting", "terminated"}
 	waitReasons := GetAllWaitReasonStrings()
 
-	stateKeyToIndex := make(map[ThreadStateKey]int)
-	indexToStateKey := make([]ThreadStateKey, 0)
-	idx := 0
+	// Calculate total size needed for all state counters
+	maxIndex := StateWaitingOffset + len(waitReasons)
+	threadStateCounters := make([]*int64, maxIndex)
+	indexToStateKey := make([]ThreadStateKey, maxIndex)
 
-	// Non-waiting states are always paired with "none"
-	for _, state := range states {
-		if state != "waiting" {
-			key := ThreadStateKey{State: state, WaitReason: "none"}
-			stateKeyToIndex[key] = idx
-			indexToStateKey = append(indexToStateKey, key)
-			idx++
-		}
-	}
-	// The "waiting" state is paired with all valid wait reasons
-	for _, reason := range waitReasons {
-		key := ThreadStateKey{State: "waiting", WaitReason: reason}
-		stateKeyToIndex[key] = idx
-		indexToStateKey = append(indexToStateKey, key)
-		idx++
-	}
-
-	threadStateCounters := make([]*int64, len(indexToStateKey))
+	// Initialize all counters
 	for i := range threadStateCounters {
 		threadStateCounters[i] = new(int64)
+	}
+
+	// Map simple states (created, running, ready, terminated)
+	simpleStates := []struct {
+		Name  string
+		Index int
+	}{
+		{Name: "created", Index: StateCreated},
+		{Name: "running", Index: StateRunning},
+		{Name: "ready", Index: StateReady},
+		{Name: "terminated", Index: StateTerminated},
+	}
+
+	for _, s := range simpleStates {
+		indexToStateKey[s.Index] = ThreadStateKey{State: s.Name, WaitReason: "none"}
+	}
+
+	// Map waiting states with all wait reasons
+	for i, reason := range waitReasons {
+		idx := StateWaitingOffset + i
+		indexToStateKey[idx] = ThreadStateKey{State: "waiting", WaitReason: reason}
 	}
 
 	collector := &ThreadCollector{
@@ -135,11 +149,8 @@ func NewThreadCSCollector() *ThreadCollector {
 		contextSwitchIntervals:    csIntervals,
 		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *atomic.Int64](),
 		threadStateCounters:       threadStateCounters,
-		stateKeyToIndex:           stateKeyToIndex,
 		indexToStateKey:           indexToStateKey,
-		log:                       logger.NewLoggerWithContext("thread_collector"),
-
-		// TODO: hide metrics if not enabled in config?
+		log:                       logger.NewSampledLoggerCtx("thread_collector"),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -345,28 +356,34 @@ func (c *ThreadCollector) RecordContextSwitch(
 
 	// Record context switch interval (fine-grained lock)
 	if interval > 0 && int(cpu) < len(c.contextSwitchIntervals) {
-		intervalMs := float64(interval.Nanoseconds()) / 1_000_000.0
+		// Convert to microseconds for integer-based bit manipulation.
+		intervalUs := uint64(interval / time.Microsecond)
 
 		stats := c.contextSwitchIntervals[cpu]
 		stats.mu.Lock()
 
 		stats.Count++
-		stats.Sum += intervalMs
+		stats.Sum += float64(interval.Nanoseconds()) / 1_000_000.0
 
-		// // Optimized bucket update using binary search.
-		// // This is much faster than a linear scan for every event.
-		// // Find the index of the first bucket that the interval fits into.
-		// idx := sort.Search(len(csIntervalBuckets), func(i int) bool { return csIntervalBuckets[i] >= intervalMs })
-
-		// Optimized bucket update using a direct mathematical calculation.
-		// This is faster than a search for exponential buckets.
+		// Optimized bucket update using bit manipulation. This is an O(1) operation.
+		// For a value `n`, `bits.Len64(n)-1` is equivalent to `floor(log2(n))`,
+		// which directly gives the index into our power-of-two bucket array.
+		// Buckets (µs): [1, 2, 4, 8, ...] -> Indices: [0, 1, 2, 3, ...]
+		//
+		// Example: intervalUs = 8 (1000 in binary)
+		//   - bits.Len64(8) = 4
+		//   - idx = 4 - 1 = 3. Correctly maps to bucket index 3 (value 8µs).
+		//
+		// Example: intervalUs = 7 (0111 in binary)
+		//   - bits.Len64(7) = 3
+		//   - idx = 3 - 1 = 2. Correctly maps to bucket index 2 (value 4µs), as it's < 8.
+		//     Prometheus histograms are cumulative, so this is correct; it will be counted
+		//     in the le="8" bucket.
 		var idx int
-		if intervalMs > csIntervalBuckets[0] {
-			// Calculate the index via logarithm for intervals larger than the first bucket.
-			// The constant is 1.0 / 0.001, which is the base of our exponential scale.
-			idx = int(math.Ceil(math.Log2(intervalMs * 1000)))
+		if intervalUs > 0 {
+			idx = bits.Len64(intervalUs) - 1
 		}
-		// For intervals smaller than the first bucket, idx remains 0.
+		// For intervalUs = 0, idx remains 0.
 
 		// Increment the single correct bucket. Prometheus handles the cumulative sum.
 		if idx < len(stats.Buckets) {
@@ -384,10 +401,18 @@ func (c *ThreadCollector) RecordContextSwitch(
 // Parameters:
 // - state: The thread state (e.g., "ready", "waiting", "running", "terminated")
 // - waitReason: The wait reason if state is "waiting", otherwise "none"
-func (c *ThreadCollector) RecordThreadStateTransition(state, waitReason string) {
-	// This hot path is allocation-free and lock-free.
-	stateKey := ThreadStateKey{State: state, WaitReason: waitReason}
-	if idx, ok := c.stateKeyToIndex[stateKey]; ok {
+func (c *ThreadCollector) RecordThreadStateTransition(state int, waitReason int8) {
+	// This hot path is now an allocation-free, lock-free, and hash-free array lookup.
+	var idx int
+	if state == StateWaiting {
+		// For waiting states, the index is a direct calculation.
+		idx = StateWaitingOffset + int(waitReason)
+	} else {
+		// For simple states, the state constant is the index.
+		idx = state
+	}
+
+	if idx < len(c.threadStateCounters) {
 		atomic.AddInt64(c.threadStateCounters[idx], 1)
 	}
 }
@@ -395,13 +420,13 @@ func (c *ThreadCollector) RecordThreadStateTransition(state, waitReason string) 
 // RecordThreadCreation records a thread creation event.
 // This is a convenience method that records a "created" state transition.
 func (c *ThreadCollector) RecordThreadCreation() {
-	c.RecordThreadStateTransition("created", "none")
+	c.RecordThreadStateTransition(StateCreated, 0)
 }
 
 // RecordThreadTermination records a thread termination event.
 // This is a convenience method that records a "terminated" state transition.
 func (c *ThreadCollector) RecordThreadTermination() {
-	c.RecordThreadStateTransition("terminated", "none")
+	c.RecordThreadStateTransition(StateTerminated, 0)
 }
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
