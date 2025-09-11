@@ -87,19 +87,40 @@ func (c *Handler) GetCustomCollector() *ThreadCollector {
 //   - NewThreadWaitTime (uint32): The wait time for the new thread. Offset: 16.
 //   - Reserved (uint32): Reserved for future use. Offset: 20.
 func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
-	// Read properties using direct offsets.
-	newThreadID, err := er.GetUint32At(0)
-	if err != nil {
-		c.log.SampledError("fail-newthreadid").
-			Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
-		return err
+	var newThreadID uint32
+	var oldThreadWaitReason int8
+
+	// Get minimum supported version
+	if er.EventHeader.EventDescriptor.Version >= 2 {
+		// Supported versions
+		//cswitch := (*etw.MofCSwitch_V2)(unsafe.Pointer(er.UserData)) // With v2 we cover what we need
+		cswitch, ok := etw.UnsafeCast[etw.MofCSwitch_V2](er)
+		if !ok {
+			c.log.SampledError("fail-decode").
+				Uint8("version", er.EventHeader.EventDescriptor.Version).
+				Uint8("opcode", er.EventHeader.EventDescriptor.Opcode).
+				Uint16("datalen", er.UserDataLength).
+				Msg("Failed to decode CSwitch event")
+			return nil // Not a fatal error, just skip processing.
+		}
+
+		newThreadID = cswitch.NewThreadId
+		oldThreadWaitReason = cswitch.OldThreadWaitReason
 	}
-	oldThreadWaitReason, err := er.GetUint8At(12)
-	if err != nil {
-		c.log.SampledError("fail-waitreason").
-			Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
-		return err
-	}
+
+	// // Read properties using direct offsets.
+	// newThreadID, err := er.GetUint32At(0)
+	// if err != nil {
+	// 	c.log.SampledError("fail-newthreadid").
+	// 		Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
+	// 	return err
+	// }
+	// oldThreadWaitReason, err := er.GetUint8At(12)
+	// if err != nil {
+	// 	c.log.SampledError("fail-waitreason").
+	// 		Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
+	// 	return err
+	// }
 
 	// Get CPU number from processor index
 	cpu := er.ProcessorNumber()
@@ -209,7 +230,7 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	c.customCollector.RecordContextSwitch(cpu, uint32(newThreadID), processID, startKey, interval)
 
 	// Track thread state transitions
-	waitReasonStr := GetWaitReasonString(uint8(waitReason))
+	waitReasonStr := GetWaitReasonString(int8(waitReason))
 	c.customCollector.RecordThreadStateTransition("waiting", waitReasonStr)
 	c.customCollector.RecordThreadStateTransition("running", "none")
 
@@ -343,7 +364,7 @@ func (c *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 //
 // Reference: This mapping is based on the Windows Driver Kit (WDK) documentation
 // and ETW provider definitions for thread context switch events.
-func GetWaitReasonString(waitReason uint8) string {
+func GetWaitReasonString(waitReason int8) string {
 	switch waitReason {
 	case 0:
 		return "Executive"

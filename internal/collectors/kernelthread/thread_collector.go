@@ -40,7 +40,8 @@ type ThreadCollector struct {
 
 	// A concurrent map is used for process-level metrics. The key is the process StartKey (uint64)
 	// to uniquely identify a process instance and prevent PID reuse race conditions.
-	contextSwitchesPerProcess maps.ConcurrentMap[uint64, *ProcessSwitchCounter]
+	// The value is the atomic counter directly, to avoid allocations on the hot path.
+	contextSwitchesPerProcess maps.ConcurrentMap[uint64, *atomic.Int64]
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
 	threadStateCounters []*int64
@@ -132,11 +133,13 @@ func NewThreadCSCollector() *ThreadCollector {
 	collector := &ThreadCollector{
 		contextSwitchesPerCPU:     csPerCPU,
 		contextSwitchIntervals:    csIntervals,
-		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *ProcessSwitchCounter](),
+		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *atomic.Int64](),
 		threadStateCounters:       threadStateCounters,
 		stateKeyToIndex:           stateKeyToIndex,
 		indexToStateKey:           indexToStateKey,
 		log:                       logger.NewLoggerWithContext("thread_collector"),
+
+		// TODO: hide metrics if not enabled in config?
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -260,19 +263,20 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 
 	// Collect process context switches
 	stateManager := statemanager.GetGlobalStateManager()
-	c.contextSwitchesPerProcess.Range(func(startKey uint64, val *ProcessSwitchCounter) bool {
-		if val != nil {
-			// Only create metrics for processes that are still known at scrape time.
-			// The state manager retains information about terminated processes until
-			// AFTER the scrape is complete, ensuring we can report final metrics.
-			if processName, isKnown := stateManager.GetKnownProcessName(val.PID); isKnown {
-				count := val.Counter.Load()
-				data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
-					ProcessID:   val.PID,
-					StartKey:    startKey,
-					ProcessName: processName,
-					Count:       count,
-				})
+	c.contextSwitchesPerProcess.Range(func(startKey uint64, counter *atomic.Int64) bool {
+		if counter != nil {
+			// Get PID from startKey, then get process name from PID.
+			// This lookup is done here on the "cold" scrape path, not the "hot" event path.
+			if pid, ok := stateManager.GetPIDFromStartKey(startKey); ok {
+				if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
+					count := counter.Load()
+					data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
+						ProcessID:   pid,
+						StartKey:    startKey,
+						ProcessName: processName,
+						Count:       count,
+					})
+				}
 			}
 		}
 		return true // Continue ranging
@@ -331,13 +335,11 @@ func (c *ThreadCollector) RecordContextSwitch(
 		// Only create metrics for processes that are tracked
 		if stateManager.IsKnownProcess(processID) {
 			// Use the unique StartKey as the key to prevent PID reuse race conditions.
-			counter := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *ProcessSwitchCounter {
-				return &ProcessSwitchCounter{
-					PID:     processID,
-					Counter: new(atomic.Int64),
-				}
+			// This factory function captures no variables, preventing heap allocations on the hot path.
+			counter := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *atomic.Int64 {
+				return new(atomic.Int64)
 			})
-			counter.Counter.Add(1)
+			counter.Add(1)
 		}
 	}
 
