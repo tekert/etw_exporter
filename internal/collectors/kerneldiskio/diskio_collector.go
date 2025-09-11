@@ -14,9 +14,30 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
+// DiskOperation defines the type for disk I/O operations.
+type DiskOperation int
+
+const (
+	// OpRead represents a read operation.
+	OpRead DiskOperation = iota
+	// OpWrite represents a write operation.
+	OpWrite
+	// OpFlush represents a flush operation.
+	OpFlush
+	// opCount is an unexported constant that defines the number of operations.
+	opCount
+)
+
+// opToString maps DiskOperation constants to their string representations for Prometheus labels.
+var opToString = [opCount]string{
+	OpRead:  "read",
+	OpWrite: "write",
+	OpFlush: "flush",
+}
+
 // processDiskMetrics holds I/O metrics for a single disk within a process.
 type processDiskMetrics struct {
-	IOCount      map[string]*atomic.Int64 // operation -> count
+	IOCount      [opCount]*atomic.Int64 // Indexed by DiskOperation constants.
 	BytesRead    *atomic.Int64
 	BytesWritten *atomic.Int64
 }
@@ -34,9 +55,9 @@ type processMetrics struct {
 // All metrics are designed for low cardinality to maintain performance at scale.
 type DiskCollector struct {
 	// System-wide metrics, using simple maps protected by the collector's mutex.
-	diskIOCount      map[uint32]map[string]*atomic.Int64 // disk -> {op -> count}
-	diskBytesRead    map[uint32]*atomic.Int64            // disk -> count
-	diskBytesWritten map[uint32]*atomic.Int64            // disk -> count
+	diskIOCount      map[uint32]*[opCount]*atomic.Int64 // disk -> [op] -> count
+	diskBytesRead    map[uint32]*atomic.Int64           // disk -> count
+	diskBytesWritten map[uint32]*atomic.Int64           // disk -> count
 
 	// Per-process metrics, keyed by the unique process StartKey.
 	perProcessMetrics maps.ConcurrentMap[uint64, *processMetrics] // startKey -> metrics
@@ -58,7 +79,7 @@ type DiskCollector struct {
 func NewDiskIOCustomCollector() *DiskCollector {
 	collector := &DiskCollector{
 		// Initialize system-wide maps
-		diskIOCount:      make(map[uint32]map[string]*atomic.Int64),
+		diskIOCount:      make(map[uint32]*[opCount]*atomic.Int64),
 		diskBytesRead:    make(map[uint32]*atomic.Int64),
 		diskBytesWritten: make(map[uint32]*atomic.Int64),
 
@@ -130,16 +151,18 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 
 	c.mu.RLock()
 	// --- System-Wide Metrics ---
-	for diskNumber, opMap := range c.diskIOCount {
+	for diskNumber, opArray := range c.diskIOCount {
 		diskStr := strconv.FormatUint(uint64(diskNumber), 10)
-		for op, count := range opMap {
-			ch <- prometheus.MustNewConstMetric(
-				c.diskIOCountDesc,
-				prometheus.CounterValue,
-				float64(count.Load()),
-				diskStr,
-				op,
-			)
+		for op, count := range opArray {
+			if count != nil {
+				ch <- prometheus.MustNewConstMetric(
+					c.diskIOCountDesc,
+					prometheus.CounterValue,
+					float64(count.Load()),
+					diskStr,
+					opToString[op],
+				)
+			}
 		}
 	}
 	for diskNumber, bytes := range c.diskBytesRead {
@@ -180,7 +203,7 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 						startKeyStr,
 						processName,
 						diskStr,
-						op,
+						opToString[op],
 					)
 				}
 
@@ -216,6 +239,20 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 }
 
+// createDiskIoCounts initializes the maps and counters for a given disk number.
+// This is called with the collector mutex held to ensure thread safety.
+//
+// Parameters:
+//   - diskNumber: Physical disk number to initialize maps for
+func (c *DiskCollector) createDiskIoCounts(diskNumber uint32) {
+	c.diskIOCount[diskNumber] = new([opCount]*atomic.Int64)
+	for i := range int(opCount) {
+		c.diskIOCount[diskNumber][i] = new(atomic.Int64)
+	}
+	c.diskBytesRead[diskNumber] = new(atomic.Int64)
+	c.diskBytesWritten[diskNumber] = new(atomic.Int64)
+}
+
 // RecordDiskIO records a disk I/O operation.
 //
 // Parameters:
@@ -231,26 +268,23 @@ func (c *DiskCollector) RecordDiskIO(
 	transferSize uint32,
 	isWrite bool) {
 
-	operation := "read"
+	var operation DiskOperation
 	if isWrite {
-		operation = "write"
+		operation = OpWrite
+	} else {
+		operation = OpRead
 	}
 
 	// --- System-Wide Metrics ---
-	// Lock for the entire duration of map access and atomic updates to ensure correctness.
 	c.mu.Lock()
-	// Ensure nested map for disk number exists.
+	// Atomically check and initialize the maps for a given disk number.
+	// This prevents the race condition where multiple goroutines could try
+	// to initialize the same map entry concurrently.
 	if _, ok := c.diskIOCount[diskNumber]; !ok {
-		c.diskIOCount[diskNumber] = make(map[string]*atomic.Int64)
-		c.diskBytesRead[diskNumber] = new(atomic.Int64)
-		c.diskBytesWritten[diskNumber] = new(atomic.Int64)
-	}
-	// Ensure counter for operation exists.
-	if _, ok := c.diskIOCount[diskNumber][operation]; !ok {
-		c.diskIOCount[diskNumber][operation] = new(atomic.Int64)
+		c.createDiskIoCounts(diskNumber)
 	}
 
-	// Update counters while holding the lock.
+	// At this point, all maps and counters are guaranteed to be initialized.
 	c.diskIOCount[diskNumber][operation].Add(1)
 	if isWrite {
 		c.diskBytesWritten[diskNumber].Add(int64(transferSize))
@@ -273,15 +307,14 @@ func (c *DiskCollector) RecordDiskIO(
 		diskMetrics, ok := procMetrics.Disks[diskNumber]
 		if !ok {
 			diskMetrics = &processDiskMetrics{
-				IOCount:      make(map[string]*atomic.Int64),
 				BytesRead:    new(atomic.Int64),
 				BytesWritten: new(atomic.Int64),
 			}
+			// Initialize all counters in the array
+			for i := range int(opCount) {
+				diskMetrics.IOCount[i] = new(atomic.Int64)
+			}
 			procMetrics.Disks[diskNumber] = diskMetrics
-		}
-		// The IOCount map is also protected by the same lock.
-		if _, ok := diskMetrics.IOCount[operation]; !ok {
-			diskMetrics.IOCount[operation] = new(atomic.Int64)
 		}
 
 		// Update counters while holding the lock.
@@ -303,17 +336,13 @@ func (c *DiskCollector) RecordDiskFlush(diskNumber uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Ensure nested map for disk number exists.
+	// Atomically check and initialize the maps for a given disk number.
 	if _, ok := c.diskIOCount[diskNumber]; !ok {
-		c.diskIOCount[diskNumber] = make(map[string]*atomic.Int64)
-	}
-	// Ensure counter for flush operation exists.
-	if _, ok := c.diskIOCount[diskNumber]["flush"]; !ok {
-		c.diskIOCount[diskNumber]["flush"] = new(atomic.Int64)
+		c.createDiskIoCounts(diskNumber)
 	}
 
 	// Update counter.
-	c.diskIOCount[diskNumber]["flush"].Add(1)
+	c.diskIOCount[diskNumber][OpFlush].Add(1)
 }
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.

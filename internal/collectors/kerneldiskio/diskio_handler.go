@@ -53,6 +53,16 @@ func NewDiskIOHandler(config *config.DiskIOConfig) *Handler {
 	}
 }
 
+// Name returns the name of the collector.
+func (h *Handler) Name() string {
+	return "disk_io"
+}
+
+// IsEnabled checks if the collector is enabled in the configuration.
+func (h *Handler) IsEnabled(cfg *config.CollectorConfig) bool {
+	return cfg.DiskIO.Enabled
+}
+
 // GetCustomCollector returns the custom Prometheus collector for disk I/O metrics.
 // This method provides access to the DiskIOCustomCollector for registration
 // with the Prometheus registry, enabling high-performance metric collection.
