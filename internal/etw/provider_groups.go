@@ -52,6 +52,10 @@ var (
 	// [Guid("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}"), EventVersion(2)]
 	ThreadKernelGUID = etw.MustParseGUID("{3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}") // Thread V2
 
+	// DiskIO MOF class - provides IssuingThreadId
+	// [Guid("{3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}")]
+	DiskIOKernelGUID = etw.MustParseGUID("{3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}")
+
 	// PerfInfo MOF class - handles ISR, DPC, and system call events
 	// [Guid("{ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}"), EventVersion(2)]
 	PerfInfoKernelGUID = etw.MustParseGUID("{ce1dbfb4-137e-4da6-87b0-3f59aa102cbc}")
@@ -86,31 +90,49 @@ func newProcessCorrelationProvider() etw.Provider {
 var AllProviderGroups = []*ProviderGroup{
 	// DiskIOGroup uses manifest providers for disk I/O events and file I/O events
 	{
-		Name:        "disk_io",
-		KernelFlags: 0, // No kernel flags - using manifest providers only
+		Name: "disk_io",
+		// --- Legacy (Win10) ---
+		// Enable MOF-based DiskIO and Thread providers.
+		// EVENT_TRACE_FLAG_DISK_IO is for the legacy DiskIo provider which contains IssuingThreadId.
+		// EVENT_TRACE_FLAG_THREAD is required to map the IssuingThreadId back to a PID.
+		KernelFlags: etw.EVENT_TRACE_FLAG_DISK_IO | etw.EVENT_TRACE_FLAG_THREAD,
+		// --- Modern (Win11+) ---
+		SystemProviders: []etw.Provider{
+			{
+				Name:            "SystemProcessProvider", // For TID->PID mapping
+				GUID:            *etw.SystemProcessProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD,
+			},
+			{
+				Name:            "SystemIoProvider",
+				GUID:            *etw.SystemIoProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_IO_KW_DISK,
+			},
+		},
+		// --- Common ---
 		ManifestProviders: []etw.Provider{
 			newProcessCorrelationProvider(), // For disk I/O process name correlation
 			{
 				Name: "Microsoft-Windows-Kernel-Disk",
 				GUID: *MicrosoftWindowsKernelDiskGUID,
 				// Enable all disk I/O events: Read (10), Write (11), Flush (14)
-				EnableLevel:      0xFF, // All levels
-				MatchAnyKeyword:  0x0,  // All keywords
-				MatchAllKeyword:  0x0,
-				EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+				EnableLevel:     0xFF, // All levels
+				MatchAnyKeyword: 0x0,  // All keywords
+				MatchAllKeyword: 0x0,
+				//EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
 			},
-			{
-				Name: "Microsoft-Windows-Kernel-File",
-				GUID: *MicrosoftWindowsKernelFileGUID,
-				// Enable file I/O events for process correlation
-				EnableLevel:      0xFF,  // All levels
-				MatchAnyKeyword:  0x7A0, // KERNEL_FILE_KEYWORD_FILEIO (0x20) | KERNEL_FILE_KEYWORD_CREATE (0x80) | KERNEL_FILE_KEYWORD_READ (0x100) | KERNEL_FILE_KEYWORD_WRITE (0x200) | KERNEL_FILE_KEYWORD_DELETE_PATH (0x400)
-				MatchAllKeyword:  0x0,
-				EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
-				Filters: []etw.ProviderFilter{ // NOTE: comment this when doing profiling for pgo, causes lots of events.
-					etw.NewEventIDFilter(true, 12, 14, 15, 16, 26),
-				},
-			},
+			// {
+			// 	Name: "Microsoft-Windows-Kernel-File",
+			// 	GUID: *MicrosoftWindowsKernelFileGUID,
+			// 	// Enable file I/O events for process correlation
+			// 	EnableLevel:      0xFF,  // All levels
+			// 	MatchAnyKeyword:  0x7A0, // KERNEL_FILE_KEYWORD_FILEIO (0x20) | KERNEL_FILE_KEYWORD_CREATE (0x80) | KERNEL_FILE_KEYWORD_READ (0x100) | KERNEL_FILE_KEYWORD_WRITE (0x200) | KERNEL_FILE_KEYWORD_DELETE_PATH (0x400)
+			// 	MatchAllKeyword:  0x0,
+			// 	EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+			// 	Filters: []etw.ProviderFilter{ // NOTE: comment this when doing profiling for pgo, causes lots of events.
+			// 		etw.NewEventIDFilter(true, 12, 14, 15, 16, 26),
+			// 	},
+			// },
 		},
 		IsEnabled: func(config *config.CollectorConfig) bool {
 			return config.DiskIO.Enabled
