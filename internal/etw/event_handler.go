@@ -26,12 +26,20 @@ type eventHandlerFunc func(helper *etw.EventRecordHelper) error
 // rawEventHandlerFunc is a function signature for raw event handlers.
 type rawEventHandlerFunc func(record *etw.EventRecord) error
 
+// handlerUnion holds either a raw or a prepared event handler.
+// This allows storing both types in the same routing table while maintaining
+// type safety and avoiding interface-based dynamic dispatch.
+type handlerUnion struct {
+	preparedHandler eventHandlerFunc
+	rawHandler      rawEventHandlerFunc
+}
+
 // providerHandlers holds the routing table for a single provider.
 // It uses a slice for fast lookups of common, low-numbered event IDs,
 // and a map for rare, high-numbered event IDs to save memory.
 type providerHandlers struct {
-	slice       []eventHandlerFunc
-	overflowMap map[uint16]eventHandlerFunc
+	slice       []handlerUnion
+	overflowMap map[uint16]handlerUnion
 
 	// Use slice for event IDs 0-255, map for others.
 	maxSliceEventID uint16
@@ -47,20 +55,20 @@ func newProviderHandlers() *providerHandlers {
 // This method is a candidate for inlining by the compiler.
 //
 //go:inline
-func (pr *providerHandlers) get(eventID uint16) eventHandlerFunc {
+func (pr *providerHandlers) get(eventID uint16) handlerUnion {
 	if eventID < pr.maxSliceEventID {
 		if int(eventID) < len(pr.slice) {
 			return pr.slice[eventID]
 		}
-		return nil // Not in slice, and by design, not in the overflow map.
+		return handlerUnion{} // Not in slice, and by design, not in the overflow map.
 	}
 
 	// Fall back to the overflow map for high-numbered event IDs.
 	if pr.overflowMap != nil {
-		return pr.overflowMap[eventID] // Returns handler or nil if not found.
+		return pr.overflowMap[eventID] // Returns handler or zero value if not found.
 	}
 
-	return nil
+	return handlerUnion{}
 }
 
 // SessionWatcher defines the interface for a session watcher handler.
@@ -149,8 +157,20 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	eh.addRoute(*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK, systemConfigHandler.HandleSystemConfigLogDisk)
 	eh.log.Debug().Msg("Registered global system config handler routes")
 
+	// Helper to egister the thread handler for thread name mappings.
+	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
+	addThreadMappingRoutes := func() {
+		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
+		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, eh.threadHandler.HandleThreadStart)    // ThreadStart
+		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.threadHandler.HandleThreadStart) // ThreadRundown
+		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.threadHandler.HandleThreadEnd)        // ThreadEnd
+		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadEnd)     // ThreadRundownEnd
+	}
+
+	// TODO: maybe move these to the handler? gonna have to decouple the GUID definitions first.
+
 	// Initialize enabled collectors and register their routes.
-	{
+	if eh.config.DiskIO.Enabled {
 		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&eh.config.DiskIO)
 		prometheus.MustRegister(eh.diskHandler.GetCustomCollector())
 
@@ -160,9 +180,11 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush
 
 		// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
-		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskRead)   // DiskRead mof
-		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWrite) // DiskWrite mof
-		eh.addRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush mof
+		// These are now handled as raw events for testing.
+		//addThreadMappingRoutes() // Ensure thread routes are added if not already.
+		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskReadMofRaw)
+		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWriteMofRaw)
+		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlushMofRaw)
 
 		// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
 		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 12, eh.diskHandler.HandleFileCreate) // Create
@@ -175,28 +197,24 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 			kernelsysconfig.PhysicalDiskInfoMetricName,
 			kernelsysconfig.LogicalDiskInfoMetricName,
 		)
-		if eh.config.DiskIO.Enabled {
-			eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
-		}
+
+		eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
 	}
 
-	{
+	if eh.config.ThreadCS.Enabled {
 		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
 		prometheus.MustRegister(eh.threadHandler.GetCustomCollector())
 
 		// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
 		// Note: CSwitch (36) is handled in the raw EventRecordCallback for performance.
-		eh.addRoute(*ThreadKernelGUID, 50, eh.threadHandler.HandleReadyThread)                            // ReadyThread
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, eh.threadHandler.HandleThreadStart)    // ThreadStart
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.threadHandler.HandleThreadStart) // ThreadRundown
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.threadHandler.HandleThreadEnd)        // ThreadEnd
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadEnd)     // ThreadRundownEnd
-		if eh.config.ThreadCS.Enabled {
-			eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
-		}
+		eh.addRoute(*ThreadKernelGUID, 50, eh.threadHandler.HandleReadyThread) // ReadyThread
+		addThreadMappingRoutes()                                               // Ensure thread routes are added if not already.
+
+		eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
+
 	}
 
-	{
+	if eh.config.PerfInfo.Enabled {
 		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&eh.config.PerfInfo)
 		prometheus.MustRegister(eh.perfinfoHandler.GetCustomCollector())
 
@@ -215,9 +233,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 
 		// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
 		// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
-		if eh.config.PerfInfo.Enabled {
-			eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
-		}
+		eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
 	}
 
 	{
@@ -282,12 +298,12 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	return eh
 }
 
-// addRoute is a helper to simplify adding entries to the nested route map.
-func (h *EventHandler) addRoute(guid etw.GUID, eventID uint16, handler eventHandlerFunc) {
+// _addRoute is the private helper to add a handlerUnion to the route map.
+// It handles the creation of provider-specific maps and the slice-vs-map logic.
+func (h *EventHandler) _addRoute(guid etw.GUID, eventID uint16, handler handlerUnion) {
 	routes, ok := h.routeMap[guid]
 	if !ok {
-		routes = newProviderHandlers()       // should set maxSliceEventID = 256
-		routes.maxSliceEventID = uint16(256) // just in case some refactors don't.
+		routes = newProviderHandlers()
 		h.routeMap[guid] = routes
 	}
 
@@ -295,18 +311,28 @@ func (h *EventHandler) addRoute(guid etw.GUID, eventID uint16, handler eventHand
 		// Use the fast-path slice
 		if int(eventID) >= len(routes.slice) {
 			// Grow slice to accommodate the new eventID
-			newSlice := make([]eventHandlerFunc, eventID+1)
+			newSlice := make([]handlerUnion, eventID+1)
 			copy(newSlice, routes.slice)
 			routes.slice = newSlice
 		}
 		routes.slice[eventID] = handler
 	} else {
-		// Use the overflow map for high-numbered or sparse event IDs (saves some kilobytes of mem)
+		// Use the overflow map for high-numbered or sparse event IDs
 		if routes.overflowMap == nil {
-			routes.overflowMap = make(map[uint16]eventHandlerFunc)
+			routes.overflowMap = make(map[uint16]handlerUnion)
 		}
 		routes.overflowMap[eventID] = handler
 	}
+}
+
+// addRoute adds a handler for a standard, "prepared" event that uses an EventRecordHelper.
+func (h *EventHandler) addRoute(guid etw.GUID, eventID uint16, handler eventHandlerFunc) {
+	h._addRoute(guid, eventID, handlerUnion{preparedHandler: handler})
+}
+
+// addRawRoute adds a handler for a high-performance, "raw" event that uses an EventRecord.
+func (h *EventHandler) addRawRoute(guid etw.GUID, eventID uint16, handler rawEventHandlerFunc) {
+	h._addRoute(guid, eventID, handlerUnion{rawHandler: handler})
 }
 
 // RegisterWatcherRoutes registers the event routes for the session watcher.
@@ -349,6 +375,7 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// This is the fastest path, handling raw events directly.
 	if providerID.Equals(ThreadKernelGUID) &&
 		record.EventHeader.EventDescriptor.Opcode == 36 {
+		// TODO: add win 11 system providers
 
 		h.threadEventCount.Add(1)
 
@@ -375,35 +402,17 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	}
 
 	eventID := record.EventID()
-	// Disk I/O MOF Provider: {3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}
-	if providerID.Equals(DiskIOKernelGUID) {
-		if eventID == etw.EVENT_TRACE_TYPE_IO_READ ||
-			eventID == etw.EVENT_TRACE_TYPE_IO_WRITE ||
-			eventID == etw.EVENT_TRACE_TYPE_IO_FLUSH {
-			h.diskEventCount.Add(1)
-			if h.diskHandler != nil {
-				// Route to disk handler for raw disk I/O events.
-				switch eventID {
-				case etw.EVENT_TRACE_TYPE_IO_READ:
-					_ = h.diskHandler.HandleDiskReadMofRaw(record)
-				case etw.EVENT_TRACE_TYPE_IO_WRITE:
-					_ = h.diskHandler.HandleDiskWriteMofRaw(record)
-				case etw.EVENT_TRACE_TYPE_IO_FLUSH:
-					_ = h.diskHandler.HandleDiskFlushMofRaw(record)
-				}
+	// Route the rest of the registered raw events
+	if handlers, ok := h.routeMap[providerID]; ok {
+		if handler := handlers.get(eventID); handler.rawHandler != nil {
+			// Increment counter for raw-routed events.
+			if counter, ok := h.guidToCounter[providerID]; ok {
+				counter.Add(1)
 			}
+			handler.rawHandler(record)
+			return false // Stop processing
 		}
 	}
-
-	// TODO.
-	// //--- Scalable Path (Hypothetical for other raw events) ---
-	// //If I had more raw providers, I could add a map lookup here as a fallback.
-	// if rawProviderHandlers, ok := h.routeMap[providerID]; ok {
-	// 	if handlerFunc := rawProviderHandlers.get(eventID); handlerFunc != nil {
-	// 		handlerFunc(record)
-	// 		return false // Stop processing
-	// 	}
-	// }
 
 	return true // Continue to the next callback stage for all other events.
 }
@@ -437,8 +446,8 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 
 	// Route the event
 	if handlers, ok := h.routeMap[providerGUID]; ok {
-		if handlerFunc := handlers.get(eventID); handlerFunc != nil {
-			return handlerFunc(helper)
+		if handler := handlers.get(eventID); handler.preparedHandler != nil {
+			return handler.preparedHandler(helper)
 		}
 	}
 
