@@ -46,7 +46,7 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, imageName 
 			for _, re := range sm.processNameFilters {
 				if re.MatchString(imageName) {
 					sm.trackedStartKeys.Store(startKey, struct{}{})
-					sm.log.Trace().Str("process_name", imageName).Uint64("start_key", startKey).Msg("Process start key is now tracked due to name match.")
+					sm.log.Debug().Str("process_name", imageName).Uint64("start_key", startKey).Msg("Process start key is now tracked due to name match.")
 					break // Found a match, no need to check other patterns.
 				}
 			}
