@@ -19,7 +19,7 @@ import (
 //
 // Important:
 // https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
-//
+// https://www.microsoftpressstore.com/articles/article.aspx?p=2201309&seqNum=3
 
 // Handler handles disk I/O events from ETW providers.
 // This handler processes ETW events from the Microsoft-Windows-Kernel-Disk provider

@@ -349,6 +349,7 @@ func (c *DiskCollector) RecordDiskFlush(diskNumber uint32) {
 // This method is called by the KernelStateManager after a scrape is complete to
 // allow the collector to safely clean up its internal state for terminated processes.
 func (c *DiskCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+	c.log.Debug().Int("count", len(terminatedProcs)).Caller(1).Msg("Cleaning up disk I/O counters for terminated processes")
 	cleanedCount := 0
 	for _, startKey := range terminatedProcs {
 		if _, deleted := c.perProcessMetrics.LoadAndDelete(startKey); deleted {
