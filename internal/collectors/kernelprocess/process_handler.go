@@ -1,6 +1,8 @@
 package kernelprocess
 
 import (
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
@@ -20,6 +22,20 @@ func NewProcessHandler(sm *statemanager.KernelStateManager) *Handler {
 		stateManager: sm,
 		log:          logger.NewSampledLoggerCtx("process_handler"),
 	}
+}
+
+// // AttachCollector allows a metrics collector to subscribe to the handler's events.
+// func (c *Handler) AttachCollector(collector *ProcessCollector) {
+// 	c.log.Debug().Msg("Attaching metrics collector to process handler.")
+// 	c.collector = collector
+// }
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	router.AddRoute(*guids.MicrosoftWindowsKernelProcessGUID, 1, h.HandleProcessStart)    // ProcessStart
+	router.AddRoute(*guids.MicrosoftWindowsKernelProcessGUID, 15, h.HandleProcessRundown) // ProcessRundown
+	router.AddRoute(*guids.MicrosoftWindowsKernelProcessGUID, 2, h.HandleProcessEnd)      // ProcessStop
+	h.log.Debug().Msg("Registered global process handler routes")
 }
 
 // HandleProcessStart processes ProcessStart events to track process creation.
@@ -51,10 +67,30 @@ func (ph *Handler) HandleProcessStart(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 	parentProcessID, _ := helper.GetPropertyUint("ParentProcessID")
 	processName, _ := helper.GetPropertyString("ImageName")
+	sessionID, _ := helper.GetPropertyUint("SessionID")
+	imageChecksum, _ := helper.GetPropertyUint("ImageChecksum")
+	createTime, _ := helper.GetPropertyFileTime("CreateTime")
+
 	timestamp := helper.Timestamp()
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	ph.stateManager.AddProcess(uint32(processID), startKey, processName, uint32(parentProcessID), timestamp)
+	if imageChecksum == 0 {
+		ph.log.Warn().
+			Uint32("pid", uint32(processID)).
+			Str("name", processName).
+			Msg("Process started without image checksum.")
+	}
+
+	ph.stateManager.AddProcess(
+		uint32(processID),
+		startKey,
+		processName,
+		uint32(parentProcessID),
+		uint32(sessionID),
+		uint32(imageChecksum),
+		createTime,
+		timestamp,
+	)
 	return nil
 }
 
@@ -93,10 +129,29 @@ func (ph *Handler) HandleProcessRundown(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 	parentProcessID, _ := helper.GetPropertyUint("ParentProcessID")
 	processName, _ := helper.GetPropertyString("ImageName")
+	sessionID, _ := helper.GetPropertyUint("SessionID")
+	imageChecksum, _ := helper.GetPropertyUint("ImageChecksum")
+	createTime, _ := helper.GetPropertyFileTime("CreateTime")
+
 	timestamp := helper.Timestamp()
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
-	ph.stateManager.AddProcess(uint32(processID), startKey, processName, uint32(parentProcessID), timestamp)
+	if imageChecksum == 0 {
+		ph.log.Warn().
+			Uint32("pid", uint32(processID)).
+			Str("name", processName).
+			Msg("Process Rundown without image checksum.")
+	}
+
+	ph.stateManager.AddProcess(
+		uint32(processID),
+		startKey,
+		processName,
+		uint32(parentProcessID),
+		uint32(sessionID),
+		uint32(imageChecksum),
+		createTime,
+		timestamp)
 	return nil
 }
 
@@ -135,10 +190,11 @@ func (ph *Handler) HandleProcessRundown(helper *etw.EventRecordHelper) error {
 func (ph *Handler) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	processID, _ := helper.GetPropertyUint("ProcessID")
 	pid := uint32(processID)
+	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
 	// Mark the process for deletion. The state manager will handle cascading this
 	// to the process's threads during the post-scrape cleanup.
-	ph.stateManager.MarkProcessForDeletion(pid)
+	ph.stateManager.MarkProcessForDeletion(pid, startKey)
 
 	return nil
 }

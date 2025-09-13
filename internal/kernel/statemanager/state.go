@@ -20,12 +20,12 @@ import (
 // kernel state information.
 type KernelStateManager struct {
 	// Process state
-	processes           maps.ConcurrentMap[uint32, *ProcessInfo] // key: uint32 (PID), value: *ProcessInfo
-	terminatedProcesses maps.ConcurrentMap[uint32, time.Time]    // key: uint32 (PID), value: time.Time
+	processes           maps.ConcurrentMap[uint64, *ProcessInfo] // key: uint64 (StartKey), value: *ProcessInfo
+	terminatedProcesses maps.ConcurrentMap[uint64, time.Time]    // key: uint64 (StartKey), value: time.Time
 
 	// Process Start Key state for robust tracking
-	startKeyToPid maps.ConcurrentMap[uint64, uint32] // key: uint64 (startKey), value: uint32 (PID)
-	pidToStartKey maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (startKey)
+	startKeyToPid        maps.ConcurrentMap[uint64, uint32] // key: uint64 (startKey), value: uint32 (PID)
+	pidToCurrentStartKey maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (current StartKey)
 
 	// Thread state
 	tidToPid          maps.ConcurrentMap[uint32, uint32]                               // key: TID (uint32), value: PID (uint32)
@@ -38,11 +38,11 @@ type KernelStateManager struct {
 	imageToPid       maps.ConcurrentMap[uint64, uint32]                               // key: uint64 (ImageBase), value: uint32 (PID)
 	terminatedImages maps.ConcurrentMap[uint64, time.Time]                            // key: uint64 (ImageBase), value: time.Time
 	imageInfoPool    sync.Pool                                                        // Pool for recycling ImageInfo objects.
+	processInfoPool  sync.Pool                                                        // Pool for reusing ProcessInfo objects to reduce heap allocations.
 
 	// Process filtering state
 	processFilterEnabled bool
 	processNameFilters   []*regexp.Regexp
-	trackedStartKeys     maps.ConcurrentMap[uint64, struct{}] // key: uint64 (startKey), value: struct{}
 
 	cleaners []PostScrapeCleaner // Collectors that need post-scrape cleanup.
 	log      *phusluadapter.SampledLogger
@@ -58,8 +58,9 @@ var (
 // of their internal state after a Prometheus scrape is complete.
 type PostScrapeCleaner interface {
 	// CleanupTerminatedProcesses is called with a map of terminated processes,
-	// where the key is the PID and the value is the unique Process Start Key.
-	CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64)
+	// where the key is the unique Process Start Key and the value is the last known PID.
+	// This map contains all processes that were terminated since the last scrape.
+	CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32)
 }
 
 // GetGlobalStateManager returns the singleton KernelStateManager instance, ensuring
@@ -67,23 +68,27 @@ type PostScrapeCleaner interface {
 func GetGlobalStateManager() *KernelStateManager {
 	initOnce.Do(func() {
 		globalStateManager = &KernelStateManager{
-			log:                 logger.NewSampledLoggerCtx("state_manager"),
-			cleaners:            make([]PostScrapeCleaner, 0),
-			processes:           maps.NewConcurrentMap[uint32, *ProcessInfo](),
-			terminatedProcesses: maps.NewConcurrentMap[uint32, time.Time](),
-			pidToStartKey:       maps.NewConcurrentMap[uint32, uint64](),
-			startKeyToPid:       maps.NewConcurrentMap[uint64, uint32](),
-			trackedStartKeys:    maps.NewConcurrentMap[uint64, struct{}](),
-			tidToPid:            maps.NewConcurrentMap[uint32, uint32](),
-			pidToTids:           maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]](),
-			terminatedThreads:   maps.NewConcurrentMap[uint32, time.Time](),
-			images:              maps.NewConcurrentMap[uint64, *ImageInfo](),
-			pidToImages:         maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]](),
-			imageToPid:          maps.NewConcurrentMap[uint64, uint32](),
-			terminatedImages:    maps.NewConcurrentMap[uint64, time.Time](),
+			log:                  logger.NewSampledLoggerCtx("state_manager"),
+			cleaners:             make([]PostScrapeCleaner, 0),
+			processes:            maps.NewConcurrentMap[uint64, *ProcessInfo](),
+			terminatedProcesses:  maps.NewConcurrentMap[uint64, time.Time](),
+			pidToCurrentStartKey: maps.NewConcurrentMap[uint32, uint64](),
+			startKeyToPid:        maps.NewConcurrentMap[uint64, uint32](),
+			tidToPid:             maps.NewConcurrentMap[uint32, uint32](),
+			pidToTids:            maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]](),
+			terminatedThreads:    maps.NewConcurrentMap[uint32, time.Time](),
+			images:               maps.NewConcurrentMap[uint64, *ImageInfo](),
+			pidToImages:          maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]](),
+			imageToPid:           maps.NewConcurrentMap[uint64, uint32](),
+			terminatedImages:     maps.NewConcurrentMap[uint64, time.Time](),
 			imageInfoPool: sync.Pool{
 				New: func() any {
 					return new(ImageInfo)
+				},
+			},
+			processInfoPool: sync.Pool{
+				New: func() any {
+					return &ProcessInfo{}
 				},
 			},
 		}
@@ -205,11 +210,14 @@ func (sm *KernelStateManager) cleanupTerminatedEntities(
 	shouldClean func(termTime time.Time) bool) (cleanedProcs, cleanedThreads, cleanedImages int) {
 	// 1. Clean up processes.
 	// First, identify all processes that meet the cleanup criteria.
-	procsToClean := make(map[uint32]uint64)
-	sm.terminatedProcesses.Range(func(pid uint32, termTime time.Time) bool {
+	procsToClean := make(map[uint64]uint32)
+	sm.terminatedProcesses.Range(func(startKey uint64, termTime time.Time) bool {
 		if shouldClean(termTime) {
-			startKey, _ := sm.GetProcessStartKey(pid)
-			procsToClean[pid] = startKey
+			// We need the PID to notify collectors correctly. It should always exist
+			// at this stage, as it's cleaned up after this map is built.
+			if pid, ok := sm.GetPIDFromStartKey(startKey); ok {
+				procsToClean[startKey] = pid
+			}
 		}
 		return true
 	})
@@ -254,13 +262,13 @@ func (sm *KernelStateManager) cleanupTerminatedEntities(
 // It notifies collectors and then removes processes and their associated threads.
 // This method MUST be called with the state manager's mutex held.
 // It returns the number of processes that were cleaned.
-func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) int {
+func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint64]uint32) int {
 	sm.log.Debug().Int("count", len(procsToClean)).Msg("Starting process cleanup...")
 	if len(procsToClean) == 0 {
 		return 0
 	}
 
-	// Notify registered collectors to clean up their state for these PIDs.
+	// Notify registered collectors to clean up their state for these StartKeys.
 	// This happens BEFORE the state manager removes the process info, allowing
 	// collectors to perform any final lookups if needed.
 	sm.log.Debug().Int("cleaners", len(sm.cleaners)).Msg("Cleaning up terminated processes")
@@ -269,10 +277,25 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint32]uint64) i
 	}
 
 	// Perform the state manager's own cleanup for the identified processes.
-	for pid := range procsToClean {
-		sm.processes.Delete(pid)
-		sm.terminatedProcesses.Delete(pid)
-		sm.removeProcessStartKeyMapping(pid) // Clean up start key mapping
+	for startKey, pid := range procsToClean {
+		// Always remove the process info and its primary key mappings.
+		if pInfo, exists := sm.processes.LoadAndDelete(startKey); exists {
+			// Reset the object before returning it to the pool.
+			*pInfo = ProcessInfo{}
+			sm.processInfoPool.Put(pInfo)
+		}
+		sm.terminatedProcesses.Delete(startKey)
+		sm.startKeyToPid.Delete(startKey)
+
+		// Atomically remove the pid -> current mapping if it still points to the
+		// key we are cleaning up. This handles cases where the process was terminated
+		// implicitly by the stale cleanup mechanism.
+		sm.pidToCurrentStartKey.Update(pid, func(currentSK uint64, exists bool) (uint64, bool) {
+			if exists && currentSK == startKey {
+				return 0, false // Value matches, so delete the entry.
+			}
+			return currentSK, true // Value does not match, keep it.
+		})
 
 		// Cascade delete to threads
 		if tids, exists := sm.pidToTids.Load(pid); exists {
@@ -308,23 +331,32 @@ func (sm *KernelStateManager) CleanupStaleProcesses(lastSeenIn time.Duration) {
 	sm.log.Debug().Dur("max_age", lastSeenIn).Msg("Checking for stale processes to mark for deletion")
 
 	cutoff := time.Now().Add(-lastSeenIn)
-	var pidsToMark []uint32
-	sm.processes.Range(func(pid uint32, info *ProcessInfo) bool {
+	var processesToMark []struct {
+		pid      uint32
+		startKey uint64
+	}
+	sm.processes.Range(func(sk uint64, info *ProcessInfo) bool {
 		info.mu.Lock()
 		lastSeen := info.LastSeen
+		pid := info.PID
 		info.mu.Unlock()
+
 		if lastSeen.Before(cutoff) {
-			pidsToMark = append(pidsToMark, pid)
+			processesToMark = append(processesToMark, struct {
+				pid      uint32
+				startKey uint64
+			}{pid: pid, startKey: sk})
 		}
 		return true
 	})
 
-	if len(pidsToMark) > 0 {
-		for _, pid := range pidsToMark {
-			sm.MarkProcessForDeletion(pid)
+	if len(processesToMark) > 0 {
+		for _, p := range processesToMark {
+			// Mark the specific start key for deletion. This is more robust.
+			sm.MarkProcessForDeletion(p.pid, p.startKey)
 		}
 		sm.log.Debug().
-			Int("stale_count", len(pidsToMark)).
+			Int("stale_count", len(processesToMark)).
 			Dur("max_age", lastSeenIn).
 			Msg("Marked stale processes for cleanup post-scrape")
 	}
@@ -339,14 +371,4 @@ func (sm *KernelStateManager) removeThread(tid uint32) {
 		}
 	}
 	sm.tidToPid.Delete(tid)
-}
-
-// removeProcessStartKeyMapping cleans up the PID <-> StartKey mappings.
-// If a StartKey no longer has any associated PIDs, the key itself is removed.
-func (sm *KernelStateManager) removeProcessStartKeyMapping(pid uint32) {
-	if startKey, skExists := sm.pidToStartKey.Load(pid); skExists {
-		sm.pidToStartKey.Delete(pid)
-		sm.startKeyToPid.Delete(startKey)    // Clean up the reverse mapping
-		sm.trackedStartKeys.Delete(startKey) // Also remove from tracked keys
-	}
 }

@@ -78,15 +78,15 @@ func (m *ShardedMap[K, V]) LoadAndDelete(key K) (V, bool) {
 
 // LoadOrStore returns the existing value for the key if present.
 // Otherwise, it calls the valueFactory to create a new value, stores it, and returns it.
-// This is useful for "get or create" patterns.
-func (m *ShardedMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
+// The loaded result is true if the key was present.
+func (m *ShardedMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
 	shard := m.getShard(key)
 	shard.RLock()
 	val, exists := shard.m[key]
 	shard.RUnlock()
 
 	if exists {
-		return val
+		return val, true
 	}
 
 	// Fallback to a full lock to create the entry.
@@ -94,12 +94,12 @@ func (m *ShardedMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
 	defer shard.Unlock()
 	// Double-check in case another goroutine created it while we were waiting for the lock.
 	if val, exists := shard.m[key]; exists {
-		return val
+		return val, true
 	}
 
 	val = valueFactory()
 	shard.m[key] = val
-	return val
+	return val, false
 }
 
 // Update provides a safe way to read, modify, and write a value for a key under a lock.

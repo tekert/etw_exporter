@@ -4,6 +4,8 @@ import (
 	"github.com/tekert/goetw/etw"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
@@ -44,13 +46,43 @@ type Handler struct {
 //
 // Returns:
 //   - *DiskIOHandler: A new disk I/O handler instance
-func NewDiskIOHandler(config *config.DiskIOConfig) *Handler {
+func NewDiskIOHandler(config *config.DiskIOConfig, sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
-		customCollector: NewDiskIOCustomCollector(),
+		customCollector: nil,
 		config:          config,
-		stateManager:    statemanager.GetGlobalStateManager(),
+		stateManager:    sm,
 		log:             logger.NewSampledLoggerCtx("diskio_handler"),
 	}
+}
+
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *DiskCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to diskio handler.")
+	c.customCollector = collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271}) - MANIFEST
+	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ, h.HandleDiskRead)   // DiskRead
+	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, h.HandleDiskWrite) // DiskWrite
+	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, h.HandleDiskFlush) // DiskFlush
+
+	// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
+	// These are now handled as raw events for testing. choose this or manifest, not both.
+	//addThreadMappingRoutes() // Ensure thread routes are added if not already.
+	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, h.HandleDiskReadMofRaw)
+	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, h.HandleDiskWriteMofRaw)
+	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, h.HandleDiskFlushMofRaw)
+
+	// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
+	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 12, h.HandleFileCreate) // Create
+	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 14, h.HandleFileClose)  // Close
+	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 15, h.HandleFileRead)   // Read
+	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 16, h.HandleFileWrite)  // Write
+	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 26, h.HandleFileDelete) // DeletePath
+
+	h.log.Debug().Msg("Disk I/O routes registered")
 }
 
 // Name returns the name of the collector.
@@ -64,16 +96,6 @@ func (h *Handler) IsEnabled(cfg *config.CollectorConfig) bool {
 }
 
 // GetCustomCollector returns the custom Prometheus collector for disk I/O metrics.
-// This method provides access to the DiskIOCustomCollector for registration
-// with the Prometheus registry, enabling high-performance metric collection.
-//
-// Usage Example:
-//
-//	diskIOHandler := NewDiskIOHandler()
-//	prometheus.MustRegister(diskIOHandler.GetCustomCollector())
-//
-// Returns:
-//   - *DiskIOCustomCollector: The custom collector instance for registration
 func (d *Handler) GetCustomCollector() *DiskCollector {
 	return d.customCollector
 }
@@ -103,6 +125,10 @@ func (d *Handler) GetCustomCollector() *DiskCollector {
 // TODO: Implement filename correlation by creating a map of FileObject -> FileName
 // from Kernel-File events (Create, Rundown) and looking up the FileObject from this event.
 func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk read")
@@ -119,10 +145,8 @@ func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 	// https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
 	pid := helper.EventRec.EventHeader.ProcessId
 	startKey, _ := d.stateManager.GetProcessStartKey(pid)
-	d.log.Trace().Uint32("fallback_pid", pid).
-		Msg("DiskRead using fallback PID from event header")
 
-	d.customCollector.RecordDiskIO(uint32(diskNumber), pid, startKey, uint32(transferSize), false)
+	d.customCollector.RecordDiskIO(uint32(diskNumber), startKey, uint32(transferSize), false)
 
 	return nil
 }
@@ -149,9 +173,12 @@ func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 //   - IORequestPacket (win:Pointer): Pointer to the I/O request packet.
 //   - HighResResponseTime (win:UInt64): High-resolution response time.
 //
-// TODO: Implement filename correlation by creating a map of FileObject -> FileName
 // from Kernel-File events (Create, Rundown) and looking up the FileObject from this event.
 func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk write")
@@ -169,7 +196,7 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 	startKey, _ := d.stateManager.GetProcessStartKey(pid)
 	d.log.Trace().Uint32("fallback_pid", pid).Msg("DiskWrite using fallback PID from event header")
 
-	d.customCollector.RecordDiskIO(uint32(diskNumber), pid, startKey, uint32(transferSize), true)
+	d.customCollector.RecordDiskIO(uint32(diskNumber), startKey, uint32(transferSize), true)
 
 	return nil
 }
@@ -200,6 +227,10 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 //   - HighResResponseTime (win:UInt64): High-resolution response time. Offset: 40
 //   - IssuingThreadId (win:UInt32): ID of the thread that issued the I/O. Offset: 48
 func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	var diskNumber, transferSize, issuingTID uint32
 	var err error
 
@@ -223,24 +254,30 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 		return err
 	}
 
-	var pid uint32
 	var startKey uint64
 
-	// Step 1: Attempt to get the most accurate PID using the IssuingThreadId.
+	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if resolvedPID, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
-			pid = resolvedPID
-			startKey, _ = d.stateManager.GetProcessStartKey(pid)
+		if pid, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
+			// We got a PID, now try to get its startKey.
+			if sk, ok := d.stateManager.GetProcessStartKey(pid); ok {
+				startKey = sk
+			}
 		}
 	}
 
-	// Step 2: If TID attribution failed, fall back to the ProcessId in the event header.
-	if pid == 0 {
-		pid = record.EventHeader.ProcessId
-		startKey, _ = d.stateManager.GetProcessStartKey(pid)
+	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
+	if startKey == 0 {
+		headerPID := record.EventHeader.ProcessId
+		if sk, ok := d.stateManager.GetProcessStartKey(headerPID); ok {
+			startKey = sk
+		}
 	}
 
-	d.customCollector.RecordDiskIO(diskNumber, pid, startKey, transferSize, false)
+	// A startKey of 0 means we couldn't attribute the I/O to a known process.
+	// The collector will still record the system-wide metric, but will skip the
+	// per-process metric if startKey is 0.
+	d.customCollector.RecordDiskIO(diskNumber, startKey, transferSize, false)
 
 	return nil
 }
@@ -271,6 +308,10 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 //   - HighResResponseTime (win:UInt64): High-resolution response time. Offset: 40
 //   - IssuingThreadId (win:UInt32): ID of the thread that issued the I/O. Offset: 48
 func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	var diskNumber, transferSize, issuingTID uint32
 	var err error
 
@@ -294,24 +335,30 @@ func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
 		return err
 	}
 
-	var pid uint32
 	var startKey uint64
 
-	// Step 1: Attempt to get the most accurate PID using the IssuingThreadId.
+	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if resolvedPID, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
-			pid = resolvedPID
-			startKey, _ = d.stateManager.GetProcessStartKey(pid)
+		if pid, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
+			// We got a PID, now try to get its startKey.
+			if sk, ok := d.stateManager.GetProcessStartKey(pid); ok {
+				startKey = sk
+			}
 		}
 	}
 
-	// Step 2: If TID attribution failed, fall back to the ProcessId in the event header.
-	if pid == 0 {
-		pid = record.EventHeader.ProcessId
-		startKey, _ = d.stateManager.GetProcessStartKey(pid)
+	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
+	if startKey == 0 {
+		headerPID := record.EventHeader.ProcessId
+		if sk, ok := d.stateManager.GetProcessStartKey(headerPID); ok {
+			startKey = sk
+		}
 	}
 
-	d.customCollector.RecordDiskIO(diskNumber, pid, startKey, transferSize, true)
+	// A startKey of 0 means we couldn't attribute the I/O to a known process.
+	// The collector will still record the system-wide metric, but will skip the
+	// per-process metric if startKey is 0.
+	d.customCollector.RecordDiskIO(diskNumber, startKey, transferSize, true)
 
 	return nil
 }
@@ -334,6 +381,10 @@ func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
 //
 // This handler is responsible for counting disk flush operations per disk.
 func (d *Handler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	diskNumber, err := helper.GetPropertyUint("DiskNumber")
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk flush")
@@ -363,6 +414,10 @@ func (d *Handler) HandleDiskFlush(helper *etw.EventRecordHelper) error {
 //   - Irp (UInt32): Offset: 16
 //   - IssuingThreadId (UInt32): Offset: 20
 func (d *Handler) HandleDiskFlushMofRaw(record *etw.EventRecord) error {
+	if d.customCollector == nil {
+		return nil
+	}
+
 	diskNumber, err := record.GetUint32At(0)
 	if err != nil {
 		d.log.SampledError("fail-disknumber").Err(err).Msg("Failed to get DiskNumber property for disk flush")

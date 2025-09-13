@@ -28,9 +28,13 @@ func (m *CornelkMap[K, V]) LoadAndDelete(key K) (V, bool) {
 	return val, ok
 }
 
-func (m *CornelkMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
-	val, _ := m.m.GetOrInsert(key, valueFactory())
-	return val
+func (m *CornelkMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
+	// Note: cornelk/hashmap's GetOrInsert always evaluates the value argument.
+	// The second return value `inserted` is true if the value was newly inserted.
+	// Our interface's `loaded` flag should be true if the value was already present.
+	// Therefore, loaded = !inserted.
+	val, inserted := m.m.GetOrInsert(key, valueFactory())
+	return val, !inserted
 }
 
 // Update is a non-atomic simulation. It is vulnerable to race conditions.

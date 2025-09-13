@@ -16,6 +16,9 @@ pprof_enabled = true
 enabled = false
 include_names = []
 
+[collectors.process]
+enabled = true
+
 [collectors.disk_io]
 enabled = true
 

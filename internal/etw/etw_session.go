@@ -10,6 +10,8 @@ import (
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
+	guids "etw_exporter/internal/etw/guids"
+
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
 
@@ -326,7 +328,7 @@ func (s *SessionManager) setupSessions() error {
 		s.log.Info().Msg("Session watcher is enabled. Monitoring session status.")
 		watcherProvider := etw.Provider{
 			Name:            "Microsoft-Windows-Kernel-EventTracing",
-			GUID:            *MicrosoftWindowsKernelEventTracingGUID,
+			GUID:            *guids.MicrosoftWindowsKernelEventTracingGUID,
 			MatchAnyKeyword: 0x10, // ETW_KEYWORD_SESSION
 			Filters: []etw.ProviderFilter{
 				etw.NewEventIDFilter(true, 10, 11),
@@ -434,7 +436,7 @@ func (s *SessionManager) Stop() error {
 
 	// Stop consumer last
 	if s.consumer != nil {
-		if err := s.consumer.StopWithTimeout(30 * time.Second); err != nil {
+		if err := s.consumer.StopWithTimeout(10 * time.Second); err != nil {
 			return fmt.Errorf("failed to stop consumer: %w", err)
 		}
 	}
@@ -486,7 +488,7 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	}
 
 	s.log.Debug().Msg("Triggering process rundown...")
-	if err := s.manifestSession.GetRundownEvents(MicrosoftWindowsKernelProcessGUID); err != nil {
+	if err := s.manifestSession.GetRundownEvents(guids.MicrosoftWindowsKernelProcessGUID); err != nil {
 		s.log.Error().Err(err).Msg("Failed to trigger process rundown")
 		return err
 	}
@@ -535,7 +537,7 @@ func (s *SessionManager) startStaleProcessCleanup() {
 	log.Info().
 		Str("interval", cleanupInterval.String()).
 		Str("max_age", processMaxAge.String()).
-		Msg("🧹 Starting stale process cleanup routine (ETW Rundown)")
+		Msg("Starting stale process cleanup routine (ETW Rundown)")
 
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()

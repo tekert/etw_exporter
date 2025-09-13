@@ -34,7 +34,7 @@ func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, 
 	// Associate the image with the process that loaded it.
 	// This is crucial for cascading cleanup when the process terminates.
 	// The factory function here captures no variables, preventing heap allocations.
-	pidImages := sm.pidToImages.LoadOrStore(pid, func() maps.ConcurrentMap[uint64, struct{}] {
+	pidImages, _ := sm.pidToImages.LoadOrStore(pid, func() maps.ConcurrentMap[uint64, struct{}] {
 		return maps.NewConcurrentMap[uint64, struct{}]()
 	})
 	pidImages.Store(imageBase, struct{}{})

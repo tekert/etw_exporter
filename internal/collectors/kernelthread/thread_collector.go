@@ -66,6 +66,9 @@ type ThreadCollector struct {
 	contextSwitchesPerProcessDesc *prometheus.Desc
 	contextSwitchIntervalsDesc    *prometheus.Desc
 	threadStatesDesc              *prometheus.Desc
+
+	// Reference to the global kernel state manager (process, images, threads, etc).
+	stateManager *statemanager.KernelStateManager
 }
 
 // ThreadMetricsData holds a snapshot of aggregated data for a single scrape.
@@ -78,10 +81,8 @@ type ThreadMetricsData struct {
 
 // ProcessContextSwitches holds context switch data for a process.
 type ProcessContextSwitches struct {
-	ProcessID   uint32
-	StartKey    uint64
-	ProcessName string
-	Count       int64
+	StartKey uint64
+	Count    int64
 }
 
 // IntervalStats holds statistical data for context switch intervals.
@@ -96,7 +97,7 @@ type IntervalStats struct {
 var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
-func NewThreadCSCollector() *ThreadCollector {
+func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector {
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
@@ -145,6 +146,7 @@ func NewThreadCSCollector() *ThreadCollector {
 	}
 
 	collector := &ThreadCollector{
+		stateManager:              sm,
 		contextSwitchesPerCPU:     csPerCPU,
 		contextSwitchIntervals:    csIntervals,
 		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *atomic.Int64](),
@@ -160,8 +162,8 @@ func NewThreadCSCollector() *ThreadCollector {
 		),
 		contextSwitchesPerProcessDesc: prometheus.NewDesc(
 			"etw_thread_context_switches_process_total",
-			"Total number of context switches per process",
-			[]string{"process_id", "process_start_key", "process_name"}, nil,
+			"Total number of context switches per program.",
+			[]string{"process_name", "image_checksum", "session_id"}, nil,
 		),
 		contextSwitchIntervalsDesc: prometheus.NewDesc(
 			"etw_thread_context_switch_interval_milliseconds",
@@ -176,7 +178,7 @@ func NewThreadCSCollector() *ThreadCollector {
 	}
 
 	// Register the collector with the state manager for post-scrape cleanup.
-	statemanager.GetGlobalStateManager().RegisterCleaner(collector)
+	sm.RegisterCleaner(collector)
 
 	return collector
 }
@@ -212,15 +214,35 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 		)
 	}
 
-	// Create context switches per process metrics
-	for _, procData := range data.ContextSwitchesPerProcess {
+	// --- Per-Program Context Switch Metrics (with on-the-fly aggregation) ---
+	type programKey struct {
+		name      string
+		checksum  string
+		sessionID string
+	}
+	aggregatedSwitches := make(map[programKey]int64)
+	stateManager := c.stateManager
+
+	c.contextSwitchesPerProcess.Range(func(startKey uint64, counter *atomic.Int64) bool {
+		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
+			key := programKey{
+				name:      procInfo.Name,
+				checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
+				sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+			}
+			aggregatedSwitches[key] += counter.Load()
+		}
+		return true
+	})
+
+	for key, count := range aggregatedSwitches {
 		ch <- prometheus.MustNewConstMetric(
 			c.contextSwitchesPerProcessDesc,
 			prometheus.CounterValue,
-			float64(procData.Count),
-			strconv.FormatUint(uint64(procData.ProcessID), 10),
-			strconv.FormatUint(procData.StartKey, 10),
-			procData.ProcessName,
+			float64(count),
+			key.name,
+			key.checksum,
+			key.sessionID,
 		)
 	}
 
@@ -260,7 +282,7 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 func (c *ThreadCollector) collectData() ThreadMetricsData {
 	data := ThreadMetricsData{
 		ContextSwitchesPerCPU:     make(map[uint16]int64),
-		ContextSwitchesPerProcess: make([]ProcessContextSwitches, 0),
+		ContextSwitchesPerProcess: make([]ProcessContextSwitches, 0), // This is no longer used for metrics, but kept to avoid breaking the struct.
 		ThreadStates:              make(map[ThreadStateKey]int64),
 		ContextSwitchIntervals:    make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
 	}
@@ -272,26 +294,8 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 		}
 	}
 
-	// Collect process context switches
-	stateManager := statemanager.GetGlobalStateManager()
-	c.contextSwitchesPerProcess.Range(func(startKey uint64, counter *atomic.Int64) bool {
-		if counter != nil {
-			// Get PID from startKey, then get process name from PID.
-			// This lookup is done here on the "cold" scrape path, not the "hot" event path.
-			if pid, ok := stateManager.GetPIDFromStartKey(startKey); ok {
-				if processName, isKnown := stateManager.GetKnownProcessName(pid); isKnown {
-					count := counter.Load()
-					data.ContextSwitchesPerProcess = append(data.ContextSwitchesPerProcess, ProcessContextSwitches{
-						ProcessID:   pid,
-						StartKey:    startKey,
-						ProcessName: processName,
-						Count:       count,
-					})
-				}
-			}
-		}
-		return true // Continue ranging
-	})
+	// Process context switches are now aggregated directly in the Collect method
+	// to get access to the state manager for process metadata lookups.
 
 	// Collect thread states from the pre-allocated slice
 	for i, key := range c.indexToStateKey {
@@ -325,13 +329,11 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 // Parameters:
 // - cpu: CPU number where the context switch occurred
 // - newThreadID: Thread ID of the thread being switched to
-// - processID: Process ID that owns the new thread
 // - startKey: The unique start key of the process
 // - interval: Time since last context switch on this CPU
 func (c *ThreadCollector) RecordContextSwitch(
 	cpu uint16,
 	newThreadID uint32,
-	processID uint32,
 	startKey uint64,
 	interval time.Duration) {
 
@@ -341,13 +343,12 @@ func (c *ThreadCollector) RecordContextSwitch(
 	}
 
 	// Record context switch per process (concurrent map)
-	if processID > 0 && startKey > 0 {
-		stateManager := statemanager.GetGlobalStateManager()
+	if startKey > 0 {
 		// Only create metrics for processes that are tracked
-		if stateManager.IsKnownProcess(processID) {
+		if c.stateManager.IsTrackedStartKey(startKey) {
 			// Use the unique StartKey as the key to prevent PID reuse race conditions.
 			// This factory function captures no variables, preventing heap allocations on the hot path.
-			counter := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *atomic.Int64 {
+			counter, _ := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *atomic.Int64 {
 				return new(atomic.Int64)
 			})
 			counter.Add(1)
@@ -432,11 +433,10 @@ func (c *ThreadCollector) RecordThreadTermination() {
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
 // This method is called by the KernelStateManager after a scrape is complete to
 // allow the collector to safely clean up its internal state for terminated processes.
-func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	cleanedCount := 0
-	// The map of terminated processes gives us PID -> StartKey.
-	// We can now directly delete from our map using the StartKey.
-	for _, startKey := range terminatedProcs {
+	// The map of terminated processes gives us StartKey -> PID.
+	for startKey := range terminatedProcs {
 		if _, deleted := c.contextSwitchesPerProcess.LoadAndDelete(startKey); deleted {
 			cleanedCount++
 		}

@@ -33,10 +33,10 @@ func (m *StdSyncMap[K, V]) LoadAndDelete(key K) (V, bool) {
 	return val.(V), true
 }
 
-func (m *StdSyncMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
-	// This may call the factory function unnecessarily if the key already exists.
-	val, _ := m.m.LoadOrStore(key, valueFactory())
-	return val.(V)
+func (m *StdSyncMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
+	// Its `loaded` return value matches our interface's requirement.
+	val, loaded := m.m.LoadOrStore(key, valueFactory())
+	return val.(V), loaded
 }
 
 // Update is a non-atomic simulation. It is vulnerable to race conditions.

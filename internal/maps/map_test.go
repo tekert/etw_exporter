@@ -46,22 +46,23 @@ func (m *RWMutexMap[K, V]) LoadAndDelete(key K) (V, bool) {
 	}
 	return val, exists
 }
-func (m *RWMutexMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
+func (m *RWMutexMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
 	m.mu.RLock()
 	val, ok := m.m[key]
 	m.mu.RUnlock()
 	if ok {
-		return val
+		return val, true
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// Double-check in case another goroutine created it while we were waiting for the lock.
 	val, ok = m.m[key]
 	if ok {
-		return val
+		return val, true
 	}
 	val = valueFactory()
 	m.m[key] = val
-	return val
+	return val, false
 }
 func (m *RWMutexMap[K, V]) Update(key K, updateFunc func(value V, exists bool) (newValue V, keep bool)) {
 	m.mu.Lock()
@@ -121,7 +122,7 @@ func runLoadOrStoreBenchmark(b *testing.B, bm ConcurrentMap[uint32, *atomic.Int6
 		factory := func() *atomic.Int64 { return new(atomic.Int64) }
 		for pb.Next() {
 			key := r.Uint32() % keySpace
-			counter := bm.LoadOrStore(key, factory)
+			counter, _ := bm.LoadOrStore(key, factory)
 			counter.Add(1)
 		}
 	})

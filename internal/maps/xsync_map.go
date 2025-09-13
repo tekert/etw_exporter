@@ -34,14 +34,13 @@ func (m *XSyncMap[K, V]) LoadAndDelete(key K) (V, bool) {
 }
 
 // LoadOrStore uses the efficient Compute method for a factory-based get-or-create.
-func (m *XSyncMap[K, V]) LoadOrStore(key K, valueFactory func() V) V {
-	val, _ := m.m.Compute(key, func(oldValue V, loaded bool) (newValue V, op xsync.ComputeOp) {
+func (m *XSyncMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
+	return m.m.Compute(key, func(oldValue V, loaded bool) (newValue V, op xsync.ComputeOp) {
 		if loaded {
 			return oldValue, xsync.CancelOp // Value exists, do nothing.
 		}
 		return valueFactory(), xsync.UpdateOp // Value doesn't exist, create and store.
 	})
-	return val
 }
 
 // Update uses the efficient Compute method to atomically update an entry.

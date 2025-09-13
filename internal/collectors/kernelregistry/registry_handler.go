@@ -2,6 +2,8 @@ package kernelregistry
 
 import (
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
@@ -21,7 +23,7 @@ type Handler struct {
 // NewRegistryHandler creates a new registry handler.
 func NewRegistryHandler(config *config.RegistryConfig, sm *statemanager.KernelStateManager) *Handler {
 	h := &Handler{
-		customCollector: NewRegistryCollector(config),
+		customCollector: nil, // Will be set via AttachCollector
 		config:          config,
 		stateManager:    sm,
 		log:             logger.NewSampledLoggerCtx("registry_handler"),
@@ -54,6 +56,20 @@ func NewRegistryHandler(config *config.RegistryConfig, sm *statemanager.KernelSt
 	h.opcodeMap[33] = "mount_hive"
 
 	return h
+}
+
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *RegistryCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to registry handler.")
+	c.customCollector = collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})
+	for i := 10; i <= 50; i++ {
+		router.AddRoute(*guids.RegistryKernelGUID, uint16(i), h.HandleRegistryEvent) // 10-33
+	}
 }
 
 // GetCustomCollector returns the custom Prometheus collector.
@@ -142,6 +158,10 @@ func (h *Handler) GetCustomCollector() *RegistryCollector {
 //   - 32 (0x20): Rollback (Transactional rollback notification)
 //   - 33 (0x21): MountHive (NtLoadKey variations and system hive loading)
 func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
+	if h.customCollector == nil {
+		return nil
+	}
+
 	opcode := er.EventHeader.EventDescriptor.Opcode
 
 	// Bounds check for the array lookup.
@@ -170,7 +190,7 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 		return nil
 	}
 
-	h.customCollector.RecordRegistryOperation(processID, startKey, operation, status)
+	h.customCollector.RecordRegistryOperation(startKey, operation, status)
 
 	return nil
 }
@@ -184,6 +204,10 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 // Same as HandleRegistryEventRaw
 // Deprecated: Use HandleRegistryEventRaw instead for better performance.
 func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
+	if h.customCollector == nil {
+		return nil
+	}
+
 	opcode := helper.EventRec.EventHeader.EventDescriptor.Opcode
 
 	// Bounds check for the array lookup.
@@ -209,7 +233,7 @@ func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
 		return nil // Process not known, skip.
 	}
 
-	h.customCollector.RecordRegistryOperation(processID, startKey, operation, uint32(status))
+	h.customCollector.RecordRegistryOperation(startKey, operation, uint32(status))
 
 	return nil
 }

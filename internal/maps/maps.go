@@ -31,9 +31,10 @@ type ConcurrentMap[K Integer, V any] interface {
 
 	// LoadOrStore returns the existing value for the key if present.
 	// Otherwise, it calls the provided valueFactory function to generate a new value,
-	// stores it in the map, and returns the new value. The entire call is atomic,
-	// and the factory function is only called if the key is not present.
-	LoadOrStore(key K, valueFactory func() V) (actual V)
+	// stores it in the map, and returns the new value. The loaded result is true if
+	// the key was present. The entire call is atomic, and the factory function is
+	// only called if the key is not present.
+	LoadOrStore(key K, valueFactory func() V) (actual V, loaded bool)
 
 	// Update provides an atomic read-modify-write operation for a key.
 	// The updateFunc is called with the current value and its existence status.

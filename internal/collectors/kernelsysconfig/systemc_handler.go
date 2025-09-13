@@ -4,6 +4,8 @@ import (
 	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/logger"
 )
 
@@ -19,6 +21,19 @@ func NewSystemConfigHandler() *Handler {
 		collector: GetGlobalSystemConfigCollector(),
 		log:       logger.NewLoggerWithContext("system_config_handler"),
 	}
+}
+
+// // AttachCollector allows a metrics collector to subscribe to the handler's events.
+// func (c *Handler) AttachCollector(collector *ProcessCollector) {
+// 	c.log.Debug().Msg("Attaching metrics collector to process handler.")
+// 	c.collector = collector
+// }
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK, h.HandleSystemConfigPhyDisk)
+	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK, h.HandleSystemConfigLogDisk)
+	h.log.Debug().Msg("Registered global system config handler routes")
 }
 
 /*

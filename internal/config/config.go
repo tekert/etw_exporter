@@ -67,10 +67,19 @@ type ProcessFilterConfig struct {
 	IncludeNames []string `toml:"include_names"`
 }
 
+// ProcessConfig contains settings for the process metadata collector.
+type ProcessConfig struct {
+	// Enable process metrics (default: true). Provides a mapping from process_start_key to process name and ID.
+	Enabled bool `toml:"enabled"`
+}
+
 // CollectorConfig defines which collectors are enabled and their settings
 type CollectorConfig struct {
 	// ProcessFilter configuration
 	ProcessFilter ProcessFilterConfig `toml:"process_filter"`
+
+	// Process collector configuration
+	Process ProcessConfig `toml:"process"`
 
 	// Disk I/O collector configuration
 	DiskIO DiskIOConfig `toml:"disk_io"`
@@ -297,6 +306,9 @@ func DefaultConfig() *AppConfig {
 			ProcessFilter: ProcessFilterConfig{
 				Enabled:      false,
 				IncludeNames: []string{},
+			},
+			Process: ProcessConfig{
+				Enabled: true,
 			},
 			DiskIO: DiskIOConfig{
 				Enabled: true,

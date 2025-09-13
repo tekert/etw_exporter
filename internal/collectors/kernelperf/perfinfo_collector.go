@@ -52,12 +52,15 @@ var isrEventPool = sync.Pool{
 // - System-wide ISR to DPC latency (measures DPC queue time)
 // - DPC execution time by driver (matches "Highest DPC routine execution time")
 // - DPC queue depth tracking (system-wide and per-CPU)
-// - SMI gap detection via timeline analysis
+// //- SMI gap detection via timeline analysis
 //
 // All metrics use the etw_ prefix and are designed for low cardinality.
 type PerfCollector struct {
 	// Configuration options
 	config *config.PerfInfoConfig
+
+	// State manager reference for image lookups
+	sm *statemanager.KernelStateManager
 
 	// Pending ISR tracking for latency correlation
 	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
@@ -143,9 +146,10 @@ var (
 )
 
 // NewPerfInfoCollector creates a new interrupt latency collector
-func NewPerfInfoCollector(config *config.PerfInfoConfig) *PerfCollector {
+func NewPerfInfoCollector(config *config.PerfInfoConfig, sm *statemanager.KernelStateManager) *PerfCollector {
 	collector := &PerfCollector{
 		config:                     config,
+		sm:                         sm,
 		pendingISRs:                make(map[ISRKey]*ISREvent, 256), // Pre-size for performance
 		routineAddressToDriverName: make(map[uint64]string, 2000),   // Cached driver name lookups
 		isrToDpcLatencyBuckets:     make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
@@ -411,7 +415,9 @@ func (c *PerfCollector) ProcessISREvent(cpu uint16, vector uint16,
 	if c.config.EnablePerDriver {
 		// Resolve driver name and update its last seen time
 		driverName := c.resolveDriverNameUnsafe(routineAddress)
-		c.driverLastSeen[driverName] = initialTime
+		if driverName != "unknown" {
+			c.driverLastSeen[driverName] = initialTime
+		}
 	}
 
 	// Clean up old pending ISRs periodically (reduce frequency to improve performance)
@@ -434,10 +440,12 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 	if c.config.EnablePerDriver {
 		// Resolve driver name and track activity for bounded set management
 		driverName = c.resolveDriverNameUnsafe(routineAddress)
-		c.driverLastSeen[driverName] = initialTime
+		if driverName != "unknown" {
+			c.driverLastSeen[driverName] = initialTime
 
-		// Record DPC duration for per-driver metrics
-		c.recordDPCDuration(driverName, durationMicros)
+			// Record DPC duration for per-driver metrics
+			c.recordDPCDuration(driverName, durationMicros)
+		}
 	}
 
 	// Find matching ISR on same CPU for latency calculation
@@ -485,8 +493,8 @@ func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 	// to prevent using stale routine->driver mappings.
 	// We don't know the image size here, but we can iterate our cache.
 	// This is inefficient but unload events are rare.
-	sm := statemanager.GetGlobalStateManager()
-	info, ok := sm.GetImageForAddress(imageBase) // Get info before it's deleted
+	stateManager := c.sm
+	info, ok := stateManager.GetImageForAddress(imageBase) // Get info before it's deleted
 	if !ok {
 		return
 	}
@@ -513,8 +521,8 @@ func (c *PerfCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
 	}
 
 	// If not in cache, query the state manager.
-	sm := statemanager.GetGlobalStateManager()
-	imageInfo, ok := sm.GetImageForAddress(routineAddress)
+	stateManager := c.sm
+	imageInfo, ok := stateManager.GetImageForAddress(routineAddress)
 	if !ok {
 		// Do NOT cache the negative result. The ImageLoad event might be delayed.
 		// Returning "unknown" for this single event is correct. We will try the

@@ -16,22 +16,18 @@ import (
 	"etw_exporter/internal/collectors/kernelsysconfig"
 	"etw_exporter/internal/collectors/kernelthread"
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
-
-// eventHandlerFunc is a generic function signature for all event handlers.
-type eventHandlerFunc func(helper *etw.EventRecordHelper) error
-
-// rawEventHandlerFunc is a function signature for raw event handlers.
-type rawEventHandlerFunc func(record *etw.EventRecord) error
 
 // handlerUnion holds either a raw or a prepared event handler.
 // This allows storing both types in the same routing table while maintaining
 // type safety and avoiding interface-based dynamic dispatch.
 type handlerUnion struct {
-	preparedHandler eventHandlerFunc
-	rawHandler      rawEventHandlerFunc
+	preparedHandler handlers.EventHandlerFunc
+	rawHandler      handlers.RawEventHandlerFunc
 }
 
 // providerHandlers holds the routing table for a single provider.
@@ -79,13 +75,15 @@ type SessionWatcher interface {
 // EventHandler encapsulates state and logic for ETW event processing.
 // This handler routes events to specialized sub-handlers based on a data-driven map.
 type EventHandler struct {
-	// Collectors for different metric categories
-	diskHandler     *kerneldiskio.Handler
-	threadHandler   *kernelthread.Handler
-	perfinfoHandler *kernelperf.Handler
-	networkHandler  *kernelnetwork.Handler
-	memoryHandler   *kernelmemory.Handler
-	registryHandler *kernelregistry.Handler
+	// Handlers are foundational services, always instantiated.
+	processHandler   *kernelprocess.Handler
+	diskHandler      *kerneldiskio.Handler
+	threadHandler    *kernelthread.Handler
+	perfinfoHandler  *kernelperf.Handler
+	networkHandler   *kernelnetwork.Handler
+	memoryHandler    *kernelmemory.Handler
+	registryHandler  *kernelregistry.Handler
+	sysconfigHandler *kernelsysconfig.Handler
 
 	// Shared state and caches for callbacks
 	config       *config.CollectorConfig
@@ -127,163 +125,107 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	eh.stateManager = statemanager.GetGlobalStateManager()
 
 	// Populate the GUID to counter map.
-	eh.guidToCounter[*SystemConfigGUID] = &eh.systemConfigEventCount
-	eh.guidToCounter[*MicrosoftWindowsKernelDiskGUID] = &eh.diskEventCount
-	eh.guidToCounter[*DiskIOKernelGUID] = &eh.diskEventCount // MOF provider uses the same counter
-	eh.guidToCounter[*MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
-	eh.guidToCounter[*MicrosoftWindowsKernelFileGUID] = &eh.fileEventCount
-	eh.guidToCounter[*ThreadKernelGUID] = &eh.threadEventCount
-	eh.guidToCounter[*PerfInfoKernelGUID] = &eh.perfinfoEventCount
-	eh.guidToCounter[*ImageKernelGUID] = &eh.imageEventCount
-	eh.guidToCounter[*PageFaultKernelGUID] = &eh.pageFaultEventCount
-	eh.guidToCounter[*MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
-	eh.guidToCounter[*RegistryKernelGUID] = &eh.registryEventCount
-	eh.guidToCounter[*MicrosoftWindowsKernelEventTracingGUID] = &eh.sessionWatcherEventCount
+	eh.guidToCounter[*guids.SystemConfigGUID] = &eh.systemConfigEventCount
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelDiskGUID] = &eh.diskEventCount
+	eh.guidToCounter[*guids.DiskIOKernelGUID] = &eh.diskEventCount // MOF provider uses the same counter
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelFileGUID] = &eh.fileEventCount
+	eh.guidToCounter[*guids.ThreadKernelGUID] = &eh.threadEventCount
+	eh.guidToCounter[*guids.PerfInfoKernelGUID] = &eh.perfinfoEventCount
+	eh.guidToCounter[*guids.ImageKernelGUID] = &eh.imageEventCount
+	eh.guidToCounter[*guids.PageFaultKernelGUID] = &eh.pageFaultEventCount
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
+	eh.guidToCounter[*guids.RegistryKernelGUID] = &eh.registryEventCount
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelEventTracingGUID] = &eh.sessionWatcherEventCount
 
 	// --- Register Routes for All Handlers ---
 
 	// Always register the global process handler for process name mappings.
 	// Provider: Microsoft-Windows-Kernel-Process ({22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716})
-	processHandler := kernelprocess.NewProcessHandler(eh.stateManager)
-	eh.addRoute(*MicrosoftWindowsKernelProcessGUID, 1, processHandler.HandleProcessStart)    // ProcessStart
-	eh.addRoute(*MicrosoftWindowsKernelProcessGUID, 15, processHandler.HandleProcessRundown) // ProcessRundown
-	eh.addRoute(*MicrosoftWindowsKernelProcessGUID, 2, processHandler.HandleProcessEnd)      // ProcessStop
-	eh.log.Debug().Msg("Registered global process handler routes")
+	eh.processHandler = kernelprocess.NewProcessHandler(eh.stateManager)
+	eh.processHandler.RegisterRoutes(eh)
 
 	// Always register the system config handler.
 	// Provider: NT Kernel Logger (EventTraceConfig) ({01853a65-418f-4f36-aefc-dc0f1d2fd235})
-	systemConfigHandler := kernelsysconfig.NewSystemConfigHandler()
-	eh.addRoute(*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK, systemConfigHandler.HandleSystemConfigPhyDisk)
-	eh.addRoute(*SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK, systemConfigHandler.HandleSystemConfigLogDisk)
-	eh.log.Debug().Msg("Registered global system config handler routes")
+	eh.sysconfigHandler = kernelsysconfig.NewSystemConfigHandler()
+	eh.sysconfigHandler.RegisterRoutes(eh)
 
-	// Helper to egister the thread handler for thread name mappings.
+	// Helper to Register the thread handler for thread name mappings.
 	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
-	addThreadMappingRoutes := func() {
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, eh.threadHandler.HandleThreadStart)    // ThreadStart
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.threadHandler.HandleThreadStart) // ThreadRundown
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.threadHandler.HandleThreadStart)   // ThreadRundownEnd (Go to Start to refresh)
-		eh.addRoute(*ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.threadHandler.HandleThreadEnd)        // ThreadEnd
-	}
+	eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
+	eh.threadHandler.RegisterRoutes(eh)
 
-	// TODO: maybe move these to the handler? gonna have to decouple the GUID definitions first.
+	eh.diskHandler = kerneldiskio.NewDiskIOHandler(&eh.config.DiskIO, eh.stateManager)
+	eh.diskHandler.RegisterRoutes(eh)
+
+	eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&eh.config.PerfInfo, eh.stateManager)
+	eh.perfinfoHandler.RegisterRoutes(eh)
+
+	eh.networkHandler = kernelnetwork.NewNetworkHandler(&eh.config.Network, eh.stateManager)
+	eh.networkHandler.RegisterRoutes(eh)
+
+	eh.memoryHandler = kernelmemory.NewMemoryHandler(&eh.config.Memory, eh.stateManager)
+	eh.memoryHandler.RegisterRoutes(eh)
+
+	eh.registryHandler = kernelregistry.NewRegistryHandler(&eh.config.Registry, eh.stateManager)
+	//eh.registryHandler.RegisterRoutes(eh)
+	// NOTE: Registry events are now handled in the raw EventRecordCallback for performance.
+	// The routing map is no longer used for this provider.
+
+	// Register process info collector if enabled. This provides the lookup metric for other collectors.
+	if eh.config.Process.Enabled {
+		collector := kernelprocess.NewProcessCollector(&eh.config.Process, eh.stateManager)
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("Process info collector enabled.")
+	}
 
 	// Initialize enabled collectors and register their routes.
 	if eh.config.DiskIO.Enabled {
-		eh.diskHandler = kerneldiskio.NewDiskIOHandler(&eh.config.DiskIO)
-		prometheus.MustRegister(eh.diskHandler.GetCustomCollector())
+		collector := kerneldiskio.NewDiskIOCustomCollector(eh.stateManager)
+		eh.diskHandler.AttachCollector(collector) // Attach it to the existing handler
+		prometheus.MustRegister(collector)
 
-		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271}) - MANIFEST
-		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskRead)   // DiskRead
-		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWrite) // DiskWrite
-		eh.addRoute(*MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlush) // DiskFlush
-
-		// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
-		// These are now handled as raw events for testing. choose this or manifest, not both.
-		//addThreadMappingRoutes() // Ensure thread routes are added if not already.
-		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, eh.diskHandler.HandleDiskReadMofRaw)
-		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, eh.diskHandler.HandleDiskWriteMofRaw)
-		// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, eh.diskHandler.HandleDiskFlushMofRaw)
-
-		// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
-		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 12, eh.diskHandler.HandleFileCreate) // Create
-		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 14, eh.diskHandler.HandleFileClose)  // Close
-		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 15, eh.diskHandler.HandleFileRead)   // Read
-		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 16, eh.diskHandler.HandleFileWrite)  // Write
-		eh.addRoute(*MicrosoftWindowsKernelFileGUID, 26, eh.diskHandler.HandleFileDelete) // DeletePath
-
+		// Request initial metrics for physical and logical disks.
 		kernelsysconfig.GetGlobalSystemConfigCollector().RequestMetrics(
 			kernelsysconfig.PhysicalDiskInfoMetricName,
 			kernelsysconfig.LogicalDiskInfoMetricName,
 		)
-
-		eh.log.Debug().Msg("Disk I/O collector enabled and routes registered")
+		eh.log.Debug().Msg("DiskIO collector enabled and attached.")
 	}
 
 	if eh.config.ThreadCS.Enabled {
-		eh.threadHandler = kernelthread.NewThreadHandler(eh.stateManager)
-		prometheus.MustRegister(eh.threadHandler.GetCustomCollector())
-
-		// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
-		// Note: CSwitch (36) is handled in the raw EventRecordCallback for performance.
-		eh.addRoute(*ThreadKernelGUID, 50, eh.threadHandler.HandleReadyThread) // ReadyThread
-		addThreadMappingRoutes()                                               // Ensure thread routes are added if not already.
-
-		eh.log.Debug().Msg("ThreadCS collector enabled and routes registered")
-
+		collector := kernelthread.NewThreadCSCollector(eh.stateManager)
+		eh.threadHandler.AttachCollector(collector) // Attach it to the existing handler
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("ThreadCS collector enabled and attached.")
 	}
 
 	if eh.config.PerfInfo.Enabled {
-		eh.perfinfoHandler = kernelperf.NewPerfInfoHandler(&eh.config.PerfInfo)
-		prometheus.MustRegister(eh.perfinfoHandler.GetCustomCollector())
-
-		// Provider: NT Kernel Logger (PerfInfo) ({ce1dbfb4-137e-4da6-87b0-3f59aa102cbc})
-		eh.addRoute(*PerfInfoKernelGUID, 67, eh.perfinfoHandler.HandleISREvent)           // ISR
-		eh.addRoute(*PerfInfoKernelGUID, 66, eh.perfinfoHandler.HandleDPCEvent)           // ThreadDPC
-		eh.addRoute(*PerfInfoKernelGUID, 68, eh.perfinfoHandler.HandleDPCEvent)           // DPC
-		eh.addRoute(*PerfInfoKernelGUID, 69, eh.perfinfoHandler.HandleDPCEvent)           // TimerDPC
-		eh.addRoute(*PerfInfoKernelGUID, 46, eh.perfinfoHandler.HandleSampleProfileEvent) // SampleProfile
-
-		// Provider: NT Kernel Logger (Image) ({2cb15d1d-5fc1-11d2-abe1-00a0c911f518})
-		eh.addRoute(*ImageKernelGUID, etw.EVENT_TRACE_TYPE_LOAD, eh.perfinfoHandler.HandleImageLoadEvent)     // Image Load
-		eh.addRoute(*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, eh.perfinfoHandler.HandleImageLoadEvent) // Image Rundown
-		eh.addRoute(*ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, eh.perfinfoHandler.HandleImageLoadEvent)   // Image Rundown End
-		eh.addRoute(*ImageKernelGUID, etw.EVENT_TRACE_TYPE_END, eh.perfinfoHandler.HandleImageUnloadEvent)    // Image Unload
-
-		// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
-		// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
-		eh.log.Debug().Msg("PerfInfo collector enabled and routes registered")
+		collector := kernelperf.NewPerfInfoCollector(&eh.config.PerfInfo, eh.stateManager)
+		eh.perfinfoHandler.AttachCollector(collector)
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("PerfInfo collector enabled and attached.")
 	}
 
-	{
-		eh.networkHandler = kernelnetwork.NewNetworkHandler(&eh.config.Network)
-		prometheus.MustRegister(eh.networkHandler.GetCustomCollector())
-
-		// Provider: Microsoft-Windows-Kernel-Network ({7dd42a49-5329-4832-8dfd-43d979153a88})
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 10, eh.networkHandler.HandleTCPDataSent)            // TCP Send (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 26, eh.networkHandler.HandleTCPDataSent)            // TCP Send (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 11, eh.networkHandler.HandleTCPDataReceived)        // TCP Recv (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 27, eh.networkHandler.HandleTCPDataReceived)        // TCP Recv (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 12, eh.networkHandler.HandleTCPConnectionAttempted) // TCP Connect (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 28, eh.networkHandler.HandleTCPConnectionAttempted) // TCP Connect (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 15, eh.networkHandler.HandleTCPConnectionAccepted)  // TCP Accept (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 31, eh.networkHandler.HandleTCPConnectionAccepted)  // TCP Accept (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 14, eh.networkHandler.HandleTCPDataRetransmitted)   // TCP Retransmit (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 30, eh.networkHandler.HandleTCPDataRetransmitted)   // TCP Retransmit (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 17, eh.networkHandler.HandleTCPConnectionFailed)    // TCP Connect Failed
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 42, eh.networkHandler.HandleUDPDataSent)            // UDP Send (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 58, eh.networkHandler.HandleUDPDataSent)            // UDP Send (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 43, eh.networkHandler.HandleUDPDataReceived)        // UDP Recv (IPv4)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 59, eh.networkHandler.HandleUDPDataReceived)        // UDP Recv (IPv6)
-		eh.addRoute(*MicrosoftWindowsKernelNetworkGUID, 49, eh.networkHandler.HandleUDPConnectionFailed)    // UDP Connect Failed
-
-		if eh.config.Network.Enabled {
-			eh.log.Debug().Msg("Network collector enabled and routes registered")
-		}
+	if eh.config.Network.Enabled {
+		collector := kernelnetwork.NewNetworkCollector(&eh.config.Network, eh.stateManager)
+		eh.networkHandler.AttachCollector(collector)
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("Network collector enabled and attached.")
 	}
 
-	{
-		eh.memoryHandler = kernelmemory.NewMemoryHandler(&eh.config.Memory, eh.stateManager)
-		prometheus.MustRegister(eh.memoryHandler.GetCustomCollector())
-
-		// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
-		eh.addRoute(*PageFaultKernelGUID, 32, eh.memoryHandler.HandleMofHardPageFaultEvent) // HardFault
-
-		if eh.config.Memory.Enabled {
-			eh.log.Debug().Msg("Memory collector enabled and routes registered")
-		}
+	if eh.config.Memory.Enabled {
+		collector := kernelmemory.NewMemoryCollector(&eh.config.Memory, eh.stateManager)
+		eh.memoryHandler.AttachCollector(collector)
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("Memory collector enabled and attached.")
 	}
 
-	{
-		eh.registryHandler = kernelregistry.NewRegistryHandler(&eh.config.Registry, eh.stateManager)
-		prometheus.MustRegister(eh.registryHandler.GetCustomCollector())
-
-		// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})
-		// NOTE: Registry events are now handled in the raw EventRecordCallback for performance.
-		// The routing map is no longer used for this provider.
-		if eh.config.Registry.Enabled {
-			eh.log.Debug().Msg("Registry collector enabled (raw handling)")
-		}
+	if eh.config.Registry.Enabled {
+		collector := kernelregistry.NewRegistryCollector(&eh.config.Registry, eh.stateManager)
+		eh.registryHandler.AttachCollector(collector)
+		prometheus.MustRegister(collector)
+		eh.log.Debug().Msg("Registry collector enabled (raw handling)")
 	}
 
 	// --- Sentinel Collector Registration ---
@@ -324,19 +266,21 @@ func (h *EventHandler) _addRoute(guid etw.GUID, eventID uint16, handler handlerU
 	}
 }
 
-// addRoute adds a handler for a standard, "prepared" event that uses an EventRecordHelper.
-func (h *EventHandler) addRoute(guid etw.GUID, eventID uint16, handler eventHandlerFunc) {
+// TODO: What if i want to register a route but for ANY id? (e.g., all events from a provider)
+
+// AddRoute adds a handler for a standard, "prepared" event that uses an EventRecordHelper.
+func (h *EventHandler) AddRoute(guid etw.GUID, eventID uint16, handler handlers.EventHandlerFunc) {
 	h._addRoute(guid, eventID, handlerUnion{preparedHandler: handler})
 }
 
-// addRawRoute adds a handler for a high-performance, "raw" event that uses an EventRecord.
-func (h *EventHandler) addRawRoute(guid etw.GUID, eventID uint16, handler rawEventHandlerFunc) {
+// AddRawRoute adds a handler for a high-performance, "raw" event that uses an EventRecord.
+func (h *EventHandler) AddRawRoute(guid etw.GUID, eventID uint16, handler handlers.RawEventHandlerFunc) {
 	h._addRoute(guid, eventID, handlerUnion{rawHandler: handler})
 }
 
 // RegisterWatcherRoutes registers the event routes for the session watcher.
 func (h *EventHandler) RegisterWatcherRoutes(watcher SessionWatcher) {
-	h.addRoute(*MicrosoftWindowsKernelEventTracingGUID, 11, watcher.HandleSessionStop) // Session Stop
+	h.AddRoute(*guids.MicrosoftWindowsKernelEventTracingGUID, 11, watcher.HandleSessionStop) // Session Stop
 	h.log.Debug().Msg("Registered session watcher handler routes")
 }
 
@@ -372,7 +316,7 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// --- Fast Path ---
 	// CSwitch Event: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}, Opcode 36
 	// This is the fastest path, handling raw events directly.
-	if providerID.Equals(ThreadKernelGUID) &&
+	if providerID.Equals(guids.ThreadKernelGUID) &&
 		record.EventHeader.EventDescriptor.Opcode == 36 {
 		// TODO: add win 11 system providers
 
@@ -391,7 +335,7 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 
 	// Registry Event: {ae53722e-c863-11d2-8659-00c04fa321a1}
 	// This is another high-frequency provider, handled via fast path.
-	if providerID.Equals(RegistryKernelGUID) {
+	if providerID.Equals(guids.RegistryKernelGUID) {
 		h.registryEventCount.Add(1)
 
 		if h.registryHandler != nil {
@@ -400,18 +344,18 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 		return false // Stop processing, we've handled it.
 	}
 
-	eventID := record.EventID()
-	// Route the rest of the registered raw events
-	if handlers, ok := h.routeMap[providerID]; ok {
-		if handler := handlers.get(eventID); handler.rawHandler != nil {
-			// Increment counter for raw-routed events.
-			if counter, ok := h.guidToCounter[providerID]; ok {
-				counter.Add(1)
-			}
-			handler.rawHandler(record)
-			return false // Stop processing
-		}
-	}
+	// eventID := record.EventID()
+	// // Route the rest of the registered raw events
+	// if handlers, ok := h.routeMap[providerID]; ok {
+	// 	if handler := handlers.get(eventID); handler.rawHandler != nil {
+	// 		// Increment counter for raw-routed events.
+	// 		if counter, ok := h.guidToCounter[providerID]; ok {
+	// 			counter.Add(1)
+	// 		}
+	// 		handler.rawHandler(record)
+	// 		return false // Stop processing
+	// 	}
+	// }
 
 	return true // Continue to the next callback stage for all other events.
 }

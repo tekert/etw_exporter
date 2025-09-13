@@ -5,6 +5,9 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
 
@@ -12,14 +15,45 @@ import (
 type Handler struct {
 	collector *NetCollector
 	log       *phusluadapter.SampledLogger
+	sm        *statemanager.KernelStateManager
 }
 
 // NewNetworkHandler creates a new network handler instance.
-func NewNetworkHandler(config *config.NetworkConfig) *Handler {
+func NewNetworkHandler(config *config.NetworkConfig, sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
-		collector: NewNetworkCollector(config),
+		sm:        sm,
+		collector: nil, // Will be set via AttachCollector
 		log:       logger.NewSampledLoggerCtx("network_handler"),
 	}
+}
+
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *NetCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to network handler.")
+	c.collector = collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: Microsoft-Windows-Kernel-Network ({7dd42a49-5329-4832-8dfd-43d979153a88})
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 10, h.HandleTCPDataSent)            // TCP Send (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 26, h.HandleTCPDataSent)            // TCP Send (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 11, h.HandleTCPDataReceived)        // TCP Recv (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 27, h.HandleTCPDataReceived)        // TCP Recv (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 12, h.HandleTCPConnectionAttempted) // TCP Connect (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 28, h.HandleTCPConnectionAttempted) // TCP Connect (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 15, h.HandleTCPConnectionAccepted)  // TCP Accept (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 31, h.HandleTCPConnectionAccepted)  // TCP Accept (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 14, h.HandleTCPDataRetransmitted)   // TCP Retransmit (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 30, h.HandleTCPDataRetransmitted)   // TCP Retransmit (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 17, h.HandleTCPConnectionFailed)    // TCP Connect Failed
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 42, h.HandleUDPDataSent)            // UDP Send (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 58, h.HandleUDPDataSent)            // UDP Send (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 43, h.HandleUDPDataReceived)        // UDP Recv (IPv4)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 59, h.HandleUDPDataReceived)        // UDP Recv (IPv6)
+	router.AddRoute(*guids.MicrosoftWindowsKernelNetworkGUID, 49, h.HandleUDPConnectionFailed)    // UDP Connect Failed
+
+	h.log.Debug().Msg("Network collector enabled and routes registered")
 }
 
 // GetCustomCollector returns the underlying custom collector for Prometheus registration.
@@ -58,9 +92,9 @@ func (nh *Handler) HandleTCPDataSent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordDataSent(uint32(pid), startKey, ProtocolTCP, uint32(size))
+	nh.collector.RecordDataSent(startKey, ProtocolTCP, uint32(size))
 	return nil
 }
 
@@ -93,9 +127,9 @@ func (nh *Handler) HandleTCPDataReceived(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(processID))
 
-	nh.collector.RecordDataReceived(uint32(processID), startKey, ProtocolTCP, uint32(size))
+	nh.collector.RecordDataReceived(startKey, ProtocolTCP, uint32(size))
 	return nil
 }
 
@@ -130,9 +164,9 @@ func (nh *Handler) HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) e
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordConnectionAttempted(uint32(pid), startKey, ProtocolTCP)
+	nh.collector.RecordConnectionAttempted(startKey, ProtocolTCP)
 	return nil
 }
 
@@ -155,9 +189,9 @@ func (nh *Handler) HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) er
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordConnectionAccepted(uint32(pid), startKey, ProtocolTCP)
+	nh.collector.RecordConnectionAccepted(startKey, ProtocolTCP)
 	return nil
 }
 
@@ -180,9 +214,9 @@ func (nh *Handler) HandleTCPDataRetransmitted(helper *etw.EventRecordHelper) err
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordRetransmission(uint32(pid), startKey)
+	nh.collector.RecordRetransmission(startKey)
 	return nil
 }
 
@@ -208,7 +242,7 @@ func (nh *Handler) HandleTCPConnectionFailed(helper *etw.EventRecordHelper) erro
 		return err
 	}
 
-	nh.collector.RecordConnectionFailed(0, 0, ProtocolTCP, uint16(failureCode))
+	nh.collector.RecordConnectionFailed(0, ProtocolTCP, uint16(failureCode))
 	return nil
 }
 
@@ -236,9 +270,9 @@ func (nh *Handler) HandleUDPDataSent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordDataSent(uint32(pid), startKey, ProtocolUDP, uint32(size))
+	nh.collector.RecordDataSent(startKey, ProtocolUDP, uint32(size))
 	return nil
 }
 
@@ -266,9 +300,9 @@ func (nh *Handler) HandleUDPDataReceived(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := helper.EventRec.ExtProcessStartKey()
+	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
 
-	nh.collector.RecordDataReceived(uint32(pid), startKey, ProtocolUDP, uint32(size))
+	nh.collector.RecordDataReceived(startKey, ProtocolUDP, uint32(size))
 	return nil
 }
 
@@ -294,6 +328,6 @@ func (nh *Handler) HandleUDPConnectionFailed(helper *etw.EventRecordHelper) erro
 		return err
 	}
 
-	nh.collector.RecordConnectionFailed(0, 0, ProtocolUDP, uint16(failureCode))
+	nh.collector.RecordConnectionFailed(0, ProtocolUDP, uint16(failureCode))
 	return nil
 }

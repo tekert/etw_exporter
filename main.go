@@ -20,10 +20,10 @@ var (
 // go build .
 //
 // go tool pprof -output=".\pprof\profile.pb.gz" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
-// go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe ".\pprof\profile.pb.gz"
+// go tool pprof -http=: -source_path=".\" etw_exporter.exe ".\pprof\profile.pb.gz"
 // or
-// cpu> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
-// mem> go tool pprof -http=:8080 -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
+// cpu> go tool pprof -http=: -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
+// mem> go tool pprof -http=: -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
 //
 // pgo> go tool pprof -proto -output=default.pgo etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=300
 //

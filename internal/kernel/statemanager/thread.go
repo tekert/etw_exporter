@@ -16,7 +16,7 @@ func (sm *KernelStateManager) AddThread(tid, pid uint32) {
 
 	// Add the TID to the set of threads for the given PID.
 	// The factory function captures no variables, preventing heap allocations.
-	tidSet := sm.pidToTids.LoadOrStore(pid, func() maps.ConcurrentMap[uint32, struct{}] {
+	tidSet, _ := sm.pidToTids.LoadOrStore(pid, func() maps.ConcurrentMap[uint32, struct{}] {
 		return maps.NewConcurrentMap[uint32, struct{}]()
 	})
 	tidSet.Store(tid, struct{}{})

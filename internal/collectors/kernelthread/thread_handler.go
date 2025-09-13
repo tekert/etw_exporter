@@ -7,13 +7,15 @@ import (
 
 	"github.com/tekert/goetw/etw"
 
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// Handler handles thread events and metrics with low cardinality.
+// Handler handles thread events and acts as a mediator.
 // This collector processes ETW events from the NT Kernel Logger (CSwitch) provider
 // and integrates with a custom Prometheus collector for optimal performance.
 //
@@ -30,34 +32,52 @@ import (
 // The collector maintains low cardinality by aggregating metrics and using the
 // custom collector pattern.
 type Handler struct {
-	lastCpuSwitch   []atomic.Int64
-	stateManager    *statemanager.KernelStateManager
-	customCollector *ThreadCollector
-	log             *phusluadapter.SampledLogger
+	lastCpuSwitch []atomic.Int64
+	stateManager  *statemanager.KernelStateManager
+	collector     *ThreadCollector // Can be nil
+	log           *phusluadapter.SampledLogger
+
+	//collector ThreadCollectorType // Can be nil
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
 // The custom collector provides high-performance metrics aggregation
 func NewThreadHandler(sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
-		lastCpuSwitch:   make([]atomic.Int64, runtime.NumCPU()),
-		customCollector: NewThreadCSCollector(),
-		stateManager:    sm,
-		log:             logger.NewSampledLoggerCtx("thread_handler"),
+		lastCpuSwitch: make([]atomic.Int64, runtime.NumCPU()),
+		//customCollector: NewThreadCSCollector(sm),
+		stateManager: sm,
+		log:          logger.NewSampledLoggerCtx("thread_handler"),
 		//log:             logger.NewLoggerWithContext("thread_handler"),
+		collector: nil, // Starts with no collector
 	}
 }
 
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *ThreadCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to thread handler.")
+	c.collector = collector
+}
+
 // GetCustomCollector returns the custom Prometheus collector for thread metrics.
-// This method provides access to the ThreadMetricsCustomCollector for registration
-// with the Prometheus registry, enabling high-performance metric collection.
-//
-// Usage Example:
-//
-//	threadCollector := NewThreadCSCollector()
-//	prometheus.MustRegister(threadCollector.GetCustomCollector())
 func (c *Handler) GetCustomCollector() *ThreadCollector {
-	return c.customCollector
+	return c.collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
+	// Note: CSwitch (36) is handled in the raw EventRecordCallback in the main event
+	// handler for maximum performance. A route is not registered for it here.
+
+	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, h.HandleThreadStart)    // ThreadStart
+	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, h.HandleThreadStart) // ThreadRundown
+	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, h.HandleThreadStart)   // ThreadRundownEnd (Go to Start to refresh)
+	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, h.HandleThreadEnd)        // ThreadEnd
+
+	// Routes needed only for metrics collection
+	//router.AddRawRoute(*guids.ThreadKernelGUID, 36, h.HandleContextSwitchRaw) // CSwitch // hardcoded route for performance
+	router.AddRoute(*guids.ThreadKernelGUID, 50, h.HandleReadyThread) // ReadyThread
 }
 
 // HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
@@ -87,6 +107,10 @@ func (c *Handler) GetCustomCollector() *ThreadCollector {
 //   - NewThreadWaitTime (uint32): The wait time for the new thread. Offset: 16.
 //   - Reserved (uint32): Reserved for future use. Offset: 20.
 func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+	if c.collector == nil {
+		return nil
+	}
+
 	var newThreadID uint32
 	var oldThreadWaitReason int8
 
@@ -135,28 +159,22 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	}
 
 	// Get process ID for the NEW thread (incoming thread)
-	var processID uint32
 	var startKey uint64
-	var ok bool
 	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
-		processID = pid
 		// Now that we have the PID, get its StartKey to form a unique identifier.
-		startKey, ok = c.stateManager.GetProcessStartKey(processID)
+		startKey, _ = c.stateManager.GetProcessStartKey(pid)
 	}
 
-	if !ok {
-		// If we can't resolve the full {PID, StartKey}, we cannot safely record
-		// the per-process metric. The per-CPU metric will still be recorded.
-		processID = 0
-		startKey = 0
-	}
+	// A startKey of 0 means we couldn't attribute the I/O to a known process.
+	// The collector will still record the system-wide metric, but will skip the
+	// per-process metric if startKey is 0.
 
 	// Record context switch in custom collector
-	c.customCollector.RecordContextSwitch(cpu, newThreadID, processID, startKey, interval)
+	c.collector.RecordContextSwitch(cpu, newThreadID, startKey, interval)
 
 	// Track thread state transitions using integer constants for maximum performance.
-	c.customCollector.RecordThreadStateTransition(StateWaiting, int8(oldThreadWaitReason))
-	c.customCollector.RecordThreadStateTransition(StateRunning, 0)
+	c.collector.RecordThreadStateTransition(StateWaiting, int8(oldThreadWaitReason))
+	c.collector.RecordThreadStateTransition(StateRunning, 0)
 
 	return nil
 }
@@ -190,9 +208,12 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
 func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
-	// NOTE: This is now the fallback/slower path. The primary logic has been moved to
+	if c.collector == nil {
+		return nil
+	}
+	// NOTE: This is a fallback/slower path. The primary logic has been moved to
 	// HandleContextSwitchRaw for performance. This function will not be called
-	// for CSwitch events due to the routing logic in EventRecordCallback.
+	// for CSwitch events due to the fast-path routing logic in the main event handler.
 
 	// Parse context switch event data according to CSwitch class documentation
 	newThreadID, _ := helper.GetPropertyUint("NewThreadId")
@@ -212,25 +233,17 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	}
 
 	// Get process ID for the NEW thread (incoming thread)
-	var processID uint32
 	var startKey uint64
-	var ok bool
 	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
-		processID = pid
-		startKey, ok = c.stateManager.GetProcessStartKey(processID)
-	}
-
-	if !ok {
-		processID = 0
-		startKey = 0
+		startKey, _ = c.stateManager.GetProcessStartKey(pid)
 	}
 
 	// Record context switch in custom collector (handles process name lookup internally)
-	c.customCollector.RecordContextSwitch(cpu, uint32(newThreadID), processID, startKey, interval)
+	c.collector.RecordContextSwitch(cpu, uint32(newThreadID), startKey, interval)
 
 	// Track thread state transitions
-	c.customCollector.RecordThreadStateTransition(StateWaiting, int8(waitReason))
-	c.customCollector.RecordThreadStateTransition(StateRunning, 0)
+	c.collector.RecordThreadStateTransition(StateWaiting, int8(waitReason))
+	c.collector.RecordThreadStateTransition(StateRunning, 0)
 
 	return nil
 }
@@ -258,7 +271,9 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 // meaning it's eligible for scheduling but not yet running.
 func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 	// Track thread state transition to ready
-	c.customCollector.RecordThreadStateTransition(StateReady, 0)
+	if c.collector != nil {
+		c.collector.RecordThreadStateTransition(StateReady, 0)
+	}
 	return nil
 }
 
@@ -301,7 +316,9 @@ func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 	c.stateManager.AddThread(uint32(threadID), uint32(processID))
 
 	// Track thread creation
-	c.customCollector.RecordThreadCreation()
+	if c.collector != nil {
+		c.collector.RecordThreadCreation()
+	}
 
 	return nil
 }
@@ -342,8 +359,9 @@ func (c *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 	c.stateManager.MarkThreadForDeletion(uint32(threadID))
 
 	// Track thread termination
-	c.customCollector.RecordThreadTermination()
-
+	if c.collector != nil {
+		c.collector.RecordThreadTermination()
+	}
 	return nil
 }
 

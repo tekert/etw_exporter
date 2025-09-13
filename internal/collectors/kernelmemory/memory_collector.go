@@ -13,17 +13,17 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
-// processFaultData holds the PID and counter for a process instance.
+// processFaultData holds the counter for a process instance.
 type processFaultData struct {
-	PID     uint32
 	Counter *atomic.Uint64
 }
 
 // MemCollector implements prometheus.Collector for memory-related metrics.
 // This collector is designed for high performance, using lock-free atomics.
 type MemCollector struct {
-	config *config.MemoryConfig
-	log    *phusluadapter.SampledLogger
+	config       *config.MemoryConfig
+	log          *phusluadapter.SampledLogger
+	stateManager *statemanager.KernelStateManager
 
 	hardPageFaultsTotal      *atomic.Uint64
 	hardPageFaultsPerProcess maps.ConcurrentMap[uint64, *processFaultData] // key: StartKey
@@ -33,9 +33,10 @@ type MemCollector struct {
 }
 
 // NewMemoryCollector creates a new memory metrics collector.
-func NewMemoryCollector(config *config.MemoryConfig) *MemCollector {
+func NewMemoryCollector(config *config.MemoryConfig, sm *statemanager.KernelStateManager) *MemCollector {
 	c := &MemCollector{
 		config:                   config,
+		stateManager:             sm,
 		log:                      logger.NewSampledLoggerCtx("memory_collector"),
 		hardPageFaultsTotal:      new(atomic.Uint64),
 		hardPageFaultsPerProcess: maps.NewConcurrentMap[uint64, *processFaultData](),
@@ -49,12 +50,12 @@ func NewMemoryCollector(config *config.MemoryConfig) *MemCollector {
 	if config.EnablePerProcess {
 		c.hardPageFaultsPerProcessDesc = prometheus.NewDesc(
 			"etw_memory_hard_pagefaults_per_process_total",
-			"Total hard page faults by process.",
-			[]string{"process_id", "process_start_key", "process_name"}, nil)
+			"Total hard page faults by program.",
+			[]string{"process_name", "image_checksum", "session_id"}, nil)
 	}
 
 	// Register for post-scrape cleanup.
-	statemanager.GetGlobalStateManager().RegisterCleaner(c)
+	sm.RegisterCleaner(c)
 
 	return c
 }
@@ -76,32 +77,48 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 	)
 
 	if c.config.EnablePerProcess {
-		stateManager := statemanager.GetGlobalStateManager()
+		// --- Per-Program Metrics (with on-the-fly aggregation) ---
+		type programKey struct {
+			name      string
+			checksum  string
+			sessionID string
+		}
+		aggregatedFaults := make(map[programKey]uint64)
+		stateManager := c.stateManager
+
 		c.hardPageFaultsPerProcess.Range(func(startKey uint64, data *processFaultData) bool {
-			if processName, ok := stateManager.GetKnownProcessName(data.PID); ok {
-				ch <- prometheus.MustNewConstMetric(
-					c.hardPageFaultsPerProcessDesc,
-					prometheus.CounterValue,
-					float64(data.Counter.Load()),
-					strconv.FormatUint(uint64(data.PID), 10),
-					strconv.FormatUint(startKey, 10),
-					processName,
-				)
+			if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
+				key := programKey{
+					name:      procInfo.Name,
+					checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
+					sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+				}
+				aggregatedFaults[key] += data.Counter.Load()
 			}
 			return true
 		})
+
+		for key, count := range aggregatedFaults {
+			ch <- prometheus.MustNewConstMetric(
+				c.hardPageFaultsPerProcessDesc,
+				prometheus.CounterValue,
+				float64(count),
+				key.name,
+				key.checksum,
+				key.sessionID,
+			)
+		}
 	}
 }
 
 // ProcessHardPageFaultEvent increments the hard page fault counters.
-func (c *MemCollector) ProcessHardPageFaultEvent(pid uint32, startKey uint64) {
+func (c *MemCollector) ProcessHardPageFaultEvent(startKey uint64) {
 	c.hardPageFaultsTotal.Add(1)
 
 	if c.config.EnablePerProcess && startKey > 0 {
-		if statemanager.GetGlobalStateManager().IsKnownProcess(pid) {
-			data := c.hardPageFaultsPerProcess.LoadOrStore(startKey, func() *processFaultData {
+		if c.stateManager.IsTrackedStartKey(startKey) {
+			data, _ := c.hardPageFaultsPerProcess.LoadOrStore(startKey, func() *processFaultData {
 				return &processFaultData{
-					PID:     pid,
 					Counter: new(atomic.Uint64),
 				}
 			})
@@ -113,12 +130,12 @@ func (c *MemCollector) ProcessHardPageFaultEvent(pid uint32, startKey uint64) {
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
 // This method is called by the KernelStateManager after a scrape is complete to
 // allow the collector to safely clean up its internal state for terminated processes.
-func (c *MemCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+func (c *MemCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	if !c.config.EnablePerProcess {
 		return
 	}
 	cleanedCount := 0
-	for _, startKey := range terminatedProcs {
+	for startKey, _ := range terminatedProcs {
 		if _, deleted := c.hardPageFaultsPerProcess.LoadAndDelete(startKey); deleted {
 			cleanedCount++
 		}

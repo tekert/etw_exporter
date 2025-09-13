@@ -5,10 +5,11 @@ import (
 	"time"
 
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/etw"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
@@ -23,9 +24,10 @@ type pendingDPCInfo struct {
 // Handler handles interrupt-related ETW events for performance monitoring
 // It implements the event handler interfaces needed for interrupt latency tracking
 type Handler struct {
-	collector *PerfCollector
-	config    *config.PerfInfoConfig
-	log       *phusluadapter.SampledLogger
+	collector    *PerfCollector
+	config       *config.PerfInfoConfig
+	stateManager *statemanager.KernelStateManager
+	log          *phusluadapter.SampledLogger
 
 	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
 	// of our DPC duration calculation logic.
@@ -48,17 +50,45 @@ type Handler struct {
 }
 
 // NewPerfInfoHandler creates a new interrupt event handler
-func NewPerfInfoHandler(config *config.PerfInfoConfig) *Handler {
+func NewPerfInfoHandler(config *config.PerfInfoConfig, sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
-		collector:     NewPerfInfoCollector(config),
+		stateManager:  sm,
+		collector:     nil, // Collector is attached later via AttachCollector
 		config:        config,
 		log:           logger.NewSampledLoggerCtx("perfinfo_handler"),
 		lastDPCPerCPU: make(map[uint16]pendingDPCInfo),
 	}
 }
 
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *PerfCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to perfinfo handler.")
+	c.collector = collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: NT Kernel Logger (PerfInfo) ({ce1dbfb4-137e-4da6-87b0-3f59aa102cbc})
+	router.AddRoute(*guids.PerfInfoKernelGUID, 67, h.HandleISREvent)           // ISR
+	router.AddRoute(*guids.PerfInfoKernelGUID, 66, h.HandleDPCEvent)           // ThreadDPC
+	router.AddRoute(*guids.PerfInfoKernelGUID, 68, h.HandleDPCEvent)           // DPC
+	router.AddRoute(*guids.PerfInfoKernelGUID, 69, h.HandleDPCEvent)           // TimerDPC
+	router.AddRoute(*guids.PerfInfoKernelGUID, 46, h.HandleSampleProfileEvent) // SampleProfile
+
+	// TODO: move these to image handler? make guid internal var?
+	// Provider: NT Kernel Logger (Image) ({2cb15d1d-5fc1-11d2-abe1-00a0c911f518})
+	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_LOAD, h.HandleImageLoadEvent)     // Image Load
+	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, h.HandleImageLoadEvent) // Image Rundown
+	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, h.HandleImageLoadEvent)   // Image Rundown End
+	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_END, h.HandleImageUnloadEvent)    // Image Unload
+
+	// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
+	// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
+	h.log.Debug().Msg("PerfInfo collector enabled and routes registered")
+}
+
 // GetCustomCollector returns the Prometheus collector for registration
-func (h *Handler) GetCustomCollector() prometheus.Collector {
+func (h *Handler) GetCustomCollector() *PerfCollector {
 	return h.collector
 }
 
@@ -97,6 +127,10 @@ func (h *Handler) finalizeAndClearPendingDPC(cpu uint16, endTime time.Time) {
 //
 // This handler records ISR entry time and routine address for driver latency analysis.
 func (h *Handler) HandleISREvent(helper *etw.EventRecordHelper) error {
+	if h.collector == nil {
+		return nil
+	}
+
 	cpu := helper.EventRec.ProcessorNumber()
 
 	routineAddress, err := helper.GetPropertyUint("Routine")
@@ -122,7 +156,6 @@ func (h *Handler) HandleISREvent(helper *etw.EventRecordHelper) error {
 	return nil
 }
 
-var times int64 // ! TESTING log lib crash
 
 // HandleDPCEvent processes Deferred Procedure Call (DPC) events to track DPC latency.
 //
@@ -142,6 +175,10 @@ var times int64 // ! TESTING log lib crash
 // next DPC or a context switch occurs on the same CPU. The InitialTime property's
 // clock source (QPC, SystemTime, CPUTick) depends on the session's ClientContext.
 func (h *Handler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
+	if h.collector == nil {
+		return nil
+	}
+
 	cpu := helper.EventRec.ProcessorNumber()
 	eventTime := helper.Timestamp()
 
@@ -160,24 +197,6 @@ func (h *Handler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 	// We must use the dedicated TimestampFrom converter, which calculates the absolute
 	// time based on the session's BootTime.
 	initialTime := helper.TimestampFromProp(initialTimeTicks)
-
-	// ! TESTING crash log lib
-	// times++
-	// if times%10 == 0 {
-	// 	log.Info().Int64("initialTimeTicks", initialTimeTicks).Msg("TEST")
-	// 	log.Info().Int64("EventRec.Timestamp", helper.EventRec.EventHeader.TimeStamp).Msg("TEST")
-	// 	log.Info().Time("event_time", eventTime).Msg("TEST")
-	// 	log.Info().Time("initialTime", initialTime).Msg("TEST")
-	// 	log.Info().
-	// 		Str("event_time", eventTime.Format(time.RFC3339Nano)).
-	// 		Int64("event_time_ns", eventTime.UnixNano()).
-	// 		Msg("TEST")
-	// 	log.Info().
-	// 		Str("initialTime", initialTime.Format(time.RFC3339Nano)).
-	// 		Int64("initial_time_ns", initialTime.UnixNano()).
-	// 		Msg("TEST")
-	// 	os.Exit(1)
-	// }
 
 	// The eventTime is the most accurate timestamp for when the DPC *started*.
 	// We use this for latency calculations.
@@ -229,6 +248,10 @@ func (h *Handler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 // the scheduler can run. Therefore, the timestamp of a CSwitch event provides a
 // reliable end time for any DPC that was running just before it.
 func (h *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
+	if h.collector == nil {
+		return nil
+	}
+
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
 	cpu := helper.EventRec.ProcessorNumber()
@@ -242,21 +265,6 @@ func (h *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	h.finalizeAndClearPendingDPC(cpu, eventTime)
 
 	return nil
-}
-
-// HandleReadyThread is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
-	return nil // PerfInfoHandler does not process this event.
-}
-
-// HandleThreadStart is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
-	return nil // PerfInfoHandler does not process this event.
-}
-
-// HandleThreadEnd is a stub implementation to satisfy the ThreadNtEventHandler interface.
-func (h *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
-	return nil // PerfInfoHandler does not process this event.
 }
 
 // HandleContextSwitchRaw processes context switch events to finalize DPC durations.
@@ -287,6 +295,10 @@ func (h *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
 // buffer using known offsets, bypassing parsing overhead. It uses the event's
 // timestamp to finalize the duration of a pending DPC on the same CPU.
 func (h *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
+	if h.collector == nil {
+		return nil
+	}
+
 	// The only properties we need from the CSwitch event are its timestamp and
 	// the CPU it occurred on, which are available in the event header.
 	cpu := er.ProcessorNumber()
@@ -351,7 +363,7 @@ func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 
 	// Add the image to the central state manager.
 	// The collector no longer needs to process this event itself.
-	statemanager.GetGlobalStateManager().AddImage(processID, imageBase, imageSize, fileName)
+	h.stateManager.AddImage(processID, imageBase, imageSize, fileName)
 
 	return nil
 }
@@ -392,12 +404,14 @@ func (h *Handler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 
 	// Notify the collector first so it can clear its caches before the state is gone.
 	// The collector needs to do this synchronously to prevent using stale cache entries.
-	h.collector.ProcessImageUnloadEvent(imageBase)
+	if h.collector != nil {
+		h.collector.ProcessImageUnloadEvent(imageBase)
+	}
 
 	// Mark the image for deletion in the central state manager.
 	// The actual removal will happen post-scrape, ensuring that any in-flight
 	// events can still resolve addresses to this image.
-	statemanager.GetGlobalStateManager().MarkImageForDeletion(imageBase)
+	h.stateManager.MarkImageForDeletion(imageBase)
 
 	return nil
 }

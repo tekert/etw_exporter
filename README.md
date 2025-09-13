@@ -86,8 +86,8 @@ enabled = true
 
 ## Requirements
 
-- **Windows**: Administrator privileges are required to access ETW sessions.
-- **Go**: 1.22+ for building from source.
+- **Windows**: Windows 10 1507 or later, Administrator privileges are required to access ETW sessions.
+- **Go**: 1.24+ for building from source.
 
 ## Build
 

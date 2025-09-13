@@ -19,6 +19,7 @@ import (
 // moderate event throughput.
 type RegistryCollector struct {
 	config *config.RegistryConfig
+	sm     *statemanager.KernelStateManager
 	log    *phusluadapter.SampledLogger
 	mu     sync.RWMutex
 
@@ -41,13 +42,13 @@ type OperationKey struct {
 
 // processRegistryMetrics holds all registry metrics for a single process instance.
 type processRegistryMetrics struct {
-	PID        uint32
 	Operations map[OperationKey]*atomic.Int64
 }
 
 // NewRegistryCollector creates a new registry metrics collector.
-func NewRegistryCollector(config *config.RegistryConfig) *RegistryCollector {
+func NewRegistryCollector(config *config.RegistryConfig, sm *statemanager.KernelStateManager) *RegistryCollector {
 	c := &RegistryCollector{
+		sm:                sm,
 		config:            config,
 		log:               logger.NewSampledLoggerCtx("registry_collector"),
 		operationsTotal:   make(map[OperationKey]*atomic.Int64),
@@ -60,13 +61,13 @@ func NewRegistryCollector(config *config.RegistryConfig) *RegistryCollector {
 		),
 		processOperationsTotalDesc: prometheus.NewDesc(
 			"etw_registry_operations_process_total",
-			"Total number of registry operations per process.",
-			[]string{"process_id", "process_start_key", "process_name", "operation", "result"}, nil,
+			"Total number of registry operations per program.",
+			[]string{"process_name", "image_checksum", "session_id", "operation", "result"}, nil,
 		),
 	}
 
 	// Register for post-scrape cleanup.
-	statemanager.GetGlobalStateManager().RegisterCleaner(c)
+	sm.RegisterCleaner(c)
 
 	return c
 }
@@ -84,7 +85,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	stateManager := statemanager.GetGlobalStateManager()
+	stateManager := c.sm
 
 	// Collect system-wide metrics
 	for key, countPtr := range c.operationsTotal {
@@ -101,31 +102,47 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 		return
 	}
 
-	// Collect per-process metrics
-	for startKey, metrics := range c.perProcessMetrics {
-		// Look up process details during scrape time to avoid overhead in the hot path.
-		if processName, isKnown := stateManager.GetKnownProcessName(metrics.PID); isKnown {
-			pidStr := strconv.FormatUint(uint64(metrics.PID), 10)
-			startKeyStr := strconv.FormatUint(startKey, 10)
+	// --- Per-Program Metrics (with on-the-fly aggregation) ---
+	type aggregationKey struct {
+		processName   string
+		imageChecksum string
+		sessionID     string
+		operation     string
+		result        string
+	}
+	aggregatedMetrics := make(map[aggregationKey]int64)
 
+	for startKey, metrics := range c.perProcessMetrics {
+		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 			for opKey, countPtr := range metrics.Operations {
-				ch <- prometheus.MustNewConstMetric(
-					c.processOperationsTotalDesc,
-					prometheus.CounterValue,
-					float64(countPtr.Load()),
-					pidStr,
-					startKeyStr,
-					processName,
-					opKey.Operation,
-					opKey.Result,
-				)
+				key := aggregationKey{
+					processName:   procInfo.Name,
+					imageChecksum: "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
+					sessionID:     strconv.FormatUint(uint64(procInfo.SessionID), 10),
+					operation:     opKey.Operation,
+					result:        opKey.Result,
+				}
+				aggregatedMetrics[key] += countPtr.Load()
 			}
 		}
+	}
+
+	for key, count := range aggregatedMetrics {
+		ch <- prometheus.MustNewConstMetric(
+			c.processOperationsTotalDesc,
+			prometheus.CounterValue,
+			float64(count),
+			key.processName,
+			key.imageChecksum,
+			key.sessionID,
+			key.operation,
+			key.result,
+		)
 	}
 }
 
 // RecordRegistryOperation records a single registry operation.
-func (c *RegistryCollector) RecordRegistryOperation(processID uint32, startKey uint64, operation string, status uint32) {
+func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, operation string, status uint32) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -144,14 +161,12 @@ func (c *RegistryCollector) RecordRegistryOperation(processID uint32, startKey u
 
 	// Per-process metric
 	if c.config.EnablePerProcess && startKey > 0 {
-		stateManager := statemanager.GetGlobalStateManager()
 		// First, check if the process is one we are configured to track.
-		if stateManager.IsKnownProcess(processID) {
+		if c.sm.IsTrackedStartKey(startKey) {
 			// Get or create the metrics struct for the process instance (by StartKey).
 			procMetrics, ok := c.perProcessMetrics[startKey]
 			if !ok {
 				procMetrics = &processRegistryMetrics{
-					PID:        processID,
 					Operations: make(map[OperationKey]*atomic.Int64),
 				}
 				c.perProcessMetrics[startKey] = procMetrics
@@ -168,7 +183,7 @@ func (c *RegistryCollector) RecordRegistryOperation(processID uint32, startKey u
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
 // This is now a highly efficient O(k) operation, where k is the number of terminated processes.
-func (c *RegistryCollector) CleanupTerminatedProcesses(terminatedProcs map[uint32]uint64) {
+func (c *RegistryCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	if !c.config.EnablePerProcess {
 		return
 	}
@@ -176,7 +191,7 @@ func (c *RegistryCollector) CleanupTerminatedProcesses(terminatedProcs map[uint3
 	defer c.mu.Unlock()
 
 	cleanedCount := 0
-	for _, startKey := range terminatedProcs {
+	for startKey, _ := range terminatedProcs {
 		if _, exists := c.perProcessMetrics[startKey]; exists {
 			delete(c.perProcessMetrics, startKey)
 			cleanedCount++

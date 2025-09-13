@@ -2,6 +2,8 @@ package kernelmemory
 
 import (
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
+	"etw_exporter/internal/etw/handlers"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
@@ -22,10 +24,24 @@ func NewMemoryHandler(config *config.MemoryConfig,
 	stateManager *statemanager.KernelStateManager) *Handler {
 
 	return &Handler{
-		collector:    NewMemoryCollector(config),
+		collector:    nil, // Will be set via AttachCollector
 		stateManager: stateManager,
 		log:          logger.NewSampledLoggerCtx("memory_handler"),
 	}
+}
+
+// AttachCollector allows a metrics collector to subscribe to the handler's events.
+func (c *Handler) AttachCollector(collector *MemCollector) {
+	c.log.Debug().Msg("Attaching metrics collector to memory handler.")
+	c.collector = collector
+}
+
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
+	router.AddRoute(*guids.PageFaultKernelGUID, 32, h.HandleMofHardPageFaultEvent) // HardFault
+
+	h.log.Debug().Msg("Memory collector enabled and routes registered")
 }
 
 // GetCustomCollector returns the underlying custom collector for Prometheus registration.
@@ -65,28 +81,21 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 
 	// If the TID is not known (due to event ordering races), fall back to the PID in the event header.
 	if !isKnown {
-		fallbackPID := helper.EventRec.EventHeader.ProcessId
-		// Check if the fallback PID is a process we are actually tracking.
-		if h.stateManager.IsKnownProcess(fallbackPID) {
-			h.log.SampledDebug("pagefault_pid_fallback").
-				Uint32("tid", uint32(threadID)).
-				Uint32("fallback_pid", fallbackPID).
-				Msg("Could not resolve PID for thread, using fallback PID from event header")
-			pid = fallbackPID
-		} else {
-			// Both methods failed. We cannot attribute this event.
-			h.log.SampledWarn("pagefault_pid_error").
-				Uint32("tid", uint32(threadID)).
-				Uint32("fallback_pid", fallbackPID).
-				Msg("Could not resolve PID for thread and fallback PID is not a known process")
-			return nil
-		}
+		// We cannot attribute this event.
+		h.log.SampledWarn("pagefault_pid_error").
+			Uint32("tid", uint32(threadID)).
+			Msg("Could not resolve PID for thread and fallback PID is not a known process")
+		return nil
 	}
 
 	// Get the start key for the resolved PID to ensure correct attribution.
-	startKey, _ := h.stateManager.GetProcessStartKey(pid)
+	startKey, ok := h.stateManager.GetProcessStartKey(pid)
+	if !ok {
+		// Cannot attribute if we don't have a start key.
+		return nil
+	}
 
-	h.collector.ProcessHardPageFaultEvent(pid, startKey)
+	h.collector.ProcessHardPageFaultEvent(startKey)
 	return nil
 }
 
