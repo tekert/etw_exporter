@@ -6,6 +6,7 @@ A high-performance Windows ETW (Event Tracing for Windows) exporter that exposes
 
 The exporter provides several categories of metrics, which can be enabled via the configuration file:
 
+- **Process**: Provides metadata about running programs, such as their name, checksum, and session ID. This is useful for identifying which programs are active.
 - **Disk I/O**: Tracks reads, writes, and bytes transferred per disk and per process.
 - **Thread Scheduling**: Collects data on context switches, thread states, and scheduling latency.
 - **Interrupt & DPC Latency**: Measures low-level kernel latencies, including ISR-to-DPC latency and DPC execution time by driver.
@@ -36,6 +37,9 @@ pprof_enabled = true
 enabled = true
 include_names = ["svchost.exe", "my_app.*"]
 
+[collectors.process]
+enabled = true
+
 [collectors.disk_io]
 enabled = true
 
@@ -64,6 +68,7 @@ enabled = true
 ### Configuration Options
 - **`[server]`**: Configures the HTTP endpoint for Prometheus scrapes and `pprof`.
 - **`[collectors]`**: Enables or disables specific metric collectors.
+  - `process`: Provides metadata about running programs.
   - `process_filter`: Filters all per-process metrics based on regular expressions.
   - `disk_io`: Disk activity metrics.
   - `threadcs`: Thread context switch and state metrics.

@@ -44,6 +44,7 @@ enabled = true
 
 **Metrics Provided:**
 - `etw_process_info{process_name, image_checksum, session_id}`: A gauge metric that is `1` for every running program tracked by the exporter.
+  - **Note on `image_checksum`**: A value of `0x0` for the checksum is expected for many processes. The PE checksum is optional for user-mode applications and is often absent. It is also not applicable to special system processes like `System` or `Idle`. All other metrics will also report a checksum of `0x0` for these programs.
 
 ### Process Filtering
 
