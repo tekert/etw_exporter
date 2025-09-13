@@ -7,6 +7,8 @@ import (
 
 // --- Thread Management ---
 
+// TODO: get starkey from pid?
+
 // AddThread adds or updates a TID -> PID mapping and its reverse mapping.
 // This is the primary method for tracking thread creation and associating
 // threads with their parent processes.

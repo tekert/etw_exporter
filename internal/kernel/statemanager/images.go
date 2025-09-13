@@ -16,6 +16,8 @@ type ImageInfo struct {
 
 // --- Image Management ---
 
+// TODO: get starkey from pid?
+
 // AddImage adds information about a loaded image and associates it with a process.
 // This is the central method for tracking all loaded modules in the system.
 func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, fileName string) {
