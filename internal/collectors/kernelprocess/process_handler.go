@@ -75,7 +75,7 @@ func (ph *Handler) HandleProcessStart(helper *etw.EventRecordHelper) error {
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
 	if imageChecksum == 0 {
-		ph.log.Warn().
+		ph.log.Trace().
 			Uint32("pid", uint32(processID)).
 			Str("name", processName).
 			Msg("Process started without image checksum.")
@@ -137,7 +137,7 @@ func (ph *Handler) HandleProcessRundown(helper *etw.EventRecordHelper) error {
 	startKey, _ := helper.EventRec.ExtProcessStartKey()
 
 	if imageChecksum == 0 {
-		ph.log.Warn().
+		ph.log.Trace().
 			Uint32("pid", uint32(processID)).
 			Str("name", processName).
 			Msg("Process Rundown without image checksum.")
