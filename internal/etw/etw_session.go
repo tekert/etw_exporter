@@ -347,6 +347,8 @@ func (s *SessionManager) setupSessions() error {
 			// to allow enabling System Providers.
 			s.manifestSession = etw.NewSystemTraceSession("etw_exporter")
 			s.manifestSession.SetGuid(*EtwExporterGuid)
+			// props := s.manifestSession.TraceProperties()
+			// props.BufferSize = 64 // (default is 64)
 		}
 	} else {
 		// --- Legacy (Win10) Path ---
@@ -359,6 +361,10 @@ func (s *SessionManager) setupSessions() error {
 		kernelFlags := GetEnabledKernelFlags(s.config)
 		if kernelFlags != 0 {
 			s.kernelSession = etw.NewKernelRealTimeSession(kernelFlags)
+			props := s.kernelSession.TraceProperties()
+			props.BufferSize = 64 // 64 KB (default is 64)
+			//props.MinimumBuffers = 0
+			// props.MaximumBuffers = 300
 			// guid is set to SystemTraceControlGuid: {9e814aad-3204-11d2-9a82-006008a86939}
 			// IMPORTANT: Kernel sessions must be explicitly started (unlike manifest providers)
 			if err := s.kernelSession.Start(); err != nil {
