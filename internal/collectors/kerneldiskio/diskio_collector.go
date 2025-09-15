@@ -49,10 +49,7 @@ type processMetrics struct {
 	Disks map[uint32]*processDiskMetrics
 }
 
-// DiskCollector implements prometheus.Collector for disk I/O related metrics.
-// This collector follows Prometheus best practices by creating new metrics on each scrape
-//
-// All metrics are designed for low cardinality to maintain performance at scale.
+// DiskCollector implements the logic for collecting disk I/O metrics.
 type DiskCollector struct {
 	// System-wide metrics, using simple maps protected by the collector's mutex.
 	diskIOCount      map[uint32]*[opCount]*atomic.Int64 // disk -> [op] -> count

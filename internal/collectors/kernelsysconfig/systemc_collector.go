@@ -81,10 +81,10 @@ func (sc *SysConfCollector) Describe(ch chan<- *prometheus.Desc) {
 	sc.mu.RLock()
 	defer sc.mu.RUnlock()
 
-	if sc.requestedMetrics[sc.physicalDiskInfoDesc.String()] {
+	if sc.requestedMetrics[PhysicalDiskInfoMetricName] {
 		ch <- sc.physicalDiskInfoDesc
 	}
-	if sc.requestedMetrics[sc.logicalDiskInfoDesc.String()] {
+	if sc.requestedMetrics[LogicalDiskInfoMetricName] {
 		ch <- sc.logicalDiskInfoDesc
 	}
 }
@@ -95,7 +95,7 @@ func (sc *SysConfCollector) Collect(ch chan<- prometheus.Metric) {
 	defer sc.mu.RUnlock()
 
 	// Create physical disk information metrics if requested
-	if sc.requestedMetrics[sc.physicalDiskInfoDesc.String()] {
+	if sc.requestedMetrics[PhysicalDiskInfoMetricName] {
 		for _, physDisk := range sc.physicalDisks {
 			ch <- prometheus.MustNewConstMetric(
 				sc.physicalDiskInfoDesc,
@@ -108,7 +108,7 @@ func (sc *SysConfCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// Create logical disk information metrics if requested
-	if sc.requestedMetrics[sc.logicalDiskInfoDesc.String()] {
+	if sc.requestedMetrics[LogicalDiskInfoMetricName] {
 		for _, logDisk := range sc.logicalDisks {
 			ch <- prometheus.MustNewConstMetric(
 				sc.logicalDiskInfoDesc,
@@ -126,34 +126,21 @@ func (sc *SysConfCollector) Collect(ch chan<- prometheus.Metric) {
 // This method is thread-safe and ensures the collector is registered with Prometheus
 // exactly once when the first metric is requested.
 func (sc *SysConfCollector) RequestMetrics(metricNames ...string) {
+	needsRegister := false
 	sc.mu.Lock()
-
-	metricsWereRequested := false
 	for _, name := range metricNames {
-		var desc *prometheus.Desc
-		switch name {
-		case PhysicalDiskInfoMetricName:
-			desc = sc.physicalDiskInfoDesc
-		case LogicalDiskInfoMetricName:
-			desc = sc.logicalDiskInfoDesc
-		default:
-			sc.log.Warn().Str("metric", name).Msg("Unknown system config metric requested.")
-			continue
-		}
-
-		key := desc.String()
-		if !sc.requestedMetrics[key] {
-			sc.requestedMetrics[key] = true
-			metricsWereRequested = true
+		if !sc.requestedMetrics[name] {
+			sc.requestedMetrics[name] = true
+			needsRegister = true
 			sc.log.Debug().Str("metric", name).Msg("System config metric has been requested.")
 		}
 	}
-
-	needRegister := metricsWereRequested && len(sc.requestedMetrics) > 0
 	sc.mu.Unlock()
 
 	// If any new metrics were requested, ensure the collector is registered.
-	if needRegister {
+	// This is done outside the lock to prevent a deadlock, as prometheus.Register
+	// will call back into the collector's Describe method, which needs to re-acquire the lock.
+	if needsRegister {
 		sc.registerOnce.Do(func() {
 			prometheus.MustRegister(sc)
 			sc.log.Debug().Msg("SystemConfigCollector registered with Prometheus.")

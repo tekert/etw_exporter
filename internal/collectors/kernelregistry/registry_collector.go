@@ -10,6 +10,7 @@ import (
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/maps"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
@@ -27,7 +28,7 @@ type RegistryCollector struct {
 	operationsTotal map[OperationKey]*atomic.Int64
 
 	// Per-process metrics, keyed by the unique process StartKey.
-	perProcessMetrics map[uint64]*processRegistryMetrics
+	perProcessMetrics maps.ConcurrentMap[uint64, *processRegistryMetrics]
 
 	// Metric Descriptors
 	operationsTotalDesc        *prometheus.Desc
@@ -42,6 +43,7 @@ type OperationKey struct {
 
 // processRegistryMetrics holds all registry metrics for a single process instance.
 type processRegistryMetrics struct {
+	mu         sync.RWMutex // Protects the Operations map
 	Operations map[OperationKey]*atomic.Int64
 }
 
@@ -52,7 +54,7 @@ func NewRegistryCollector(config *config.RegistryConfig, sm *statemanager.Kernel
 		config:            config,
 		log:               logger.NewSampledLoggerCtx("registry_collector"),
 		operationsTotal:   make(map[OperationKey]*atomic.Int64),
-		perProcessMetrics: make(map[uint64]*processRegistryMetrics),
+		perProcessMetrics: maps.NewConcurrentMap[uint64, *processRegistryMetrics](),
 
 		operationsTotalDesc: prometheus.NewDesc(
 			"etw_registry_operations_total",
@@ -82,11 +84,9 @@ func (c *RegistryCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect creates and sends the metrics on each scrape.
 func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
 	stateManager := c.sm
 
+	c.mu.RLock()
 	// Collect system-wide metrics
 	for key, countPtr := range c.operationsTotal {
 		ch <- prometheus.MustNewConstMetric(
@@ -97,6 +97,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 			key.Result,
 		)
 	}
+	c.mu.RUnlock()
 
 	if !c.config.EnablePerProcess {
 		return
@@ -112,8 +113,9 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	aggregatedMetrics := make(map[aggregationKey]int64)
 
-	for startKey, metrics := range c.perProcessMetrics {
+	c.perProcessMetrics.Range(func(startKey uint64, metrics *processRegistryMetrics) bool {
 		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
+			metrics.mu.RLock() // Lock for reading the map
 			for opKey, countPtr := range metrics.Operations {
 				key := aggregationKey{
 					processName:   procInfo.Name,
@@ -124,8 +126,10 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 				aggregatedMetrics[key] += countPtr.Load()
 			}
+			metrics.mu.RUnlock() // Unlock after reading
 		}
-	}
+		return true
+	})
 
 	for key, count := range aggregatedMetrics {
 		ch <- prometheus.MustNewConstMetric(
@@ -143,9 +147,6 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 
 // RecordRegistryOperation records a single registry operation.
 func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, operation string, status uint32) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	result := "success"
 	if status != 0 {
 		result = "failure"
@@ -154,31 +155,34 @@ func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, operation s
 	opKey := OperationKey{Operation: operation, Result: result}
 
 	// System-wide metric
+	c.mu.Lock()
 	if _, ok := c.operationsTotal[opKey]; !ok {
 		c.operationsTotal[opKey] = new(atomic.Int64)
 	}
 	c.operationsTotal[opKey].Add(1)
+	c.mu.Unlock()
 
 	// Per-process metric
 	if c.config.EnablePerProcess && startKey > 0 {
 		// First, check if the process is one we are configured to track.
 		if c.sm.IsTrackedStartKey(startKey) {
 			// Get or create the metrics struct for the process instance (by StartKey).
-			procMetrics, ok := c.perProcessMetrics[startKey]
-			if !ok {
-				procMetrics = &processRegistryMetrics{
+			procMetrics, _ := c.perProcessMetrics.LoadOrStore(startKey, func() *processRegistryMetrics {
+				return &processRegistryMetrics{
 					Operations: make(map[OperationKey]*atomic.Int64),
 				}
-				c.perProcessMetrics[startKey] = procMetrics
-			}
+			})
 
+			// Lock before accessing the inner map to prevent a race condition.
+			procMetrics.mu.Lock()
 			// Get or create the counter for the specific operation.
 			if _, ok := procMetrics.Operations[opKey]; !ok {
 				procMetrics.Operations[opKey] = new(atomic.Int64)
 			}
 			procMetrics.Operations[opKey].Add(1)
-		}
-	}
+			procMetrics.mu.Unlock()
+        }
+    }
 }
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
@@ -187,13 +191,10 @@ func (c *RegistryCollector) CleanupTerminatedProcesses(terminatedProcs map[uint6
 	if !c.config.EnablePerProcess {
 		return
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	cleanedCount := 0
-	for startKey, _ := range terminatedProcs {
-		if _, exists := c.perProcessMetrics[startKey]; exists {
-			delete(c.perProcessMetrics, startKey)
+	for startKey := range terminatedProcs {
+		if _, deleted := c.perProcessMetrics.LoadAndDelete(startKey); deleted {
 			cleanedCount++
 		}
 	}
