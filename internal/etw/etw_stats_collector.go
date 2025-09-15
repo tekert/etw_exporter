@@ -213,6 +213,16 @@ func (c *ETWStatsCollector) collectSessionStats(ch chan<- prometheus.Metric, ses
 	)
 }
 
+// newProviderMetric is a helper to create a provider event counter metric.
+func (c *ETWStatsCollector) newProviderMetric(ch chan<- prometheus.Metric, providerName string, count uint64) {
+	ch <- prometheus.MustNewConstMetric(
+		c.providerEventsReceivedDesc,
+		prometheus.CounterValue,
+		float64(count),
+		providerName,
+	)
+}
+
 // collectProviderEventStats gathers metrics from the event handler showing
 // how many events were received from each provider.
 func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metric) {
@@ -221,80 +231,15 @@ func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metri
 	}
 
 	// Collect event counts for each provider type
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetDiskEventCount()),
-		"microsoft-windows-kernel-disk",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetProcessEventCount()),
-		"microsoft-windows-kernel-process",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetThreadEventCount()),
-		"thread-kernel",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetFileEventCount()),
-		"microsoft-windows-kernel-file",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetPerfInfoEventCount()),
-		"perfinfo-kernel",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetSystemConfigEventCount()),
-		"system-config",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetImageEventCount()),
-		"image-kernel",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetPageFaultEventCount()),
-		"pagefault-kernel",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetNetworkEventCount()),
-		"microsoft-windows-kernel-network",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetRegistryEventCount()),
-		"microsoft-windows-kernel-registry",
-	)
-
-	ch <- prometheus.MustNewConstMetric(
-		c.providerEventsReceivedDesc,
-		prometheus.CounterValue,
-		float64(c.eventHandler.GetSessionWatcherEventCount()),
-		"microsoft-windows-kernel-eventtracing",
-	)
+	c.newProviderMetric(ch, "microsoft-windows-kernel-disk", c.eventHandler.GetDiskEventCount())
+	c.newProviderMetric(ch, "microsoft-windows-kernel-process", c.eventHandler.GetProcessEventCount())
+	c.newProviderMetric(ch, "thread-kernel", c.eventHandler.GetThreadEventCount())
+	c.newProviderMetric(ch, "microsoft-windows-kernel-file", c.eventHandler.GetFileEventCount())
+	c.newProviderMetric(ch, "perfinfo-kernel", c.eventHandler.GetPerfInfoEventCount())
+	c.newProviderMetric(ch, "system-config", c.eventHandler.GetSystemConfigEventCount())
+	c.newProviderMetric(ch, "image-kernel", c.eventHandler.GetImageEventCount())
+	c.newProviderMetric(ch, "pagefault-kernel", c.eventHandler.GetPageFaultEventCount())
+	c.newProviderMetric(ch, "microsoft-windows-kernel-network", c.eventHandler.GetNetworkEventCount())
+	c.newProviderMetric(ch, "microsoft-windows-kernel-registry", c.eventHandler.GetRegistryEventCount())
+	c.newProviderMetric(ch, "microsoft-windows-kernel-eventtracing", c.eventHandler.GetSessionWatcherEventCount())
 }
