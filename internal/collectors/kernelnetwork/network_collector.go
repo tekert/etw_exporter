@@ -2,7 +2,6 @@ package kernelnetwork
 
 import (
 	"strconv"
-	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -22,6 +21,23 @@ const (
 	protocolMax // Used for sizing arrays, must be the last element.
 )
 
+// Direction constants for efficient array indexing.
+const (
+	DirectionSent = iota
+	DirectionReceived
+	directionMax
+)
+
+func directionIdx(protocol int, direction int) int {
+	return protocol*directionMax + direction
+}
+
+// failureKey creates a composite integer key from a protocol and failure code.
+// The protocol is stored in the high 16 bits and the code in the low 16 bits.
+func failureKey(protocol int, failureCode uint16) uint32 {
+	return (uint32(protocol) << 16) | uint32(failureCode)
+}
+
 // protocolToString converts a protocol constant to its string representation for Prometheus labels.
 func protocolToString(p int) string {
 	switch p {
@@ -34,8 +50,7 @@ func protocolToString(p int) string {
 	}
 }
 
-// processMetrics holds all network metrics for a single process instance.
-// It uses fixed-size arrays indexed by protocol constants for maximum performance.
+// NetCollector implements the logic for collecting network-related metrics.
 type processMetrics struct {
 	BytesSent            [protocolMax]*atomic.Uint64
 	BytesReceived        [protocolMax]*atomic.Uint64
@@ -44,22 +59,9 @@ type processMetrics struct {
 	RetransmissionsTotal *atomic.Uint64 // TCP-only, but kept here for simplicity.
 }
 
-// failureKey is a composite key for connection failure metrics.
-type failureKey struct {
-	StartKey    uint64
-	Protocol    string
-	FailureCode uint16
-}
-
-// trafficKey is a composite key for protocol-level traffic metrics.
-type trafficKey struct {
-	Protocol  string
-	Direction string
-}
-
 // NetCollector implements prometheus.Collector for network-related metrics.
 // This collector is designed for high performance, using lock-free atomics and
-// struct-based keys in sync.Map to eliminate allocations on the hot path.
+// integer-keyed concurrent maps to eliminate allocations on the hot path.
 // Metrics are created on each scrape to ensure data consistency.
 type NetCollector struct {
 	config       *config.NetworkConfig
@@ -70,8 +72,12 @@ type NetCollector struct {
 	perProcessMetrics maps.ConcurrentMap[uint64, *processMetrics]
 
 	// System-wide metrics that are not process-specific or have different keys.
-	connectionsFailedTotal sync.Map // key: failureKey, value: *atomic.Uint64
-	trafficBytesTotal      sync.Map // key: trafficKey, value: *atomic.Uint64
+	// connectionsFailedTotal is a nested map: StartKey -> (protocol|failureCode) -> counter
+	connectionsFailedTotal maps.ConcurrentMap[uint64, maps.ConcurrentMap[uint32, *atomic.Uint64]]
+	// trafficBytesTotal is a pre-allocated slice for system-wide traffic counters.
+	// It is indexed by a composite key: `protocol*directionMax + direction`.
+	// This avoids allocations on the hot path that would occur with sync.Map and struct keys.
+	trafficBytesTotal [protocolMax * directionMax]*atomic.Uint64
 
 	// Metric descriptors
 	bytesSentTotalDesc     *prometheus.Desc
@@ -89,10 +95,11 @@ type NetCollector struct {
 // NewNetworkCollector creates a new network collector with Prometheus metric descriptors.
 func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelStateManager) *NetCollector {
 	nc := &NetCollector{
-		config:            config,
-		stateManager:      sm,
-		log:               logger.NewSampledLoggerCtx("network_collector"),
-		perProcessMetrics: maps.NewConcurrentMap[uint64, *processMetrics](),
+		config:                 config,
+		stateManager:           sm,
+		log:                    logger.NewSampledLoggerCtx("network_collector"),
+		perProcessMetrics:      maps.NewConcurrentMap[uint64, *processMetrics](),
+		connectionsFailedTotal: maps.NewConcurrentMap[uint64, maps.ConcurrentMap[uint32, *atomic.Uint64]](),
 
 		bytesSentTotalDesc: prometheus.NewDesc(
 			"etw_network_sent_bytes_total",
@@ -104,6 +111,11 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 			"Total bytes received over network by program and protocol.",
 			[]string{"process_name", "image_checksum", "session_id", "protocol"}, nil,
 		),
+	}
+
+	// Initialize the atomic counters for system-wide traffic.
+	for i := range nc.trafficBytesTotal {
+		nc.trafficBytesTotal[i] = new(atomic.Uint64)
 	}
 
 	if config.ConnectionHealth {
@@ -249,12 +261,11 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 		}
 		aggregatedFailures := make(map[failureAggregationKey]uint64)
 
-		nc.connectionsFailedTotal.Range(func(key, val any) bool {
-			k := key.(failureKey)
+		nc.connectionsFailedTotal.Range(func(startKey uint64, innerMap maps.ConcurrentMap[uint32, *atomic.Uint64]) bool {
 			var progKey programKey
-			if k.StartKey == 0 {
+			if startKey == 0 {
 				progKey = programKey{name: "System", checksum: "0x0", sessionID: "0"}
-			} else if procInfo, ok := stateManager.GetProcessInfoBySK(k.StartKey); ok {
+			} else if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 				progKey = programKey{
 					name:      procInfo.Name,
 					checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
@@ -264,12 +275,18 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 				return true // Skip terminated process
 			}
 
-			aggKey := failureAggregationKey{
-				programKey:  progKey,
-				protocol:    k.Protocol,
-				failureCode: k.FailureCode,
-			}
-			aggregatedFailures[aggKey] += atomic.LoadUint64(val.(*uint64))
+			innerMap.Range(func(key uint32, val *atomic.Uint64) bool {
+				protocol := int(key >> 16)
+				failureCode := uint16(key) // Implicit truncation gets the lower 16 bits
+
+				aggKey := failureAggregationKey{
+					programKey:  progKey,
+					protocol:    protocolToString(protocol),
+					failureCode: failureCode,
+				}
+				aggregatedFailures[aggKey] += val.Load()
+				return true
+			})
 			return true
 		})
 
@@ -288,16 +305,25 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// --- Protocol Distribution Metrics ---
 	if nc.config.ByProtocol {
-		nc.trafficBytesTotal.Range(func(key, val any) bool {
-			k := key.(trafficKey)
-			count := atomic.LoadUint64(val.(*uint64))
-			ch <- prometheus.MustNewConstMetric(
-				nc.trafficBytesTotalDesc,
-				prometheus.CounterValue,
-				float64(count),
-				k.Protocol, k.Direction)
-			return true
-		})
+		for p := range protocolMax { // protocol
+			for d := range directionMax { // direction
+				idx := directionIdx(p, d)
+				count := nc.trafficBytesTotal[idx].Load()
+				if count > 0 {
+					var directionStr string
+					if d == DirectionSent {
+						directionStr = "sent"
+					} else {
+						directionStr = "received"
+					}
+					ch <- prometheus.MustNewConstMetric(
+						nc.trafficBytesTotalDesc,
+						prometheus.CounterValue,
+						float64(count),
+						protocolToString(p), directionStr)
+				}
+			}
+		}
 	}
 }
 
@@ -327,9 +353,9 @@ func (nc *NetCollector) RecordDataSent(startKey uint64, protocol int, bytes uint
 	}
 
 	if nc.config.ByProtocol {
-		tkey := trafficKey{Protocol: protocolToString(protocol), Direction: "sent"}
-		tval, _ := nc.trafficBytesTotal.LoadOrStore(tkey, new(uint64))
-		atomic.AddUint64(tval.(*uint64), uint64(bytes))
+		// Use a pre-calculated index into a slice of atomics to avoid map/key allocations.
+		idx := directionIdx(protocol, DirectionSent)
+		nc.trafficBytesTotal[idx].Add(uint64(bytes))
 	}
 }
 
@@ -342,9 +368,9 @@ func (nc *NetCollector) RecordDataReceived(startKey uint64, protocol int, bytes 
 	}
 
 	if nc.config.ByProtocol {
-		tkey := trafficKey{Protocol: protocolToString(protocol), Direction: "received"}
-		tval, _ := nc.trafficBytesTotal.LoadOrStore(tkey, new(uint64))
-		atomic.AddUint64(tval.(*uint64), uint64(bytes))
+		// Use a pre-calculated index into a slice of atomics to avoid map/key allocations.
+		idx := directionIdx(protocol, DirectionReceived)
+		nc.trafficBytesTotal[idx].Add(uint64(bytes))
 	}
 }
 
@@ -376,9 +402,18 @@ func (nc *NetCollector) RecordConnectionFailed(startKey uint64, protocol int, fa
 		if startKey > 0 && !nc.stateManager.IsTrackedStartKey(startKey) {
 			return
 		}
-		key := failureKey{StartKey: startKey, Protocol: protocolToString(protocol), FailureCode: failureCode}
-		val, _ := nc.connectionsFailedTotal.LoadOrStore(key, new(uint64))
-		atomic.AddUint64(val.(*uint64), 1)
+
+		// Get or create the inner map for the startKey.
+		innerMap, _ := nc.connectionsFailedTotal.LoadOrStore(startKey, func() maps.ConcurrentMap[uint32, *atomic.Uint64] {
+			return maps.NewConcurrentMap[uint32, *atomic.Uint64]()
+		})
+
+		// Get or create the atomic counter for the specific failure type.
+		key := failureKey(protocol, failureCode)
+		counter, _ := innerMap.LoadOrStore(key, func() *atomic.Uint64 {
+			return new(atomic.Uint64)
+		})
+		counter.Add(1)
 	}
 }
 
@@ -397,30 +432,17 @@ func (nc *NetCollector) RecordRetransmission(startKey uint64) {
 // allow the collector to safely clean up its internal state for terminated processes.
 func (nc *NetCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	cleanedCount := 0
-	// Clean up the primary per-process map.
 	for startKey := range terminatedProcs {
+		// Clean up the primary per-process map.
 		if _, deleted := nc.perProcessMetrics.LoadAndDelete(startKey); deleted {
 			cleanedCount++
 		}
-	}
 
-	// Clean up the connection failures map, which has a different key structure.
-	nc.connectionsFailedTotal.Range(func(key, _ any) bool {
-		k := key.(failureKey)
-		// Check if the start key belongs to any of the terminated processes.
-		isTerminated := false
-		for termStartKey := range terminatedProcs {
-			if k.StartKey == termStartKey {
-				isTerminated = true
-				break
-			}
+		// Clean up the connection failures map, which is also keyed by StartKey.
+		if nc.config.ConnectionHealth {
+			nc.connectionsFailedTotal.Delete(startKey)
 		}
-		if isTerminated {
-			nc.connectionsFailedTotal.Delete(key)
-			cleanedCount++
-		}
-		return true
-	})
+	}
 
 	if cleanedCount > 0 {
 		nc.log.Debug().Int("count", cleanedCount).Msg("Cleaned up network counters for terminated processes")
