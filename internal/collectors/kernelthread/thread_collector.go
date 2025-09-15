@@ -13,7 +13,6 @@ import (
 
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
-	"etw_exporter/internal/maps"
 )
 
 // Define constants for thread states to be used as array indices.
@@ -28,13 +27,6 @@ const (
 	StateWaitingOffset = 40
 )
 
-// ProcessSwitchCounter holds the data for a single process's context switches.
-// Storing the PID in the value allows us to use the unique StartKey as the map key.
-type ProcessSwitchCounter struct {
-	PID     uint32
-	Counter *atomic.Int64
-}
-
 // ThreadStateKey represents a composite key for thread state transitions.
 type ThreadStateKey struct {
 	State      string
@@ -47,16 +39,17 @@ type ThreadStateKey struct {
 type ThreadCollector struct {
 	// Per-CPU data structures for lock-free access on the hot path.
 	// Slices are indexed by CPU number.
-	contextSwitchesPerCPU  []*int64
+	contextSwitchesPerCPU  []*atomic.Int64
 	contextSwitchIntervals []*IntervalStats
 
-	// A concurrent map is used for process-level metrics. The key is the process StartKey (uint64)
-	// to uniquely identify a process instance and prevent PID reuse race conditions.
-	// The value is the atomic counter directly, to avoid allocations on the hot path.
-	contextSwitchesPerProcess maps.ConcurrentMap[uint64, *atomic.Int64]
+	// Double-buffered maps for lock-free writes on the CSwitch hot path.
+	// The handler writes to 'active', the collector reads from 'inactive' after a swap.
+	activeCsPerProcess   map[uint64]int64
+	inactiveCsPerProcess map[uint64]int64
+	csMapMutex           sync.Mutex
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
-	threadStateCounters []*int64
+	threadStateCounters []*atomic.Int64
 	indexToStateKey     []ThreadStateKey
 
 	log *phusluadapter.SampledLogger
@@ -74,7 +67,7 @@ type ThreadCollector struct {
 // ThreadMetricsData holds a snapshot of aggregated data for a single scrape.
 type ThreadMetricsData struct {
 	ContextSwitchesPerCPU     map[uint16]int64
-	ContextSwitchesPerProcess []ProcessContextSwitches
+	ContextSwitchesPerProcess map[uint64]int64 // Snapshot of the inactive map after a swap
 	ThreadStates              map[ThreadStateKey]int64
 	ContextSwitchIntervals    map[uint16]*IntervalStats // Use pointer to avoid copying the lock
 }
@@ -101,10 +94,10 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
-	csPerCPU := make([]*int64, numCPU)
+	csPerCPU := make([]*atomic.Int64, numCPU)
 	csIntervals := make([]*IntervalStats, numCPU)
 	for i := range numCPU {
-		csPerCPU[i] = new(int64)
+		csPerCPU[i] = new(atomic.Int64)
 		csIntervals[i] = &IntervalStats{
 			// Pre-allocate the slice to match the number of buckets
 			Buckets: make([]int64, len(csIntervalBuckets)),
@@ -116,12 +109,12 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 
 	// Calculate total size needed for all state counters
 	maxIndex := StateWaitingOffset + len(waitReasons)
-	threadStateCounters := make([]*int64, maxIndex)
+	threadStateCounters := make([]*atomic.Int64, maxIndex)
 	indexToStateKey := make([]ThreadStateKey, maxIndex)
 
 	// Initialize all counters
 	for i := range threadStateCounters {
-		threadStateCounters[i] = new(int64)
+		threadStateCounters[i] = new(atomic.Int64)
 	}
 
 	// Map simple states (created, running, ready, terminated)
@@ -146,13 +139,14 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 	}
 
 	collector := &ThreadCollector{
-		stateManager:              sm,
-		contextSwitchesPerCPU:     csPerCPU,
-		contextSwitchIntervals:    csIntervals,
-		contextSwitchesPerProcess: maps.NewConcurrentMap[uint64, *atomic.Int64](),
-		threadStateCounters:       threadStateCounters,
-		indexToStateKey:           indexToStateKey,
-		log:                       logger.NewSampledLoggerCtx("thread_collector"),
+		stateManager:           sm,
+		contextSwitchesPerCPU:  csPerCPU,
+		contextSwitchIntervals: csIntervals,
+		activeCsPerProcess:     make(map[uint64]int64, 4096),
+		inactiveCsPerProcess:   make(map[uint64]int64, 4096),
+		threadStateCounters:    threadStateCounters,
+		indexToStateKey:        indexToStateKey,
+		log:                    logger.NewSampledLoggerCtx("thread_collector"),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -223,17 +217,16 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 	aggregatedSwitches := make(map[programKey]int64)
 	stateManager := c.stateManager
 
-	c.contextSwitchesPerProcess.Range(func(startKey uint64, counter *atomic.Int64) bool {
+	for startKey, count := range data.ContextSwitchesPerProcess {
 		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 			key := programKey{
 				name:      procInfo.Name,
 				checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
 				sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
 			}
-			aggregatedSwitches[key] += counter.Load()
+			aggregatedSwitches[key] += count
 		}
-		return true
-	})
+	}
 
 	for key, count := range aggregatedSwitches {
 		ch <- prometheus.MustNewConstMetric(
@@ -281,25 +274,36 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 // This method is called during metric collection to ensure consistent data.
 func (c *ThreadCollector) collectData() ThreadMetricsData {
 	data := ThreadMetricsData{
-		ContextSwitchesPerCPU:     make(map[uint16]int64),
-		ContextSwitchesPerProcess: make([]ProcessContextSwitches, 0), // This is no longer used for metrics, but kept to avoid breaking the struct.
-		ThreadStates:              make(map[ThreadStateKey]int64),
-		ContextSwitchIntervals:    make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
+		ContextSwitchesPerCPU:  make(map[uint16]int64),
+		ThreadStates:           make(map[ThreadStateKey]int64),
+		ContextSwitchIntervals: make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
 	}
 
 	// Collect CPU context switches
 	for cpu, countPtr := range c.contextSwitchesPerCPU {
 		if countPtr != nil {
-			data.ContextSwitchesPerCPU[uint16(cpu)] = atomic.LoadInt64(countPtr)
+			data.ContextSwitchesPerCPU[uint16(cpu)] = countPtr.Load()
 		}
 	}
 
-	// Process context switches are now aggregated directly in the Collect method
-	// to get access to the state manager for process metadata lookups.
+	// --- Swap and collect process context switches ---
+	c.csMapMutex.Lock()
+	// Swap the active and inactive maps. The handler continues writing to the new active map.
+	c.activeCsPerProcess, c.inactiveCsPerProcess = c.inactiveCsPerProcess, c.activeCsPerProcess
+	c.csMapMutex.Unlock()
+
+	// The collector now has exclusive access to the inactive map for this scrape.
+	data.ContextSwitchesPerProcess = c.inactiveCsPerProcess // This is now a map[uint64]int64
+
+	// After the data is collected, clear the inactive map so it's ready for the next swap.
+	// This is crucial to reset the counters for the next collection interval.
+	for k := range c.inactiveCsPerProcess {
+		delete(c.inactiveCsPerProcess, k)
+	}
 
 	// Collect thread states from the pre-allocated slice
 	for i, key := range c.indexToStateKey {
-		count := atomic.LoadInt64(c.threadStateCounters[i])
+		count := c.threadStateCounters[i].Load()
 		if count > 0 {
 			data.ThreadStates[key] = count
 		}
@@ -339,19 +343,17 @@ func (c *ThreadCollector) RecordContextSwitch(
 
 	// Record context switch per CPU (lock-free)
 	if int(cpu) < len(c.contextSwitchesPerCPU) {
-		atomic.AddInt64(c.contextSwitchesPerCPU[cpu], 1)
+		c.contextSwitchesPerCPU[cpu].Add(1)
 	}
 
-	// Record context switch per process (concurrent map)
+	// Record context switch per process (lock-free on hot path)
 	if startKey > 0 {
 		// Only create metrics for processes that are tracked
 		if c.stateManager.IsTrackedStartKey(startKey) {
-			// Use the unique StartKey as the key to prevent PID reuse race conditions.
-			// This factory function captures no variables, preventing heap allocations on the hot path.
-			counter, _ := c.contextSwitchesPerProcess.LoadOrStore(startKey, func() *atomic.Int64 {
-				return new(atomic.Int64)
-			})
-			counter.Add(1)
+			// This write is not protected by a lock. It is safe because this handler
+			// is guaranteed to be called from a single goroutine. The only contention
+			// is with the Collect method, which is handled by swapping map pointers.
+			c.activeCsPerProcess[startKey]++
 		}
 	}
 
@@ -414,7 +416,7 @@ func (c *ThreadCollector) RecordThreadStateTransition(state int, waitReason int8
 	}
 
 	if idx < len(c.threadStateCounters) {
-		atomic.AddInt64(c.threadStateCounters[idx], 1)
+		c.threadStateCounters[idx].Add(1)
 	}
 }
 
@@ -436,11 +438,16 @@ func (c *ThreadCollector) RecordThreadTermination() {
 func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	cleanedCount := 0
 	// The map of terminated processes gives us StartKey -> PID.
+	// We must lock to safely clean keys from both buffers.
+	c.csMapMutex.Lock()
 	for startKey := range terminatedProcs {
-		if _, deleted := c.contextSwitchesPerProcess.LoadAndDelete(startKey); deleted {
-			cleanedCount++
-		}
+		// A key could be in either map, so we delete from both.
+		delete(c.activeCsPerProcess, startKey)
+		delete(c.inactiveCsPerProcess, startKey)
+		cleanedCount++
 	}
+	c.csMapMutex.Unlock()
+
 	if cleanedCount > 0 {
 		c.log.Debug().Int("count", cleanedCount).Msg("Cleaned up context switch counters for terminated processes")
 	}

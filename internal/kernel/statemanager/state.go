@@ -28,17 +28,24 @@ type KernelStateManager struct {
 	pidToCurrentStartKey maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (current StartKey)
 
 	// Thread state
-	tidToPid          maps.ConcurrentMap[uint32, uint32]                               // key: TID (uint32), value: PID (uint32)
-	pidToTids         maps.ConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]] // key: PID (uint32), value: map of TIDs
-	terminatedThreads maps.ConcurrentMap[uint32, time.Time]                            // key: TID (uint32), value: time.Time
+	tidToPid maps.ConcurrentMap[uint32, uint32]
+	// The reverse mapping (pid -> []tids) has been removed to eliminate allocations on the hot path.
+	// Cleanup is now handled by iterating tidToPid on the cold path (post-scrape).
+	terminatedThreads maps.ConcurrentMap[uint32, time.Time] // key: TID (uint32), value: time.Time
 
-	// Image state
-	images           maps.ConcurrentMap[uint64, *ImageInfo]                           // key: uint64 (ImageBase), value: *ImageInfo
-	pidToImages      maps.ConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]] // key: uint32 (PID), value: map of ImageBases
-	imageToPid       maps.ConcurrentMap[uint64, uint32]                               // key: uint64 (ImageBase), value: uint32 (PID)
-	terminatedImages maps.ConcurrentMap[uint64, time.Time]                            // key: uint64 (ImageBase), value: time.Time
-	imageInfoPool    sync.Pool                                                        // Pool for recycling ImageInfo objects.
-	processInfoPool  sync.Pool                                                        // Pool for reusing ProcessInfo objects to reduce heap allocations.
+	processInfoPool sync.Pool // Pool for reusing ProcessInfo objects to reduce heap allocations.
+
+	// Unified image state store.
+	// This uses a simple map protected by an RWMutex. This provides a balance
+	// of performance for both writes (image loads) and reads (address lookups)
+	// while being simple and avoiding heap allocations on the read path.
+	images             map[uint64]*ImageInfo
+	addressCache       map[uint64]*ImageInfo // Point-address cache for hot-path lookups
+	imagesMutex        sync.RWMutex
+	terminatedImages   maps.ConcurrentMap[uint64, time.Time]
+	imageInfoPool      sync.Pool
+	internedImageNames map[string]string
+	internMutex        sync.Mutex
 
 	// Process filtering state
 	processFilterEnabled bool
@@ -75,11 +82,9 @@ func GetGlobalStateManager() *KernelStateManager {
 			pidToCurrentStartKey: maps.NewConcurrentMap[uint32, uint64](),
 			startKeyToPid:        maps.NewConcurrentMap[uint64, uint32](),
 			tidToPid:             maps.NewConcurrentMap[uint32, uint32](),
-			pidToTids:            maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint32, struct{}]](),
 			terminatedThreads:    maps.NewConcurrentMap[uint32, time.Time](),
-			images:               maps.NewConcurrentMap[uint64, *ImageInfo](),
-			pidToImages:          maps.NewConcurrentMap[uint32, maps.ConcurrentMap[uint64, struct{}]](),
-			imageToPid:           maps.NewConcurrentMap[uint64, uint32](),
+			images:               make(map[uint64]*ImageInfo),
+			addressCache:         make(map[uint64]*ImageInfo, 4096), // Pre-size the cache
 			terminatedImages:     maps.NewConcurrentMap[uint64, time.Time](),
 			imageInfoPool: sync.Pool{
 				New: func() any {
@@ -91,6 +96,7 @@ func GetGlobalStateManager() *KernelStateManager {
 					return &ProcessInfo{}
 				},
 			},
+			internedImageNames: make(map[string]string),
 		}
 	})
 	return globalStateManager
@@ -236,7 +242,7 @@ func (sm *KernelStateManager) cleanupTerminatedEntities(
 		return true
 	})
 	for _, tid := range threadsToClean {
-		sm.removeThread(tid)
+		sm.tidToPid.Delete(tid)
 		sm.terminatedThreads.Delete(tid)
 		cleanedThreads++
 	}
@@ -276,7 +282,32 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint64]uint32) i
 		cleaner.CleanupTerminatedProcesses(procsToClean)
 	}
 
-	// Perform the state manager's own cleanup for the identified processes.
+	// --- Cascade Deletion to Threads ---
+	// Create a set of terminated PIDs for efficient lookup while scanning all threads.
+	terminatedPids := make(map[uint32]struct{}, len(procsToClean))
+	for _, pid := range procsToClean {
+		terminatedPids[pid] = struct{}{}
+	}
+
+	// Iterate through all tracked threads and remove those belonging to terminated processes.
+	// This is an O(T) operation (where T is total threads) performed on the cold path,
+	// which is far better than allocating on the hot path for every thread creation.
+	tidsForDeletion := make([]uint32, 0, 128)
+	sm.tidToPid.Range(func(tid uint32, pid uint32) bool {
+		if _, isTerminated := terminatedPids[pid]; isTerminated {
+			tidsForDeletion = append(tidsForDeletion, tid)
+		}
+		return true
+	})
+
+	if len(tidsForDeletion) > 0 {
+		for _, tid := range tidsForDeletion {
+			sm.tidToPid.Delete(tid)
+			sm.terminatedThreads.Delete(tid) // Also remove from other terminated list
+		}
+	}
+
+	// --- Perform the state manager's own cleanup for the identified processes. ---
 	for startKey, pid := range procsToClean {
 		// Always remove the process info and its primary key mappings.
 		if pInfo, exists := sm.processes.LoadAndDelete(startKey); exists {
@@ -296,31 +327,10 @@ func (sm *KernelStateManager) cleanupProcesses(procsToClean map[uint64]uint32) i
 			}
 			return currentSK, true // Value does not match, keep it.
 		})
-
-		// Cascade delete to threads
-		if tids, exists := sm.pidToTids.Load(pid); exists {
-			tids.Range(func(tid uint32, _ struct{}) bool {
-				sm.tidToPid.Delete(tid)
-				sm.terminatedThreads.Delete(tid) // Also remove from other terminated list
-				return true
-			})
-			sm.pidToTids.Delete(pid)
-		}
-
-		// Cascade delete to images loaded by this process
-		if images, exists := sm.pidToImages.LoadAndDelete(pid); exists {
-			images.Range(func(imageBase uint64, _ struct{}) bool {
-				if imgInfo, loaded := sm.images.LoadAndDelete(imageBase); loaded {
-					sm.imageInfoPool.Put(imgInfo)
-				}
-				sm.imageToPid.Delete(imageBase)
-				return true
-			})
-		}
-
-		// Cascade delete to FileObject mappings owned by this process
-		// This is no longer needed with IRP correlation as IRPs are transient.
 	}
+
+	// NOTE: Image cleanup is no longer cascaded from process termination.
+	// Images are global entities and are only cleaned up on explicit unload events.
 	return len(procsToClean)
 }
 
@@ -360,15 +370,4 @@ func (sm *KernelStateManager) CleanupStaleProcesses(lastSeenIn time.Duration) {
 			Dur("max_age", lastSeenIn).
 			Msg("Marked stale processes for cleanup post-scrape")
 	}
-}
-
-// removeThread is a private helper for thread cleanup that removes a thread's
-// entries from both the forward (TID->PID) and reverse (PID->TIDs) maps.
-func (sm *KernelStateManager) removeThread(tid uint32) {
-	if pid, exists := sm.tidToPid.Load(tid); exists {
-		if pVal, pExists := sm.pidToTids.Load(pid); pExists {
-			pVal.Delete(tid)
-		}
-	}
-	sm.tidToPid.Delete(tid)
 }

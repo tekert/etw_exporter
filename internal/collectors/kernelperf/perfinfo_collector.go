@@ -47,14 +47,7 @@ var isrEventPool = sync.Pool{
 	},
 }
 
-// PerfCollector implements prometheus.Collector for real-time performance metrics.
-// This collector provides high-performance aggregated metrics for:
-// - System-wide ISR to DPC latency (measures DPC queue time)
-// - DPC execution time by driver (matches "Highest DPC routine execution time")
-// - DPC queue depth tracking (system-wide and per-CPU)
-// //- SMI gap detection via timeline analysis
-//
-// All metrics use the etw_ prefix and are designed for low cardinality.
+// PerfCollector implements the logic for collecting real-time performance metrics.
 type PerfCollector struct {
 	// Configuration options
 	config *config.PerfInfoConfig
@@ -64,9 +57,6 @@ type PerfCollector struct {
 
 	// Pending ISR tracking for latency correlation
 	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
-
-	// Cached driver name lookups to reduce state manager queries on the hot path
-	routineAddressToDriverName map[uint64]string
 
 	// Performance metrics data
 	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
@@ -127,14 +117,6 @@ type histogramData struct {
 	sum     float64
 }
 
-// ImageInfo holds driver image information for address resolution
-type ImageInfo struct {
-	ImageBase uint64
-	ImageSize uint64
-	FileName  string // Full path
-	ImageName string // Extracted driver name (e.g., "tcpip.sys")
-}
-
 // Histogram bucket definitions optimized for Windows latency ranges
 var (
 	// System-wide ISR to DPC latency buckets (microseconds)
@@ -148,20 +130,19 @@ var (
 // NewPerfInfoCollector creates a new interrupt latency collector
 func NewPerfInfoCollector(config *config.PerfInfoConfig, sm *statemanager.KernelStateManager) *PerfCollector {
 	collector := &PerfCollector{
-		config:                     config,
-		sm:                         sm,
-		pendingISRs:                make(map[ISRKey]*ISREvent, 256), // Pre-size for performance
-		routineAddressToDriverName: make(map[uint64]string, 2000),   // Cached driver name lookups
-		isrToDpcLatencyBuckets:     make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
-		isrToDpcLatencyCount:       0,
-		isrToDpcLatencySum:         0.0,
-		dpcQueuedCount:             make(map[uint16]int64, 64), // Pre-size for max CPU count
-		dpcExecutedCount:           make(map[uint16]int64, 64),
-		driverLastSeen:             make(map[string]time.Time, 100), // Track driver activity for bounded set
-		driverTimeout:              15 * time.Minute,                // Prune drivers inactive for 15 mins
-		log:                        logger.NewLoggerWithContext("perfinfo_collector"),
-		lastPruneTime:              time.Now(),
-		pruneInterval:              5 * time.Minute,
+		config:                 config,
+		sm:                     sm,
+		pendingISRs:            make(map[ISRKey]*ISREvent, 256), // Pre-size for performance
+		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
+		isrToDpcLatencyCount:   0,
+		isrToDpcLatencySum:     0.0,
+		dpcQueuedCount:         make(map[uint16]int64, 64), // Pre-size for max CPU count
+		dpcExecutedCount:       make(map[uint16]int64, 64),
+		driverLastSeen:         make(map[string]time.Time, 100), // Track driver activity for bounded set
+		driverTimeout:          15 * time.Minute,                // Prune drivers inactive for 15 mins
+		log:                    logger.NewLoggerWithContext("perfinfo_collector"),
+		lastPruneTime:          time.Now(),
+		pruneInterval:          5 * time.Minute,
 
 		cpuStringCache: make(map[uint16]string, 64), // Cache for formatCPU to reduce allocations
 	}
@@ -453,7 +434,7 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 	var matchedKey ISRKey
 
 	// Look for ISR with closest timestamp on same CPU - optimize for hot path
-	var closestTime time.Duration = time.Hour // Start with large value
+	closestTime := time.Hour // Start with large value
 	for key, isr := range c.pendingISRs {
 		if key.CPU == cpu {
 			timeDiff := initialTime.Sub(isr.InitialTime)
@@ -489,51 +470,33 @@ func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// The state manager handles the actual removal. We just need to clear our local cache
-	// to prevent using stale routine->driver mappings.
-	// We don't know the image size here, but we can iterate our cache.
-	// This is inefficient but unload events are rare.
+	// The state manager handles the actual image removal and cache invalidation.
+	// We still need to get the image name before it's gone to clean up our metrics.
 	stateManager := c.sm
 	info, ok := stateManager.GetImageForAddress(imageBase) // Get info before it's deleted
 	if !ok {
 		return
 	}
 
-	c.log.Trace().Str("driver_name", info.ImageName).Msg("Image unloaded, clearing local caches")
+	c.log.Trace().Str("driver_name", info.ImageName).Msg("Image unloaded, removing associated metrics")
 
 	// Remove all metrics associated with this driver.
 	c.removeDriverMetrics(info.ImageName)
-
-	// Invalidate the routine-to-driver name cache for all routines within this image's address space.
-	for routineAddr := range c.routineAddressToDriverName {
-		if routineAddr >= info.ImageBase && routineAddr < (info.ImageBase+info.ImageSize) {
-			delete(c.routineAddressToDriverName, routineAddr)
-		}
-	}
 }
 
 // resolveDriverNameUnsafe is an optimized version for use within locked contexts
 // Assumes caller already holds the mutex
 func (c *PerfCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
-	// Check cache first for a positive hit.
-	if driverName, exists := c.routineAddressToDriverName[routineAddress]; exists {
-		return driverName
-	}
-
-	// If not in cache, query the state manager.
-	stateManager := c.sm
-	imageInfo, ok := stateManager.GetImageForAddress(routineAddress)
+	// The state manager now has a high-performance cache. We query it directly.
+	imageInfo, ok := c.sm.GetImageForAddress(routineAddress)
 	if !ok {
-		// Do NOT cache the negative result. The ImageLoad event might be delayed.
-		// Returning "unknown" for this single event is correct. We will try the
-		// full lookup again if this address is seen in a future event.
+		// Returning "unknown" for this single event is correct. The ImageLoad event
+		// might be delayed, and we will try the full lookup again if this address
+		// is seen in a future event.
 		return "unknown"
 	}
 
-	// Cache the positive result for future lookups.
-	driverName := imageInfo.ImageName
-	c.routineAddressToDriverName[routineAddress] = driverName
-	return driverName
+	return imageInfo.ImageName
 }
 
 // pruneStaleDrivers removes metrics for drivers that have been inactive for a configured timeout.
@@ -567,12 +530,7 @@ func (c *PerfCollector) removeDriverMetrics(driverName string) {
 		delete(c.dpcDurationHistograms, DPCDriverKey{ImageName: driverName})
 	}
 
-	// Also remove any cached routine addresses associated with this driver.
-	for routineAddr, name := range c.routineAddressToDriverName {
-		if name == driverName {
-			delete(c.routineAddressToDriverName, routineAddr)
-		}
-	}
+	// The local routine address cache has been removed, so we no longer need to clean it.
 }
 
 // recordISRToDPCLatency records a system-wide ISR to DPC latency sample
@@ -627,20 +585,6 @@ func (c *PerfCollector) cleanupOldISRs(currentTime time.Time) {
 			isrEventPool.Put(isr)
 		}
 	}
-}
-
-// extractDriverName extracts the driver name from a full file path
-func extractDriverName(filePath string) string {
-	// Extract filename from path: C:\Windows\System32\drivers\tcpip.sys -> tcpip.sys
-	name := filePath
-	for i := len(filePath) - 1; i >= 0; i-- {
-		if filePath[i] == '\\' || filePath[i] == '/' {
-			name = filePath[i+1:]
-			break
-		}
-	}
-
-	return name
 }
 
 // formatCPU formats CPU number as string, using a cache to reduce allocations.

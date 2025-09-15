@@ -341,31 +341,26 @@ func (h *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 // This handler collects information about loaded modules (drivers, executables, DLLs)
 // to resolve routine addresses from DPC/ISR events to a driver name.
 func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
-	// Extract image load properties using optimized methods
-	var imageBase uint64
-	var imageSize uint64
-	var fileName string
-	var processID uint32
+    // Extract image load properties using optimized methods
+    var imageBase uint64
+    var imageSize uint64
+    var fileName string
 
-	// Extract properties using proper helper methods
-	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
-		imageBase = base
-	}
-	if size, err := helper.GetPropertyUint("ImageSize"); err == nil {
-		imageSize = size
-	}
-	if name, err := helper.GetPropertyString("FileName"); err == nil {
-		fileName = name
-	}
-	if pid, err := helper.GetPropertyUint("ProcessId"); err == nil {
-		processID = uint32(pid)
-	}
+    // Extract properties using proper helper methods
+    if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
+        imageBase = base
+    }
+    if size, err := helper.GetPropertyUint("ImageSize"); err == nil {
+        imageSize = size
+    }
+    if name, err := helper.GetPropertyString("FileName"); err == nil {
+        fileName = name
+    }
 
-	// Add the image to the central state manager.
-	// The collector no longer needs to process this event itself.
-	h.stateManager.AddImage(processID, imageBase, imageSize, fileName)
+    // Add the image to the central state manager's unified, high-performance store.
+    h.stateManager.AddImage(imageBase, imageSize, fileName)
 
-	return nil
+    return nil
 }
 
 // HandleImageUnloadEvent processes image unload events to remove driver mappings.

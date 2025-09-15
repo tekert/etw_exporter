@@ -1,104 +1,131 @@
 package statemanager
 
 import (
-	"etw_exporter/internal/maps"
 	"path/filepath"
 	"time"
 )
 
-// ImageInfo holds information about a loaded module (driver, DLL, etc.).
+// ImageInfo holds the minimal information needed for high-frequency
+// address-to-name lookups, with an interned (shared) image name string.
 type ImageInfo struct {
-	ImageBase uint64
+	ImageBase uint64 // Base address of the loaded image.
 	ImageSize uint64
-	FileName  string // Full path
-	ImageName string // Extracted file name (e.g., "ntoskrnl.exe")
+	ImageName string // Interned file name
 }
 
-// --- Image Management ---
+// --- Unified Image Management ---
 
-// TODO: get starkey from pid?
+// internImageName returns a canonical, shared string for the given image name.
+// This function must be called while holding a lock on internMutex.
+func (sm *KernelStateManager) internImageName(name string) string {
+	if interned, exists := sm.internedImageNames[name]; exists {
+		return interned
+	}
+	sm.internedImageNames[name] = name
+	return name
+}
 
-// AddImage adds information about a loaded image and associates it with a process.
-// This is the central method for tracking all loaded modules in the system.
-func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, fileName string) {
-	// Store the primary image information, keyed by its base address.
-	imageName := filepath.Base(fileName)
+// AddImage adds minimal image information to the store.
+func (sm *KernelStateManager) AddImage(imageBase, imageSize uint64, fileName string) {
+	if imageBase == 0 || imageSize == 0 {
+		return // Ignore invalid image data
+	}
 
-	// Get a recycled ImageInfo object from the pool to avoid heap allocation.
-	imgInfo := sm.imageInfoPool.Get().(*ImageInfo)
-	imgInfo.ImageBase = imageBase
-	imgInfo.ImageSize = imageSize
-	imgInfo.FileName = fileName
-	imgInfo.ImageName = imageName
+	sm.imagesMutex.Lock()
+	defer sm.imagesMutex.Unlock()
 
-	sm.images.Store(imageBase, imgInfo)
+	// Check for existence to handle duplicate events.
+	if _, exists := sm.images[imageBase]; exists {
+		return
+	}
 
-	// Associate the image with the process that loaded it.
-	// This is crucial for cascading cleanup when the process terminates.
-	// The factory function here captures no variables, preventing heap allocations.
-	pidImages, _ := sm.pidToImages.LoadOrStore(pid, func() maps.ConcurrentMap[uint64, struct{}] {
-		return maps.NewConcurrentMap[uint64, struct{}]()
-	})
-	pidImages.Store(imageBase, struct{}{})
+	// This is a new image, so we create and store it.
+	// Lock the interning mutex separately to avoid lock-ordering issues.
+	sm.internMutex.Lock()
+	imageName := sm.internImageName(filepath.Base(fileName))
+	sm.internMutex.Unlock()
 
-	// Create the reverse mapping for efficient cleanup on image unload.
-	sm.imageToPid.Store(imageBase, pid)
+	info := sm.imageInfoPool.Get().(*ImageInfo)
+	info.ImageBase = imageBase
+	info.ImageSize = imageSize
+	info.ImageName = imageName
 
-	sm.log.Trace().
-		Uint32("pid", pid).
-		Str("image_name", imageName).
-		Uint64("base", imageBase).
-		Msg("Image loaded and associated with process")
+	sm.images[imageBase] = info
 }
 
 // MarkImageForDeletion flags an image for cleanup after the next scrape.
-// It does not immediately delete the image, allowing in-flight scrapes to resolve
-// addresses within the image.
 func (sm *KernelStateManager) MarkImageForDeletion(imageBase uint64) {
-	// Check if we are actually tracking this image to avoid polluting the map.
-	if _, exists := sm.images.Load(imageBase); exists {
+	sm.imagesMutex.RLock()
+	_, exists := sm.images[imageBase]
+	sm.imagesMutex.RUnlock()
+
+	if exists {
 		sm.terminatedImages.Store(imageBase, time.Now())
 	}
 }
 
 // RemoveImage handles the explicit unloading of an image.
-// It cleans up all state associated with the given image base address.
-// This should only be called from post-scrape cleanup routines.
 func (sm *KernelStateManager) RemoveImage(imageBase uint64) {
-	// Find the owning process to clean up the pid->image association.
-	if pid, ok := sm.imageToPid.Load(imageBase); ok {
-		if images, ok := sm.pidToImages.Load(pid); ok {
-			images.Delete(imageBase)
+	sm.imagesMutex.Lock()
+	defer sm.imagesMutex.Unlock()
+
+	info, exists := sm.images[imageBase]
+	if !exists {
+		// Also remove it from the terminated list to make the cleanup idempotent.
+		sm.terminatedImages.Delete(imageBase)
+		return
+	}
+
+	// Remove from the primary map.
+	delete(sm.images, imageBase)
+
+	// Invalidate the point-address cache. This is a slow operation (O(N_cache)),
+	// but it happens on the less frequent image unload path. We iterate the
+	// entire cache and remove any entries that point to the unloaded image.
+	for addr, cachedInfo := range sm.addressCache {
+		if cachedInfo == info { // Pointer comparison is fast and correct here.
+			delete(sm.addressCache, addr)
 		}
 	}
 
-	// Remove the primary image info, returning the object to the pool for reuse.
-	if imgInfo, loaded := sm.images.LoadAndDelete(imageBase); loaded {
-		sm.imageInfoPool.Put(imgInfo)
-	}
-	sm.imageToPid.Delete(imageBase)
+	// Return the object to the pool.
+	sm.imageInfoPool.Put(info)
 
 	// Also remove it from the terminated list to make the cleanup idempotent.
 	sm.terminatedImages.Delete(imageBase)
 }
 
-// GetImageForAddress resolves a memory address to the image that contains it.
-// This is used by collectors like PerfInfo to map routine addresses to driver names.
+// GetImageForAddress resolves a memory address to its corresponding image info.
+// This is a hot-path function that uses a point-address cache for O(1) lookups
+// on repeated requests, falling back to a linear scan for new addresses.
 func (sm *KernelStateManager) GetImageForAddress(address uint64) (*ImageInfo, bool) {
-	var foundImage *ImageInfo
-	// This Range is not ideal for performance, but image loads are infrequent.
-	// A more complex data structure (like an interval tree) would be overkill.
-	sm.images.Range(func(key uint64, value *ImageInfo) bool {
-		if address >= value.ImageBase && address < (value.ImageBase+value.ImageSize) {
-			foundImage = value
-			return false // Stop iterating
-		}
-		return true
-	})
+	// First, try a fast read-locked lookup in the cache. This is the hot path.
+	sm.imagesMutex.RLock()
+	if info, exists := sm.addressCache[address]; exists {
+		sm.imagesMutex.RUnlock()
+		return info, true
+	}
+	sm.imagesMutex.RUnlock()
 
-	if foundImage != nil {
-		return foundImage, true
+	// Cache miss. We need a full write lock to scan and potentially update the cache.
+	sm.imagesMutex.Lock()
+	defer sm.imagesMutex.Unlock()
+
+	// Double-check the cache. Another goroutine might have populated it
+	// while we were waiting for the write lock.
+	if info, exists := sm.addressCache[address]; exists {
+		return info, true
 	}
 
+	// Still a miss. Perform the linear scan over the source of truth.
+	for _, image := range sm.images {
+		if address >= image.ImageBase && address < (image.ImageBase+image.ImageSize) {
+			// Found it. Populate the cache for next time.
+			sm.addressCache[address] = image
+			return image, true
+		}
+	}
+
+	// Not found in any loaded image.
 	return nil, false
 }
