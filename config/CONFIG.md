@@ -58,7 +58,6 @@ include_names = ["svchost.exe", "myapp.*\\.exe", "sqlservr.exe"]
 
 - **enabled**: Set to `true` to enable process filtering. If `false`, metrics for all processes are collected.
 - **include_names**: A list of regular expressions to match against process image names (e.g., `notepad.exe`). If filtering is enabled, only processes whose names match one of these patterns will have their metrics exported.
-  - The matching is based on the process's unique "start key". Once a process name matches, all other processes sharing that same start key (even if they have a different PID due to reuse) will also be tracked.
   - The syntax is Go's standard regular expression format, as documented [here](https://golang.org/s/re2syntax).
 
 ### Disk I/O Collector
@@ -201,5 +200,5 @@ restart_exporter_session = true
 ```
 
 - **enabled**: Set to `true` to enable the session watcher.
-- **restart_kernel_session**: If `true`, the watcher will attempt to restart the `NT Kernel Logger` session if it is stopped.
-- **restart_exporter_session**: If `true`, the watcher will attempt to restart the main `etw_exporter` session if it is stopped.
+- **restart_kernel_session**: If `true`, the watcher will attempt to restart the `NT Kernel Logger` session if it is stopped (Used only for Win 10 and below).
+- **restart_exporter_session**: If `true`, the watcher will attempt to restart the main `etw_exporter` session if it is stopped (Recommended to leave this one enabled).
