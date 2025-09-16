@@ -143,12 +143,10 @@ func (h *Handler) HandleISREvent(helper *etw.EventRecordHelper) error {
 		return err
 	}
 
-	initialTimeVal, err := helper.GetPropertyInt("InitialTime")
+	initialTime, err := helper.GetPropertyWmiTime("InitialTime")
 	if err != nil {
 		return err
 	}
-	// is in QPC, SystemTime, or CPUTick depending on ClientContext
-	initialTime := helper.TimestampFromProp(initialTimeVal)
 
 	// Process the ISR event
 	h.collector.ProcessISREvent(cpu, uint16(vector), initialTime, routineAddress)
@@ -187,16 +185,14 @@ func (h *Handler) HandleDPCEvent(helper *etw.EventRecordHelper) error {
 		return nil // Cannot process without routine address.
 	}
 
-	// NOTE: this will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
-	// Is usally ~30 nanoseconds earlier than eventTime
-	initialTimeTicks, err := helper.GetPropertyInt("InitialTime")
+	// NOTE: This prop will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
+	// We must use the dedicated GetPropertyWmiTime, which calculates the absolute
+	// time based on the trace ClockType.
+	// InitialTime is usally ~30 nanoseconds earlier than event generated TimeStamp
+	initialTime, err := helper.GetPropertyWmiTime("InitialTime")
 	if err != nil {
 		return nil // Cannot process without a timestamp
 	}
-	// This prop will be in QPC is ClientContext is 1, SystemTime if 2, and CPUTick if 3
-	// We must use the dedicated TimestampFrom converter, which calculates the absolute
-	// time based on the session's BootTime.
-	initialTime := helper.TimestampFromProp(initialTimeTicks)
 
 	// The eventTime is the most accurate timestamp for when the DPC *started*.
 	// We use this for latency calculations.
