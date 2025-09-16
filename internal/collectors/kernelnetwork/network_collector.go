@@ -229,7 +229,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 
 	for key, data := range aggregated {
-		for p := 0; p < protocolMax; p++ {
+		for p := range protocolMax {
 			protocolStr := protocolToString(p)
 			if data.bytesSent[p] > 0 {
 				ch <- prometheus.MustNewConstMetric(
