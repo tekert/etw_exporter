@@ -42,11 +42,14 @@ type ThreadCollector struct {
 	contextSwitchesPerCPU  []*atomic.Int64
 	contextSwitchIntervals []*IntervalStats
 
-	// Double-buffered maps for lock-free writes on the CSwitch hot path.
-	// The handler writes to 'active', the collector reads from 'inactive' after a swap.
-	activeCsPerProcess   map[uint64]int64
-	inactiveCsPerProcess map[uint64]int64
-	csMapMutex           sync.Mutex
+	// activeCsPerProcess is the "active" buffer for context switch counts.
+	// The ETW handler (writer) writes to this map.
+	// During a scrape, the Collect method (reader) replaces this map with a new
+	// empty one and processes the old map's data. This is a form of double-buffering.
+	activeCsPerProcess map[uint64]int64
+	// Buffer for keys to be cleaned up post-scrape.
+	keysForCleanup map[uint64]struct{}
+	csMapMutex     sync.RWMutex // Protects pointer access to activeCsPerProcess and keysForCleanup
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
 	threadStateCounters []*atomic.Int64
@@ -143,7 +146,7 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
 		activeCsPerProcess:     make(map[uint64]int64, 4096),
-		inactiveCsPerProcess:   make(map[uint64]int64, 4096),
+		keysForCleanup:         make(map[uint64]struct{}),
 		threadStateCounters:    threadStateCounters,
 		indexToStateKey:        indexToStateKey,
 		log:                    logger.NewSampledLoggerCtx("thread_collector"),
@@ -286,20 +289,31 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 		}
 	}
 
-	// --- Swap and collect process context switches ---
+	var csSnapshot map[uint64]int64
+	var keysToClean map[uint64]struct{}
+
+	// --- Atomically swap buffers under a WRITE lock ---
+	// This is the only place that takes an exclusive lock. It is held for an
+	// extremely short duration to swap the map pointer and cleanup buffer.
 	c.csMapMutex.Lock()
-	// Swap the active and inactive maps. The handler continues writing to the new active map.
-	c.activeCsPerProcess, c.inactiveCsPerProcess = c.inactiveCsPerProcess, c.activeCsPerProcess
+	// The current active map becomes the snapshot for this scrape.
+	csSnapshot = c.activeCsPerProcess
+	// The new active map is a fresh, empty map, effectively resetting the counters for the next interval.
+	c.activeCsPerProcess = make(map[uint64]int64, 4096)
+
+	// The cleanup buffer is also swapped out.
+	keysToClean = c.keysForCleanup
+	c.keysForCleanup = make(map[uint64]struct{})
 	c.csMapMutex.Unlock()
 
-	// The collector now has exclusive access to the inactive map for this scrape.
-	data.ContextSwitchesPerProcess = c.inactiveCsPerProcess // This is now a map[uint64]int64
-
-	// After the data is collected, clear the inactive map so it's ready for the next swap.
-	// This is crucial to reset the counters for the next collection interval.
-	for k := range c.inactiveCsPerProcess {
-		delete(c.inactiveCsPerProcess, k)
+	// The collector now has exclusive access to the snapshot. Perform cleanup on it
+	// before processing. This is safe because no other goroutine can access this map.
+	for key := range keysToClean {
+		delete(csSnapshot, key)
 	}
+
+	// The cleaned snapshot is the data for this scrape.
+	data.ContextSwitchesPerProcess = csSnapshot
 
 	// Collect thread states from the pre-allocated slice
 	for i, key := range c.indexToStateKey {
@@ -350,10 +364,13 @@ func (c *ThreadCollector) RecordContextSwitch(
 	if startKey > 0 {
 		// Only create metrics for processes that are tracked
 		if c.stateManager.IsTrackedStartKey(startKey) {
-			// This write is not protected by a lock. It is safe because this handler
-			// is guaranteed to be called from a single goroutine. The only contention
-			// is with the Collect method, which is handled by swapping map pointers.
+			// Take a read lock to safely get the pointer to the active map.
+			// This is extremely fast and allows concurrent writers.
+			c.csMapMutex.RLock()
+			// The write to the map itself is safe because only this goroutine writes
+			// to the active map. The lock protects the pointer lookup.
 			c.activeCsPerProcess[startKey]++
+			c.csMapMutex.RUnlock()
 		}
 	}
 
@@ -438,17 +455,16 @@ func (c *ThreadCollector) RecordThreadTermination() {
 func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
 	cleanedCount := 0
 	// The map of terminated processes gives us StartKey -> PID.
-	// We must lock to safely clean keys from both buffers.
+	// We take a full write lock here because we are modifying the cleanup map,
+	// which is part of the state swapped during collection.
 	c.csMapMutex.Lock()
 	for startKey := range terminatedProcs {
-		// A key could be in either map, so we delete from both.
-		delete(c.activeCsPerProcess, startKey)
-		delete(c.inactiveCsPerProcess, startKey)
+		c.keysForCleanup[startKey] = struct{}{}
 		cleanedCount++
 	}
 	c.csMapMutex.Unlock()
 
 	if cleanedCount > 0 {
-		c.log.Debug().Int("count", cleanedCount).Msg("Cleaned up context switch counters for terminated processes")
+		c.log.Debug().Int("count", cleanedCount).Msg("Buffered context switch counters for cleanup on next Collect")
 	}
 }
