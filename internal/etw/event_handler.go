@@ -186,10 +186,10 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		prometheus.MustRegister(collector)
 
 		// Request initial metrics for physical and logical disks.
-        eh.sysconfigHandler.GetCollector().RequestMetrics(
-            kernelsysconfig.PhysicalDiskInfoMetricName,
-            kernelsysconfig.LogicalDiskInfoMetricName,
-        )
+		eh.sysconfigHandler.GetCollector().RequestMetrics(
+			kernelsysconfig.PhysicalDiskInfoMetricName,
+			kernelsysconfig.LogicalDiskInfoMetricName,
+		)
 		eh.log.Debug().Msg("DiskIO collector enabled and attached.")
 	}
 
@@ -316,9 +316,9 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	// --- Fast Path ---
 	// CSwitch Event: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}, Opcode 36
 	// This is the fastest path, handling raw events directly.
-	if providerID.Equals(guids.ThreadKernelGUID) &&
+	if (providerID.Equals(guids.ThreadKernelGUID) ||
+		providerID.Equals(etw.SystemSchedulerProviderGuid)) &&
 		record.EventHeader.EventDescriptor.Opcode == 36 {
-		// TODO: add win 11 system providers
 
 		h.threadEventCount.Add(1)
 
@@ -335,7 +335,9 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 
 	// Registry Event: {ae53722e-c863-11d2-8659-00c04fa321a1}
 	// This is another high-frequency provider, handled via fast path.
-	if providerID.Equals(guids.RegistryKernelGUID) {
+	if providerID.Equals(guids.RegistryKernelGUID) ||
+		providerID.Equals(etw.SystemRegistryProviderGuid) {
+
 		h.registryEventCount.Add(1)
 
 		if h.registryHandler != nil {
@@ -344,6 +346,7 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 		return false // Stop processing, we've handled it.
 	}
 
+	// TODO: enable when I finish porting al collectors to the raw handler
 	// eventID := record.EventID()
 	// // Route the rest of the registered raw events
 	// if handlers, ok := h.routeMap[providerID]; ok {
