@@ -186,10 +186,10 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		prometheus.MustRegister(collector)
 
 		// Request initial metrics for physical and logical disks.
-		kernelsysconfig.GetGlobalSystemConfigCollector().RequestMetrics(
-			kernelsysconfig.PhysicalDiskInfoMetricName,
-			kernelsysconfig.LogicalDiskInfoMetricName,
-		)
+        eh.sysconfigHandler.GetCollector().RequestMetrics(
+            kernelsysconfig.PhysicalDiskInfoMetricName,
+            kernelsysconfig.LogicalDiskInfoMetricName,
+        )
 		eh.log.Debug().Msg("DiskIO collector enabled and attached.")
 	}
 

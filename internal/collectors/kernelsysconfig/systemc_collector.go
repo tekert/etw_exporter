@@ -47,33 +47,25 @@ type SysConfCollector struct {
 	registerOnce     sync.Once
 }
 
-var (
-	globalSystemConfigCollector *SysConfCollector
-	systemConfigOnce            sync.Once
-)
+// NewSystemConfigCollector creates a new system configuration collector.
+func NewSystemConfigCollector() *SysConfCollector {
+	return &SysConfCollector{
+		physicalDisks:    make(map[uint32]PhysicalDiskInfo),
+		logicalDisks:     make(map[uint32]LogicalDiskInfo),
+		log:              logger.NewLoggerWithContext("system_config_collector"),
+		requestedMetrics: make(map[string]bool),
 
-// GetGlobalSystemConfigCollector returns the singleton instance of the SystemConfigCollector.
-func GetGlobalSystemConfigCollector() *SysConfCollector {
-	systemConfigOnce.Do(func() {
-		globalSystemConfigCollector = &SysConfCollector{
-			physicalDisks:    make(map[uint32]PhysicalDiskInfo),
-			logicalDisks:     make(map[uint32]LogicalDiskInfo),
-			log:              logger.NewLoggerWithContext("system_config_collector"),
-			requestedMetrics: make(map[string]bool),
-
-			physicalDiskInfoDesc: prometheus.NewDesc(
-				PhysicalDiskInfoMetricName,
-				"Physical disk information",
-				[]string{"disk", "manufacturer"}, nil,
-			),
-			logicalDiskInfoDesc: prometheus.NewDesc(
-				LogicalDiskInfoMetricName,
-				"Logical disk information",
-				[]string{"disk", "drive_letter", "file_system"}, nil,
-			),
-		}
-	})
-	return globalSystemConfigCollector
+		physicalDiskInfoDesc: prometheus.NewDesc(
+			PhysicalDiskInfoMetricName,
+			"Physical disk information",
+			[]string{"disk", "manufacturer"}, nil,
+		),
+		logicalDiskInfoDesc: prometheus.NewDesc(
+			LogicalDiskInfoMetricName,
+			"Logical disk information",
+			[]string{"disk", "drive_letter", "file_system"}, nil,
+		),
+	}
 }
 
 // Describe implements prometheus.Collector.

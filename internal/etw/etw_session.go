@@ -86,11 +86,13 @@ func (s *SessionManager) Start() error {
 	// On Windows 10 SDK build 20348+ this is not needed, we can use System Config Provider
 	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
 	// So we use this workaround to capture SystemConfig events
-	s.log.Debug().Msg("Capturing SystemConfig events...")
-	if err := s.captureNtSystemConfigEvents(); err != nil {
-		return fmt.Errorf("failed to capture SystemConfig events: %w", err)
+	if !isSystemProviderSupported() {
+		s.log.Debug().Msg("Capturing SystemConfig events...")
+		if err := s.captureNtSystemConfigEvents(); err != nil {
+			return fmt.Errorf("failed to capture SystemConfig events: %w", err)
+		}
+		s.log.Debug().Msg("SystemConfig events captured")
 	}
-	s.log.Debug().Msg("SystemConfig events captured")
 
 	// Create sessions based on enabled provider groups
 	s.log.Debug().Msg("Setting up ETW sessions...")
@@ -143,7 +145,7 @@ func (s *SessionManager) Start() error {
 // This function is a workaround for older Windows versions where a dedicated
 // System Config provider is not available.
 func (s *SessionManager) captureNtSystemConfigEvents() error {
-	s.log.Trace().Msg("Creating temporary kernel session for SystemConfig events")
+	s.log.Debug().Msg("Creating temporary kernel session for SystemConfig events")
 
 	// Create a temporary kernel session to get SystemConfig events
 	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
@@ -331,7 +333,7 @@ func (s *SessionManager) setupSessions() error {
 			GUID:            *guids.MicrosoftWindowsKernelEventTracingGUID,
 			MatchAnyKeyword: 0x10, // ETW_KEYWORD_SESSION
 			Filters: []etw.ProviderFilter{
-				etw.NewEventIDFilter(true, 10, 11),
+				etw.NewEventIDFilter(true, 10, 11), // Session start/stop events
 			},
 		}
 		manifestProviders = append(manifestProviders, watcherProvider)
@@ -376,7 +378,7 @@ func (s *SessionManager) setupSessions() error {
 	}
 
 	for _, provider := range manifestProviders {
-		if err := s.manifestSession.EnableProvider(provider); err != nil {
+		if err := s.manifestSession.EnableProvider(provider); err != nil { // This starts the session if not already started
 			return fmt.Errorf("failed to enable provider %s: %w", provider.Name, err)
 		}
 		s.log.Debug().Str("provider", provider.Name).Msg("Enabled provider in manifest session")
@@ -532,6 +534,7 @@ func (s *SessionManager) startScrapeSafetyNet() {
 }
 
 // startStaleProcessCleanup runs a periodic task to remove stale process entries.
+// (compares against current process rundown)
 func (s *SessionManager) startStaleProcessCleanup() {
 	//	const cleanupInterval = 5 * time.Minute
 	const cleanupInterval = 5 * time.Minute

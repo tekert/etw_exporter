@@ -18,7 +18,7 @@ type Handler struct {
 // NewSystemConfigHandler creates a new system configuration event handler.
 func NewSystemConfigHandler() *Handler {
 	return &Handler{
-		collector: GetGlobalSystemConfigCollector(),
+		collector: NewSystemConfigCollector(),
 		log:       logger.NewLoggerWithContext("system_config_handler"),
 	}
 }
@@ -34,6 +34,10 @@ func (h *Handler) RegisterRoutes(router handlers.Router) {
 	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK, h.HandleSystemConfigPhyDisk)
 	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK, h.HandleSystemConfigLogDisk)
 	h.log.Debug().Msg("Registered global system config handler routes")
+}
+
+func (c *Handler) GetCollector() *SysConfCollector {
+	return c.collector
 }
 
 /*

@@ -59,6 +59,11 @@ var AllProviderGroups = []*ProviderGroup{
 				GUID:            *etw.SystemIoProviderGuid,
 				MatchAnyKeyword: etw.SYSTEM_IO_KW_DISK,
 			},
+			{
+				Name:            "SystemConfigProvider", // For disk info events
+				GUID:            *etw.SystemConfigProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_CONFIG_KW_STORAGE,
+			},
 		},
 		// --- Common ---
 		ManifestProviders: []etw.Provider{
