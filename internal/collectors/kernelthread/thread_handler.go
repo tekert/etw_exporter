@@ -16,28 +16,11 @@ import (
 )
 
 // Handler handles thread events and acts as a mediator.
-// This collector processes ETW events from the NT Kernel Logger (CSwitch) provider
-// and integrates with a custom Prometheus collector for optimal performance.
-//
-// Provider Information:
-// - GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-// - Name: NT Kernel Logger (CSwitch)
-// - Description: Kernel thread events including context switches, thread lifecycle
-//
-// Supported Event Types:
-// - EventType 36: CSwitch (Context Switch) - Thread scheduling events
-// - EventType 50: ReadyThread - Thread ready for execution events
-// - EventType 1,2,3,4: Thread start/end events
-//
-// The collector maintains low cardinality by aggregating metrics and using the
-// custom collector pattern.
 type Handler struct {
 	lastCpuSwitch []atomic.Int64
 	stateManager  *statemanager.KernelStateManager
 	collector     *ThreadCollector // Can be nil
 	log           *phusluadapter.SampledLogger
-
-	//collector ThreadCollectorType // Can be nil
 }
 
 // NewThreadHandler creates a new thread collector instance with custom collector integration.
