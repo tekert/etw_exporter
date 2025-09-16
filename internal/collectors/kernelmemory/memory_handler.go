@@ -39,7 +39,12 @@ func (c *Handler) AttachCollector(collector *MemCollector) {
 // RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
 	// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
-	router.AddRoute(*guids.PageFaultKernelGUID, 32, h.HandleMofHardPageFaultEvent) // HardFault
+	// Provider: System Interrupt Provider (Win11+) ({9e814aad-3204-11d2-9a82-006008a86939})
+	memoryRoutes := map[uint8]handlers.EventHandlerFunc{
+		32: h.HandleMofHardPageFaultEvent, // HardFault
+	}
+	handlers.RegisterRoutesForGUID(router, guids.PageFaultKernelGUID, memoryRoutes)
+	handlers.RegisterRoutesForGUID(router, etw.SystemMemoryProviderGuid, memoryRoutes)
 
 	h.log.Debug().Msg("Memory collector enabled and routes registered")
 }

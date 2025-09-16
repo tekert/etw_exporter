@@ -64,20 +64,23 @@ func (c *Handler) GetCustomCollector() *ThreadCollector {
 	return c.collector
 }
 
-// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
 	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
+	// Provider: System Scheduler ({9e814aad-3204-11d2-9a82-006008a86939})
+	// Define routes for ThreadKernelGUID
+	threadRoutes := map[uint8]handlers.EventHandlerFunc{
+		etw.EVENT_TRACE_TYPE_START:    h.HandleThreadStart, // ThreadStart
+		etw.EVENT_TRACE_TYPE_DC_START: h.HandleThreadStart, // ThreadRundown
+		etw.EVENT_TRACE_TYPE_DC_END:   h.HandleThreadStart, // ThreadRundownEnd (Go to Start to refresh)
+		etw.EVENT_TRACE_TYPE_END:      h.HandleThreadEnd,   // ThreadEnd
+		50:                            h.HandleReadyThread, // ReadyThread
+	}
+
+	handlers.RegisterRoutesForGUID(router, guids.ThreadKernelGUID, threadRoutes)          // < win 10
+	handlers.RegisterRoutesForGUID(router, etw.SystemSchedulerProviderGuid, threadRoutes) // >= win 11
+
 	// Note: CSwitch (36) is handled in the raw EventRecordCallback in the main event
 	// handler for maximum performance. A route is not registered for it here.
-
-	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_START, h.HandleThreadStart)    // ThreadStart
-	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, h.HandleThreadStart) // ThreadRundown
-	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, h.HandleThreadStart)   // ThreadRundownEnd (Go to Start to refresh)
-	router.AddRoute(*guids.ThreadKernelGUID, etw.EVENT_TRACE_TYPE_END, h.HandleThreadEnd)        // ThreadEnd
-
-	// Routes needed only for metrics collection
-	//router.AddRawRoute(*guids.ThreadKernelGUID, 36, h.HandleContextSwitchRaw) // CSwitch // hardcoded route for performance
-	router.AddRoute(*guids.ThreadKernelGUID, 50, h.HandleReadyThread) // ReadyThread
 }
 
 // HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.

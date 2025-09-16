@@ -31,8 +31,16 @@ func NewSystemConfigHandler() *Handler {
 
 // RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
-	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK, h.HandleSystemConfigPhyDisk)
-	router.AddRoute(*guids.SystemConfigGUID, etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK, h.HandleSystemConfigLogDisk)
+
+	// Provider: NT Kernel Logger (EventTraceConfig) ({01853a65-418f-4f36-aefc-dc0f1d2fd235})
+	configRoutes := map[uint8]handlers.EventHandlerFunc{
+		etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK: h.HandleSystemConfigPhyDisk,
+		etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK:  h.HandleSystemConfigLogDisk,
+	}
+
+	handlers.RegisterRoutesForGUID(router, guids.SystemConfigGUID, configRoutes)       // < win 10
+	handlers.RegisterRoutesForGUID(router, etw.SystemConfigProviderGuid, configRoutes) // >= win 11
+
 	h.log.Debug().Msg("Registered global system config handler routes")
 }
 

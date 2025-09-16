@@ -66,9 +66,12 @@ func (c *Handler) AttachCollector(collector *RegistryCollector) {
 
 // RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
+	// NOTE: These routes are not used and are handled on the fast path.
+
 	// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})
 	for i := 10; i <= 50; i++ {
 		router.AddRoute(*guids.RegistryKernelGUID, uint16(i), h.HandleRegistryEvent) // 10-33
+		router.AddRoute(*guids.SystemRegistryProviderGuid, uint16(i), h.HandleRegistryEvent) // 10-33
 	}
 }
 

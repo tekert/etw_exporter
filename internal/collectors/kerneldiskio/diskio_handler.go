@@ -85,6 +85,46 @@ func (h *Handler) RegisterRoutes(router handlers.Router) {
 	h.log.Debug().Msg("Disk I/O routes registered")
 }
 
+// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
+func (h *Handler) RegisterRoutes2(router handlers.Router) {
+	if true {
+		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271})
+		// Provider: System IO Provider ({9e814aad-3204-11d2-9a82-006008a86939}) - Win11+
+		diskIoRoutes := map[uint8]handlers.EventHandlerFunc{
+			etw.EVENT_TRACE_TYPE_IO_READ:  h.HandleDiskRead,  // DiskRead
+			etw.EVENT_TRACE_TYPE_IO_WRITE: h.HandleDiskWrite, // DiskWrite
+			etw.EVENT_TRACE_TYPE_IO_FLUSH: h.HandleDiskFlush, // DiskFlush
+		}
+		handlers.RegisterRoutesForGUID(router, guids.MicrosoftWindowsKernelDiskGUID, diskIoRoutes)
+	} else {
+		// Alterantive, not really needed:
+		// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
+		// Provider: System IO Provider ({9e814aad-3204-11d2-9a82-006008a86939}) - Win11+
+		diskIoRoutesRaw := map[uint8]handlers.RawEventHandlerFunc{
+			etw.EVENT_TRACE_TYPE_IO_READ:  h.HandleDiskReadMofRaw,  // DiskRead
+			etw.EVENT_TRACE_TYPE_IO_WRITE: h.HandleDiskWriteMofRaw, // DiskWrite
+			etw.EVENT_TRACE_TYPE_IO_FLUSH: h.HandleDiskFlushMofRaw, // DiskFlush
+		}
+		handlers.RegisterRawRoutesForGUID(router, guids.DiskIOKernelGUID, diskIoRoutesRaw)   // Win10
+		handlers.RegisterRawRoutesForGUID(router, etw.SystemIoProviderGuid, diskIoRoutesRaw) // Win11+
+	}
+
+	if false {
+		// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
+		// Provider: System IO Provider ({9e814aad-3204-11d2-9a82-006008a86939}) - Win11+
+		fileIoRoutes := map[uint8]handlers.EventHandlerFunc{
+			12: h.HandleFileCreate, // Create
+			14: h.HandleFileClose,  // Close
+			15: h.HandleFileRead,   // Read
+			16: h.HandleFileWrite,  // Write
+			26: h.HandleFileDelete, // DeletePath
+		}
+		handlers.RegisterRoutesForGUID(router, guids.MicrosoftWindowsKernelFileGUID, fileIoRoutes)
+	}
+
+	h.log.Debug().Msg("Disk I/O routes registered")
+}
+
 // Name returns the name of the collector.
 func (h *Handler) Name() string {
 	return "disk_io"

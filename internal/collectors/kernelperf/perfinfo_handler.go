@@ -69,18 +69,28 @@ func (c *Handler) AttachCollector(collector *PerfCollector) {
 // RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
 	// Provider: NT Kernel Logger (PerfInfo) ({ce1dbfb4-137e-4da6-87b0-3f59aa102cbc})
-	router.AddRoute(*guids.PerfInfoKernelGUID, 67, h.HandleISREvent)           // ISR
-	router.AddRoute(*guids.PerfInfoKernelGUID, 66, h.HandleDPCEvent)           // ThreadDPC
-	router.AddRoute(*guids.PerfInfoKernelGUID, 68, h.HandleDPCEvent)           // DPC
-	router.AddRoute(*guids.PerfInfoKernelGUID, 69, h.HandleDPCEvent)           // TimerDPC
-	router.AddRoute(*guids.PerfInfoKernelGUID, 46, h.HandleSampleProfileEvent) // SampleProfile
+	// Provider: System Interrupt Provider ({9e814aad-3204-11d2-9a82-006008a86939}) - Windows 11+
+	perfInfoRoutes := map[uint8]handlers.EventHandlerFunc{
+		67: h.HandleISREvent,           // ISR
+		66: h.HandleDPCEvent,           // ThreadDPC
+		68: h.HandleDPCEvent,           // DPC
+		69: h.HandleDPCEvent,           // TimerDPC
+		46: h.HandleSampleProfileEvent, // SampleProfile
+	}
+	handlers.RegisterRoutesForGUID(router, guids.PerfInfoKernelGUID, perfInfoRoutes)
+	handlers.RegisterRoutesForGUID(router, etw.SystemInterruptProviderGuid, perfInfoRoutes) // Win11+
 
 	// TODO: move these to image handler? make guid internal var?
 	// Provider: NT Kernel Logger (Image) ({2cb15d1d-5fc1-11d2-abe1-00a0c911f518})
-	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_LOAD, h.HandleImageLoadEvent)     // Image Load
-	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_START, h.HandleImageLoadEvent) // Image Rundown
-	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_DC_END, h.HandleImageLoadEvent)   // Image Rundown End
-	router.AddRoute(*guids.ImageKernelGUID, etw.EVENT_TRACE_TYPE_END, h.HandleImageUnloadEvent)    // Image Unload
+	// Provider: System Process Provider ({151f55dc-467d-471f-83b5-5f889d46ff66}) - Windows 11+
+	imageRoutes := map[uint8]handlers.EventHandlerFunc{
+		etw.EVENT_TRACE_TYPE_LOAD:     h.HandleImageLoadEvent,   // Image Load
+		etw.EVENT_TRACE_TYPE_DC_START: h.HandleImageLoadEvent,   // Image Rundown
+		etw.EVENT_TRACE_TYPE_DC_END:   h.HandleImageLoadEvent,   // Image Rundown End
+		etw.EVENT_TRACE_TYPE_END:      h.HandleImageUnloadEvent, // Image Unload
+	}
+	handlers.RegisterRoutesForGUID(router, guids.ImageKernelGUID, imageRoutes)
+	handlers.RegisterRoutesForGUID(router, etw.SystemProcessProviderGuid, imageRoutes) // Win11+
 
 	// PerfInfo also needs CSwitch events to finalize DPC durations. This is handled
 	// in the raw EventRecordCallback, which calls perfinfoHandler.HandleContextSwitchRaw.
@@ -153,7 +163,6 @@ func (h *Handler) HandleISREvent(helper *etw.EventRecordHelper) error {
 
 	return nil
 }
-
 
 // HandleDPCEvent processes Deferred Procedure Call (DPC) events to track DPC latency.
 //
@@ -337,26 +346,26 @@ func (h *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 // This handler collects information about loaded modules (drivers, executables, DLLs)
 // to resolve routine addresses from DPC/ISR events to a driver name.
 func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
-    // Extract image load properties using optimized methods
-    var imageBase uint64
-    var imageSize uint64
-    var fileName string
+	// Extract image load properties using optimized methods
+	var imageBase uint64
+	var imageSize uint64
+	var fileName string
 
-    // Extract properties using proper helper methods
-    if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
-        imageBase = base
-    }
-    if size, err := helper.GetPropertyUint("ImageSize"); err == nil {
-        imageSize = size
-    }
-    if name, err := helper.GetPropertyString("FileName"); err == nil {
-        fileName = name
-    }
+	// Extract properties using proper helper methods
+	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
+		imageBase = base
+	}
+	if size, err := helper.GetPropertyUint("ImageSize"); err == nil {
+		imageSize = size
+	}
+	if name, err := helper.GetPropertyString("FileName"); err == nil {
+		fileName = name
+	}
 
-    // Add the image to the central state manager's unified, high-performance store.
-    h.stateManager.AddImage(imageBase, imageSize, fileName)
+	// Add the image to the central state manager's unified, high-performance store.
+	h.stateManager.AddImage(imageBase, imageSize, fileName)
 
-    return nil
+	return nil
 }
 
 // HandleImageUnloadEvent processes image unload events to remove driver mappings.
