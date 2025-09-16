@@ -232,22 +232,61 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 		for p := 0; p < protocolMax; p++ {
 			protocolStr := protocolToString(p)
 			if data.bytesSent[p] > 0 {
-				ch <- prometheus.MustNewConstMetric(nc.bytesSentTotalDesc, prometheus.CounterValue, float64(data.bytesSent[p]), key.name, key.checksum, key.sessionID, protocolStr)
+				ch <- prometheus.MustNewConstMetric(
+					nc.bytesSentTotalDesc,
+					prometheus.CounterValue,
+					float64(data.bytesSent[p]),
+					key.name,
+					key.checksum,
+					key.sessionID,
+					protocolStr,
+				)
 			}
 			if data.bytesReceived[p] > 0 {
-				ch <- prometheus.MustNewConstMetric(nc.bytesReceivedTotalDesc, prometheus.CounterValue, float64(data.bytesReceived[p]), key.name, key.checksum, key.sessionID, protocolStr)
+				ch <- prometheus.MustNewConstMetric(
+					nc.bytesReceivedTotalDesc,
+					prometheus.CounterValue,
+					float64(data.bytesReceived[p]),
+					key.name,
+					key.checksum,
+					key.sessionID,
+					protocolStr,
+				)
 			}
 			if nc.config.ConnectionHealth {
 				if data.connectionsAttempted[p] > 0 {
-					ch <- prometheus.MustNewConstMetric(nc.connectionsAttemptedTotalDesc, prometheus.CounterValue, float64(data.connectionsAttempted[p]), key.name, key.checksum, key.sessionID, protocolStr)
+					ch <- prometheus.MustNewConstMetric(
+						nc.connectionsAttemptedTotalDesc,
+						prometheus.CounterValue,
+						float64(data.connectionsAttempted[p]),
+						key.name,
+						key.checksum,
+						key.sessionID,
+						protocolStr,
+					)
 				}
 				if data.connectionsAccepted[p] > 0 {
-					ch <- prometheus.MustNewConstMetric(nc.connectionsAcceptedTotalDesc, prometheus.CounterValue, float64(data.connectionsAccepted[p]), key.name, key.checksum, key.sessionID, protocolStr)
+					ch <- prometheus.MustNewConstMetric(
+						nc.connectionsAcceptedTotalDesc,
+						prometheus.CounterValue,
+						float64(data.connectionsAccepted[p]),
+						key.name,
+						key.checksum,
+						key.sessionID,
+						protocolStr,
+					)
 				}
 			}
 		}
 		if nc.config.RetransmissionRate && data.retransmissionsTotal > 0 {
-			ch <- prometheus.MustNewConstMetric(nc.retransmissionsTotalDesc, prometheus.CounterValue, float64(data.retransmissionsTotal), key.name, key.checksum, key.sessionID)
+			ch <- prometheus.MustNewConstMetric(
+				nc.retransmissionsTotalDesc,
+				prometheus.CounterValue,
+				float64(data.retransmissionsTotal),
+				key.name,
+				key.checksum,
+				key.sessionID,
+			)
 		}
 	}
 
