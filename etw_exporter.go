@@ -19,6 +19,8 @@ import (
 
 	etwmain "etw_exporter/internal/etw"
 	"etw_exporter/internal/etw/watcher"
+
+	"etw_exporter/internal/kernel/statemanager"
 )
 
 // ETWExporter encapsulates the core components of the application.
@@ -83,7 +85,21 @@ func (e *ETWExporter) setupETW() {
 func (e *ETWExporter) setupHTTPServer() {
 	e.log.Debug().Str("metrics_path", e.config.Server.MetricsPath).Msg("Setting up HTTP handlers")
 	mux := http.NewServeMux()
-	mux.Handle(e.config.Server.MetricsPath, promhttp.Handler())
+
+	// Create a handler that wraps the standard promhttp handler
+	// to trigger cleanup *after* a scrape is complete. This is the only reliable
+	// way to ensure cleanup happens after all collectors have finished their work,
+	// as the Prometheus client library may run collectors concurrently.
+	metricsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Serve the metrics to the client.
+		promhttp.Handler().ServeHTTP(w, r)
+
+		// Now that the scrape is fully complete and the response has been sent,
+		// trigger the coordinated cleanup of terminated entities.
+		statemanager.GetGlobalStateManager().PostScrapeCleanup()
+	})
+	mux.Handle(e.config.Server.MetricsPath, metricsHandler)
+
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`<html>
             <head><title>ETW Exporter</title></head>

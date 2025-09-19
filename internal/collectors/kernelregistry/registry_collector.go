@@ -15,6 +15,8 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
+// TODO: filter by registry key operation, result
+
 // RegistryCollector implements prometheus.Collector for registry related metrics.
 // It uses a single RWMutex to protect its internal maps, which is suitable for its
 // moderate event throughput.
@@ -30,6 +32,9 @@ type RegistryCollector struct {
 	// Per-process metrics, keyed by the unique process StartKey.
 	perProcessMetrics maps.ConcurrentMap[uint64, *processRegistryMetrics]
 
+	// Aggregation map pool
+	aggregationMapPool *sync.Pool
+
 	// Metric Descriptors
 	operationsTotalDesc        *prometheus.Desc
 	processOperationsTotalDesc *prometheus.Desc
@@ -43,8 +48,17 @@ type OperationKey struct {
 
 // processRegistryMetrics holds all registry metrics for a single process instance.
 type processRegistryMetrics struct {
-	mu         sync.RWMutex // Protects the Operations map
+	mu         sync.RWMutex
 	Operations map[OperationKey]*atomic.Int64
+}
+
+// aggregationKey is used for on-the-fly aggregation in the Collect method.
+type aggregationKey struct {
+	processName   string
+	imageChecksum uint32
+	sessionID     uint32
+	operation     string
+	result        string
 }
 
 // NewRegistryCollector creates a new registry metrics collector.
@@ -66,6 +80,12 @@ func NewRegistryCollector(config *config.RegistryConfig, sm *statemanager.Kernel
 			"Total number of registry operations per program.",
 			[]string{"process_name", "image_checksum", "session_id", "operation", "result"}, nil,
 		),
+	}
+
+	c.aggregationMapPool = &sync.Pool{
+		New: func() any {
+			return make(map[aggregationKey]int64, 1024)
+		},
 	}
 
 	// Register for post-scrape cleanup.
@@ -104,14 +124,14 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// --- Per-Program Metrics (with on-the-fly aggregation) ---
-	type aggregationKey struct {
-		processName   string
-		imageChecksum string
-		sessionID     string
-		operation     string
-		result        string
-	}
-	aggregatedMetrics := make(map[aggregationKey]int64)
+	aggregatedMetrics := c.aggregationMapPool.Get().(map[aggregationKey]int64)
+	defer func() {
+		// Clear map for reuse and return to pool.
+		for k := range aggregatedMetrics {
+			delete(aggregatedMetrics, k)
+		}
+		c.aggregationMapPool.Put(aggregatedMetrics)
+	}()
 
 	c.perProcessMetrics.Range(func(startKey uint64, metrics *processRegistryMetrics) bool {
 		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
@@ -119,8 +139,8 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 			for opKey, countPtr := range metrics.Operations {
 				key := aggregationKey{
 					processName:   procInfo.Name,
-					imageChecksum: "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-					sessionID:     strconv.FormatUint(uint64(procInfo.SessionID), 10),
+					imageChecksum: procInfo.ImageChecksum,
+					sessionID:     procInfo.SessionID,
 					operation:     opKey.Operation,
 					result:        opKey.Result,
 				}
@@ -137,12 +157,14 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(count),
 			key.processName,
-			key.imageChecksum,
-			key.sessionID,
+			"0x"+strconv.FormatUint(uint64(key.imageChecksum), 16),
+			strconv.FormatUint(uint64(key.sessionID), 10),
 			key.operation,
 			key.result,
 		)
 	}
+
+	c.log.Debug().Msg("Collected registry metrics")
 }
 
 // RecordRegistryOperation records a single registry operation.
@@ -181,8 +203,8 @@ func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, operation s
 			}
 			procMetrics.Operations[opKey].Add(1)
 			procMetrics.mu.Unlock()
-        }
-    }
+		}
+	}
 }
 
 // CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.

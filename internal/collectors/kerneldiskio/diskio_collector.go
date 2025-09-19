@@ -44,14 +44,28 @@ type processDiskMetrics struct {
 
 // processMetrics holds all disk I/O metrics for a single process instance.
 type processMetrics struct {
-	// PID is no longer stored here; startKey is the unique identifier.
 	mu    sync.RWMutex // Protects the Disks map below
 	Disks map[uint32]*processDiskMetrics
 }
 
+// aggregationKey is used for on-the-fly aggregation in the Collect method.
+type aggregationKey struct {
+	processName   string
+	imageChecksum uint32
+	sessionID     uint32
+	diskNumber    uint32
+}
+
+// aggregatedMetric holds aggregated metrics for a unique process signature.
+type aggregatedMetric struct {
+	ioCount      [opCount]int64
+	bytesRead    int64
+	bytesWritten int64
+}
+
 // DiskCollector implements the logic for collecting disk I/O metrics.
 type DiskCollector struct {
-	// System-wide metrics, using simple maps protected by the collector's mutex.
+	// System-wide metrics, keyed by disk number.
 	diskIOCount      map[uint32]*[opCount]*atomic.Int64 // disk -> [op] -> count
 	diskBytesRead    map[uint32]*atomic.Int64           // disk -> count
 	diskBytesWritten map[uint32]*atomic.Int64           // disk -> count
@@ -62,6 +76,9 @@ type DiskCollector struct {
 	// Synchronization for system-wide maps.
 	mu  sync.RWMutex
 	log *phusluadapter.SampledLogger
+
+	// Aggregation map pool
+	aggregationPool *sync.Pool
 
 	// Global state manager for process information.
 	stateManager *statemanager.KernelStateManager
@@ -120,6 +137,12 @@ func NewDiskIOCustomCollector(sm *statemanager.KernelStateManager) *DiskCollecto
 			"Total bytes written to disk per process and disk",
 			[]string{"process_name", "image_checksum", "session_id", "disk"}, nil,
 		),
+	}
+
+	collector.aggregationPool = &sync.Pool{
+		New: func() any {
+			return make(map[aggregationKey]*aggregatedMetric, 512)
+		},
 	}
 
 	// Register for post-scrape cleanup.
@@ -187,22 +210,15 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 
 	// --- Per-Process Metrics (with on-the-fly aggregation) ---
 
-	// Define a struct to hold aggregated metrics for a unique process signature.
-	type aggregatedMetric struct {
-		ioCount      [opCount]int64
-		bytesRead    int64
-		bytesWritten int64
-	}
-	// Define a struct for the aggregation key to avoid string formatting overhead.
-	type aggregationKey struct {
-		processName   string
-		imageChecksum uint32
-		sessionID     uint32
-		diskNumber    uint32
-	}
-
 	// This map will store the aggregated metrics, keyed by the program's identity.
-	aggregatedMetrics := make(map[aggregationKey]*aggregatedMetric)
+	aggregatedMetrics := c.aggregationPool.Get().(map[aggregationKey]*aggregatedMetric)
+	defer func() {
+		// Clear map for reuse and return to pool.
+		for k := range aggregatedMetrics {
+			delete(aggregatedMetrics, k)
+		}
+		c.aggregationPool.Put(aggregatedMetrics)
+	}()
 
 	c.perProcessMetrics.Range(func(startKey uint64, metrics *processMetrics) bool {
 		// Look up the process metadata from the state manager using the start key.
@@ -287,6 +303,7 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 	}
+	c.log.Debug().Msg("Collected disk I/O metrics")
 }
 
 // createDiskIoCounts initializes the maps and counters for a given disk number.

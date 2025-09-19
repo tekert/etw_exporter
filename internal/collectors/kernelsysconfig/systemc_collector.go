@@ -112,6 +112,8 @@ func (sc *SysConfCollector) Collect(ch chan<- prometheus.Metric) {
 			)
 		}
 	}
+
+	sc.log.Debug().Msg("Collected system configuration metrics")
 }
 
 // RequestMetrics allows other collectors to request that specific metrics be exposed.

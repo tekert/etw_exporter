@@ -263,6 +263,8 @@ func (c *PerfCollector) Collect(ch chan<- prometheus.Metric) {
 	if c.config.EnableSMIDetection {
 		c.collectSMIGaps(ch)
 	}
+
+	c.log.Debug().Msg("Collected performance metrics")
 }
 
 // collectISRToDPCLatencyHistogram creates the system-wide ISR to DPC latency histogram

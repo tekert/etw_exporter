@@ -2,6 +2,7 @@ package kernelnetwork
 
 import (
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -71,6 +72,9 @@ type NetCollector struct {
 	// Per-process metrics, keyed by the unique process StartKey.
 	perProcessMetrics maps.ConcurrentMap[uint64, *processMetrics]
 
+	// Aggregation map pool
+	aggregationPool *sync.Pool
+
 	// System-wide metrics that are not process-specific or have different keys.
 	// connectionsFailedTotal is a nested map: StartKey -> (protocol|failureCode) -> counter
 	connectionsFailedTotal maps.ConcurrentMap[uint64, maps.ConcurrentMap[uint32, *atomic.Uint64]]
@@ -90,6 +94,22 @@ type NetCollector struct {
 	trafficBytesTotalDesc *prometheus.Desc
 
 	retransmissionsTotalDesc *prometheus.Desc
+}
+
+// Used to collect and aggregate metrics before sending to Prometheus.
+type programKey struct {
+	name      string
+	checksum  uint32
+	sessionID uint32
+}
+
+// Used to collect and aggregate metrics before sending to Prometheus.
+type aggregatedMetrics struct {
+	bytesSent            [protocolMax]uint64
+	bytesReceived        [protocolMax]uint64
+	connectionsAttempted [protocolMax]uint64
+	connectionsAccepted  [protocolMax]uint64
+	retransmissionsTotal uint64
 }
 
 // NewNetworkCollector creates a new network collector with Prometheus metric descriptors.
@@ -116,6 +136,12 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 	// Initialize the atomic counters for system-wide traffic.
 	for i := range nc.trafficBytesTotal {
 		nc.trafficBytesTotal[i] = new(atomic.Uint64)
+	}
+
+	nc.aggregationPool = &sync.Pool{
+		New: func() any {
+			return make(map[programKey]*aggregatedMetrics, 256)
+		},
 	}
 
 	if config.ConnectionHealth {
@@ -185,26 +211,22 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	stateManager := nc.stateManager
 
 	// --- Per-Program Metrics (with on-the-fly aggregation) ---
-	type programKey struct {
-		name      string
-		checksum  string
-		sessionID string
-	}
-	type aggregatedMetrics struct {
-		bytesSent            [protocolMax]uint64
-		bytesReceived        [protocolMax]uint64
-		connectionsAttempted [protocolMax]uint64
-		connectionsAccepted  [protocolMax]uint64
-		retransmissionsTotal uint64
-	}
-	aggregated := make(map[programKey]*aggregatedMetrics)
+
+	aggregated := nc.aggregationPool.Get().(map[programKey]*aggregatedMetrics)
+	defer func() {
+		// Clear map for reuse and return to pool.
+		for k := range aggregated {
+			delete(aggregated, k)
+		}
+		nc.aggregationPool.Put(aggregated)
+	}()
 
 	nc.perProcessMetrics.Range(func(startKey uint64, metrics *processMetrics) bool {
 		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 			key := programKey{
 				name:      procInfo.Name,
-				checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-				sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+				checksum:  procInfo.ImageChecksum,
+				sessionID: procInfo.SessionID,
 			}
 
 			agg, exists := aggregated[key]
@@ -229,6 +251,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	})
 
 	for key, data := range aggregated {
+		checksumStr := "0x" + strconv.FormatUint(uint64(key.checksum), 16)
+		sessionIDStr := strconv.FormatUint(uint64(key.sessionID), 10)
 		for p := range protocolMax {
 			protocolStr := protocolToString(p)
 			if data.bytesSent[p] > 0 {
@@ -237,8 +261,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(data.bytesSent[p]),
 					key.name,
-					key.checksum,
-					key.sessionID,
+					checksumStr,
+					sessionIDStr,
 					protocolStr,
 				)
 			}
@@ -248,8 +272,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(data.bytesReceived[p]),
 					key.name,
-					key.checksum,
-					key.sessionID,
+					checksumStr,
+					sessionIDStr,
 					protocolStr,
 				)
 			}
@@ -260,8 +284,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 						prometheus.CounterValue,
 						float64(data.connectionsAttempted[p]),
 						key.name,
-						key.checksum,
-						key.sessionID,
+						checksumStr,
+						sessionIDStr,
 						protocolStr,
 					)
 				}
@@ -271,8 +295,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 						prometheus.CounterValue,
 						float64(data.connectionsAccepted[p]),
 						key.name,
-						key.checksum,
-						key.sessionID,
+						checksumStr,
+						sessionIDStr,
 						protocolStr,
 					)
 				}
@@ -284,8 +308,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(data.retransmissionsTotal),
 				key.name,
-				key.checksum,
-				key.sessionID,
+				checksumStr,
+				sessionIDStr,
 			)
 		}
 	}
@@ -298,17 +322,18 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 			protocol    string
 			failureCode uint16
 		}
+
 		aggregatedFailures := make(map[failureAggregationKey]uint64)
 
 		nc.connectionsFailedTotal.Range(func(startKey uint64, innerMap maps.ConcurrentMap[uint32, *atomic.Uint64]) bool {
 			var progKey programKey
 			if startKey == 0 {
-				progKey = programKey{name: "System", checksum: "0x0", sessionID: "0"}
+				progKey = programKey{name: "System", checksum: 0, sessionID: 0}
 			} else if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 				progKey = programKey{
 					name:      procInfo.Name,
-					checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-					sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+					checksum:  procInfo.ImageChecksum,
+					sessionID: procInfo.SessionID,
 				}
 			} else {
 				return true // Skip terminated process
@@ -335,8 +360,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(count),
 				key.name,
-				key.checksum,
-				key.sessionID,
+				"0x"+strconv.FormatUint(uint64(key.checksum), 16),
+				strconv.FormatUint(uint64(key.sessionID), 10),
 				key.protocol,
 				strconv.FormatUint(uint64(key.failureCode), 10))
 		}
@@ -364,6 +389,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 			}
 		}
 	}
+
+	nc.log.Debug().Msg("Collected Network metrics")
 }
 
 // getOrCreateProcessMetrics is a helper to retrieve or initialize the metrics struct for a process.

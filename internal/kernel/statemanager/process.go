@@ -39,6 +39,8 @@ func (pi *ProcessInfo) Clone() ProcessInfo {
 	}
 }
 
+// TODO: instead of mark for deletion, delete it and aggregate by name+checksum+sessionID?
+
 // --- Process Management ---
 
 // AddProcess adds or updates process information. If the process already exists,

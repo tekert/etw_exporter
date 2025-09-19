@@ -47,6 +47,7 @@ type ThreadCollector struct {
 	// During a scrape, the Collect method (reader) replaces this map with a new
 	// empty one and processes the old map's data. This is a form of double-buffering.
 	activeCsPerProcess map[uint64]int64
+	csPerProcessPool   *sync.Pool // Pool for the map above to reduce allocations
 	// Buffer for keys to be cleaned up post-scrape.
 	keysForCleanup map[uint64]struct{}
 	csMapMutex     sync.RWMutex // Protects pointer access to activeCsPerProcess and keysForCleanup
@@ -56,6 +57,9 @@ type ThreadCollector struct {
 	indexToStateKey     []ThreadStateKey
 
 	log *phusluadapter.SampledLogger
+
+	// Aggregation map pool
+	aggregationPool *sync.Pool
 
 	// Metric Descriptors
 	contextSwitchesPerCPUDesc     *prometheus.Desc
@@ -87,6 +91,13 @@ type IntervalStats struct {
 	Count   int64
 	Sum     float64
 	Buckets []int64 // Use a slice for O(1) index access on the hot path
+}
+
+// Used to collect and aggregate metrics before sending to Prometheus.
+type programKey struct {
+	name      string
+	checksum  uint32
+	sessionID uint32
 }
 
 // Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
@@ -145,11 +156,11 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 		stateManager:           sm,
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
-		activeCsPerProcess:     make(map[uint64]int64, 4096),
-		keysForCleanup:         make(map[uint64]struct{}),
-		threadStateCounters:    threadStateCounters,
-		indexToStateKey:        indexToStateKey,
-		log:                    logger.NewSampledLoggerCtx("thread_collector"),
+		// activeCsPerProcess is now initialized from the pool
+		keysForCleanup:      make(map[uint64]struct{}),
+		threadStateCounters: threadStateCounters,
+		indexToStateKey:     indexToStateKey,
+		log:                 logger.NewSampledLoggerCtx("thread_collector"),
 
 		// Initialize descriptors once
 		contextSwitchesPerCPUDesc: prometheus.NewDesc(
@@ -172,6 +183,19 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 			"Total count of thread state transitions by state and wait reason",
 			[]string{"state", "wait_reason"}, nil,
 		),
+	}
+
+	collector.csPerProcessPool = &sync.Pool{
+		New: func() any {
+			return make(map[uint64]int64, 4096)
+		},
+	}
+	collector.activeCsPerProcess = collector.csPerProcessPool.Get().(map[uint64]int64)
+
+	collector.aggregationPool = &sync.Pool{
+		New: func() any {
+			return make(map[programKey]int64, 512)
+		},
 	}
 
 	// Register the collector with the state manager for post-scrape cleanup.
@@ -200,6 +224,15 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 	// Therefore, no cleanup logic is needed here.
 
 	data := c.collectData()
+	defer func() {
+		// Return the snapshot map to the pool after we're done with it.
+		snapshot := data.ContextSwitchesPerProcess
+		// Clear map for reuse.
+		for k := range snapshot {
+			delete(snapshot, k)
+		}
+		c.csPerProcessPool.Put(snapshot)
+	}()
 
 	// Create context switches per CPU metrics
 	for cpu, count := range data.ContextSwitchesPerCPU {
@@ -212,20 +245,22 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// --- Per-Program Context Switch Metrics (with on-the-fly aggregation) ---
-	type programKey struct {
-		name      string
-		checksum  string
-		sessionID string
-	}
-	aggregatedSwitches := make(map[programKey]int64)
+	aggregatedSwitches := c.aggregationPool.Get().(map[programKey]int64)
+	defer func() {
+		// Clear map for reuse and return to pool.
+		for k := range aggregatedSwitches {
+			delete(aggregatedSwitches, k)
+		}
+		c.aggregationPool.Put(aggregatedSwitches)
+	}()
 	stateManager := c.stateManager
 
 	for startKey, count := range data.ContextSwitchesPerProcess {
 		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 			key := programKey{
 				name:      procInfo.Name,
-				checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-				sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+				checksum:  procInfo.ImageChecksum,
+				sessionID: procInfo.SessionID,
 			}
 			aggregatedSwitches[key] += count
 		}
@@ -237,8 +272,8 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 			prometheus.CounterValue,
 			float64(count),
 			key.name,
-			key.checksum,
-			key.sessionID,
+			"0x"+strconv.FormatUint(uint64(key.checksum), 16),
+			strconv.FormatUint(uint64(key.sessionID), 10),
 		)
 	}
 
@@ -271,6 +306,8 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 			stateKey.WaitReason,
 		)
 	}
+
+	c.log.Debug().Msg("Collected thread metrics")
 }
 
 // collectData creates a snapshot of current metrics data.
@@ -299,7 +336,7 @@ func (c *ThreadCollector) collectData() ThreadMetricsData {
 	// The current active map becomes the snapshot for this scrape.
 	csSnapshot = c.activeCsPerProcess
 	// The new active map is a fresh, empty map, effectively resetting the counters for the next interval.
-	c.activeCsPerProcess = make(map[uint64]int64, 4096)
+	c.activeCsPerProcess = c.csPerProcessPool.Get().(map[uint64]int64)
 
 	// The cleanup buffer is also swapped out.
 	keysToClean = c.keysForCleanup

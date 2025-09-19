@@ -21,6 +21,13 @@ type ProcessCollector struct {
 	processInfoDesc *prometheus.Desc
 }
 
+// Used to collect and aggregate metrics before sending to Prometheus.
+type programKey struct {
+	name      string
+	checksum  uint32
+	sessionID uint32
+}
+
 // NewProcessCollector creates a new process metadata collector.
 func NewProcessCollector(config *config.ProcessConfig, sm *statemanager.KernelStateManager) *ProcessCollector {
 	c := &ProcessCollector{
@@ -51,11 +58,6 @@ func (c *ProcessCollector) Collect(ch chan<- prometheus.Metric) {
 	stateManager := c.sm
 
 	// Use a map to ensure we only report each unique program once per scrape.
-	type programKey struct {
-		name      string
-		checksum  string
-		sessionID string
-	}
 	reportedPrograms := make(map[programKey]struct{})
 
 	// Iterate over all processes that were active at any point during the scrape interval.
@@ -65,8 +67,8 @@ func (c *ProcessCollector) Collect(ch chan<- prometheus.Metric) {
 
 		key := programKey{
 			name:      procInfo.Name,
-			checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-			sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+			checksum:  procInfo.ImageChecksum,
+			sessionID: procInfo.SessionID,
 		}
 
 		// If we haven't created an info metric for this program signature yet, create one.
@@ -76,11 +78,14 @@ func (c *ProcessCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.GaugeValue,
 				1,
 				key.name,
-				key.checksum,
-				key.sessionID,
+				"0x"+strconv.FormatUint(uint64(key.checksum), 16),
+				strconv.FormatUint(uint64(key.sessionID), 10),
 			)
 			reportedPrograms[key] = struct{}{}
 		}
 		return true // Continue iteration
 	})
+
+	c.log.Debug().Int("unique_programs_reported", len(reportedPrograms)).
+		Msg("Collected process info metrics")
 }

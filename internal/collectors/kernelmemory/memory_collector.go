@@ -2,6 +2,7 @@ package kernelmemory
 
 import (
 	"strconv"
+	"sync"
 	"sync/atomic"
 
 	"etw_exporter/internal/config"
@@ -28,8 +29,17 @@ type MemCollector struct {
 	hardPageFaultsTotal      *atomic.Uint64
 	hardPageFaultsPerProcess maps.ConcurrentMap[uint64, *processFaultData] // key: StartKey
 
+	aggregationPool *sync.Pool
+
 	hardPageFaultsTotalDesc      *prometheus.Desc
 	hardPageFaultsPerProcessDesc *prometheus.Desc
+}
+
+// Used to collect and aggregate metrics before sending to Prometheus.
+type programKey struct {
+	name      string
+	checksum  uint32
+	sessionID uint32
 }
 
 // NewMemoryCollector creates a new memory metrics collector.
@@ -40,6 +50,13 @@ func NewMemoryCollector(config *config.MemoryConfig, sm *statemanager.KernelStat
 		log:                      logger.NewSampledLoggerCtx("memory_collector"),
 		hardPageFaultsTotal:      new(atomic.Uint64),
 		hardPageFaultsPerProcess: maps.NewConcurrentMap[uint64, *processFaultData](),
+	}
+
+	c.aggregationPool = &sync.Pool{
+		New: func() any {
+			// Pre-size the map assuming a reasonable number of unique processes.
+			return make(map[programKey]uint64, 256)
+		},
 	}
 
 	c.hardPageFaultsTotalDesc = prometheus.NewDesc(
@@ -78,20 +95,23 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 
 	if c.config.EnablePerProcess {
 		// --- Per-Program Metrics (with on-the-fly aggregation) ---
-		type programKey struct {
-			name      string
-			checksum  string
-			sessionID string
-		}
-		aggregatedFaults := make(map[programKey]uint64)
+		aggregatedFaults := c.aggregationPool.Get().(map[programKey]uint64)
+		defer func() {
+			// Clear map for reuse and return to pool.
+			for k := range aggregatedFaults {
+				delete(aggregatedFaults, k)
+			}
+			c.aggregationPool.Put(aggregatedFaults)
+		}()
+
 		stateManager := c.stateManager
 
 		c.hardPageFaultsPerProcess.Range(func(startKey uint64, data *processFaultData) bool {
 			if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
 				key := programKey{
 					name:      procInfo.Name,
-					checksum:  "0x" + strconv.FormatUint(uint64(procInfo.ImageChecksum), 16),
-					sessionID: strconv.FormatUint(uint64(procInfo.SessionID), 10),
+					checksum:  procInfo.ImageChecksum,
+					sessionID: procInfo.SessionID,
 				}
 				aggregatedFaults[key] += data.Counter.Load()
 			}
@@ -104,11 +124,13 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(count),
 				key.name,
-				key.checksum,
-				key.sessionID,
+				"0x"+strconv.FormatUint(uint64(key.checksum), 16),
+				strconv.FormatUint(uint64(key.sessionID), 10),
 			)
 		}
 	}
+
+	c.log.Debug().Msg("Collected memory metrics")
 }
 
 // ProcessHardPageFaultEvent increments the hard page fault counters.

@@ -228,13 +228,6 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		eh.log.Debug().Msg("Registry collector enabled (raw handling)")
 	}
 
-	// --- Sentinel Collector Registration ---
-	// This collector MUST be registered LAST. Its purpose is to trigger a cleanup
-	// of terminated entities in the KernelStateManager AFTER all other collectors
-	// have completed their scrape.
-	prometheus.MustRegister(statemanager.NewStateCleanupCollector())
-	eh.log.Debug().Msg("Registered post-scrape state cleanup collector")
-
 	eh.log.Debug().Int("total_routes", len(eh.routeMap)).Msg("Event handler initialized")
 	return eh
 }

@@ -9,7 +9,6 @@ import (
 	"etw_exporter/internal/logger"
 	"etw_exporter/internal/maps"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
@@ -132,37 +131,10 @@ func (sm *KernelStateManager) ApplyConfig(cfg *config.CollectorConfig) {
 	sm.log.Info().Int("patterns", len(sm.processNameFilters)).Msg("Process filtering enabled with patterns.")
 }
 
-// --- Sentinel Collector ---
-
-// StateCleanupCollector is a sentinel collector that triggers cleanup after a scrape.
-// Its sole purpose is to be registered last in the Prometheus registry. Its Collect
-// method is called after all other collectors have finished, making it the perfect
-// hook to perform cleanup of terminated entities without creating race conditions.
-type StateCleanupCollector struct {
-	sm *KernelStateManager
-}
-
-// NewStateCleanupCollector creates a new sentinel collector.
-func NewStateCleanupCollector() *StateCleanupCollector {
-	return &StateCleanupCollector{
-		sm: GetGlobalStateManager(),
-	}
-}
-
-// Describe does nothing. It's a sentinel collector.
-func (c *StateCleanupCollector) Describe(ch chan<- *prometheus.Desc) {}
-
-// Collect triggers the post-scrape cleanup in the KernelStateManager.
-// This method is called by Prometheus during a scrape. By registering this
-// collector last, we ensure cleanup happens after all other collectors are done.
-func (c *StateCleanupCollector) Collect(ch chan<- prometheus.Metric) {
-	c.sm.PostScrapeCleanup()
-}
-
 // --- Coordinated Lifecycle Management ---
 
 // PostScrapeCleanup performs the actual deletion of entities that were marked for termination.
-// This is called by the sentinel collector AFTER a Prometheus scrape is complete.
+// This is called by the metrics HTTP handler AFTER a Prometheus scrape is complete.
 // It cleans up all entities currently marked for termination.
 func (sm *KernelStateManager) PostScrapeCleanup() {
 	sm.mu.Lock()
