@@ -559,7 +559,7 @@ func (s *SessionManager) startStaleProcessCleanup() {
 				continue
 			}
 
-			// 1. Trigger a process rundown to get events for all active processes.
+			// 1. Trigger a process rundown to refresh the `LastSeen` timestamp for all active processes.
 			if err := s.TriggerProcessRundown(); err != nil {
 				log.Error().Err(err).Msg("Skipping cleanup due to rundown failure")
 				continue
@@ -575,7 +575,8 @@ func (s *SessionManager) startStaleProcessCleanup() {
 				return // Exit the goroutine immediately.
 			}
 
-			// 3. Clean up processes that were not "seen" during the rundown.
+			// 3. Clean up processes that were not "seen" during the rundown (i.e., their
+			//    `LastSeen` timestamp is now older than the max age).
 			sm := s.eventHandler.GetStateManager()
 			sm.CleanupStaleProcesses(processMaxAge)
 			log.Debug().Msg("Ran stale process cleanup")

@@ -2,7 +2,6 @@ package kernelnetwork
 
 import (
 	"strconv"
-	"sync"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -10,7 +9,6 @@ import (
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
-	"etw_exporter/internal/maps"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
@@ -51,33 +49,19 @@ func protocolToString(p int) string {
 	}
 }
 
-// NetCollector implements the logic for collecting network-related metrics.
-type processMetrics struct {
-	BytesSent            [protocolMax]*atomic.Uint64
-	BytesReceived        [protocolMax]*atomic.Uint64
-	ConnectionsAttempted [protocolMax]*atomic.Uint64
-	ConnectionsAccepted  [protocolMax]*atomic.Uint64
-	RetransmissionsTotal *atomic.Uint64 // TCP-only, but kept here for simplicity.
-}
-
 // NetCollector implements prometheus.Collector for network-related metrics.
-// This collector is designed for high performance, using lock-free atomics and
-// integer-keyed concurrent maps to eliminate allocations on the hot path.
-// Metrics are created on each scrape to ensure data consistency.
+// This collector is designed for high performance, using lock-free atomics for
+// system-wide metrics and reading pre-aggregated data from the KernelStateManager
+// for per-process metrics.
 type NetCollector struct {
 	config       *config.NetworkConfig
 	stateManager *statemanager.KernelStateManager // Global state manager reference
 	log          *phusluadapter.SampledLogger
 
-	// Per-process metrics, keyed by the unique process StartKey.
-	perProcessMetrics maps.ConcurrentMap[uint64, *processMetrics]
+	// Per-process metrics are now managed and aggregated by the KernelStateManager.
+	// The perProcessMetrics and connectionsFailedTotal maps have been removed.
 
-	// Aggregation map pool
-	aggregationPool *sync.Pool
-
-	// System-wide metrics that are not process-specific or have different keys.
-	// connectionsFailedTotal is a nested map: StartKey -> (protocol|failureCode) -> counter
-	connectionsFailedTotal maps.ConcurrentMap[uint64, maps.ConcurrentMap[uint32, *atomic.Uint64]]
+	// System-wide metrics that are not process-specific.
 	// trafficBytesTotal is a pre-allocated slice for system-wide traffic counters.
 	// It is indexed by a composite key: `protocol*directionMax + direction`.
 	// This avoids allocations on the hot path that would occur with sync.Map and struct keys.
@@ -96,30 +80,12 @@ type NetCollector struct {
 	retransmissionsTotalDesc *prometheus.Desc
 }
 
-// Used to collect and aggregate metrics before sending to Prometheus.
-type programKey struct {
-	name      string
-	checksum  uint32
-	sessionID uint32
-}
-
-// Used to collect and aggregate metrics before sending to Prometheus.
-type aggregatedMetrics struct {
-	bytesSent            [protocolMax]uint64
-	bytesReceived        [protocolMax]uint64
-	connectionsAttempted [protocolMax]uint64
-	connectionsAccepted  [protocolMax]uint64
-	retransmissionsTotal uint64
-}
-
 // NewNetworkCollector creates a new network collector with Prometheus metric descriptors.
 func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelStateManager) *NetCollector {
 	nc := &NetCollector{
-		config:                 config,
-		stateManager:           sm,
-		log:                    logger.NewSampledLoggerCtx("network_collector"),
-		perProcessMetrics:      maps.NewConcurrentMap[uint64, *processMetrics](),
-		connectionsFailedTotal: maps.NewConcurrentMap[uint64, maps.ConcurrentMap[uint32, *atomic.Uint64]](),
+		config:       config,
+		stateManager: sm,
+		log:          logger.NewSampledLoggerCtx("network_collector"),
 
 		bytesSentTotalDesc: prometheus.NewDesc(
 			"etw_network_sent_bytes_total",
@@ -136,12 +102,6 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 	// Initialize the atomic counters for system-wide traffic.
 	for i := range nc.trafficBytesTotal {
 		nc.trafficBytesTotal[i] = new(atomic.Uint64)
-	}
-
-	nc.aggregationPool = &sync.Pool{
-		New: func() any {
-			return make(map[programKey]*aggregatedMetrics, 256)
-		},
 	}
 
 	if config.ConnectionHealth {
@@ -178,8 +138,8 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 		)
 	}
 
-	// Register for post-scrape cleanup.
-	sm.RegisterCleaner(nc)
+	// The collector no longer manages its own state, so it does not need to
+	// register as a PostScrapeCleaner.
 
 	return nc
 }
@@ -208,93 +168,59 @@ func (nc *NetCollector) Describe(ch chan<- *prometheus.Desc) {
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
 func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
-	stateManager := nc.stateManager
-
-	// --- Per-Program Metrics (with on-the-fly aggregation) ---
-
-	aggregated := nc.aggregationPool.Get().(map[programKey]*aggregatedMetrics)
-	defer func() {
-		// Clear map for reuse and return to pool.
-		for k := range aggregated {
-			delete(aggregated, k)
+	// --- Per-Program Metrics (reading from pre-aggregated state) ---
+	nc.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey, metrics *statemanager.AggregatedProgramMetrics) bool {
+		// Check if this program has any network metrics to report.
+		if metrics.Network == nil {
+			return true // Continue to next program
 		}
-		nc.aggregationPool.Put(aggregated)
-	}()
 
-	nc.perProcessMetrics.Range(func(startKey uint64, metrics *processMetrics) bool {
-		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
-			key := programKey{
-				name:      procInfo.Name,
-				checksum:  procInfo.ImageChecksum,
-				sessionID: procInfo.SessionID,
-			}
+		checksumStr := "0x" + strconv.FormatUint(uint64(key.ImageChecksum), 16)
+		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
+		netData := metrics.Network
 
-			agg, exists := aggregated[key]
-			if !exists {
-				agg = &aggregatedMetrics{}
-				aggregated[key] = agg
-			}
-
-			for p := 0; p < protocolMax; p++ {
-				agg.bytesSent[p] += metrics.BytesSent[p].Load()
-				agg.bytesReceived[p] += metrics.BytesReceived[p].Load()
-				if nc.config.ConnectionHealth {
-					agg.connectionsAttempted[p] += metrics.ConnectionsAttempted[p].Load()
-					agg.connectionsAccepted[p] += metrics.ConnectionsAccepted[p].Load()
-				}
-			}
-			if nc.config.RetransmissionRate {
-				agg.retransmissionsTotal += metrics.RetransmissionsTotal.Load()
-			}
-		}
-		return true
-	})
-
-	for key, data := range aggregated {
-		checksumStr := "0x" + strconv.FormatUint(uint64(key.checksum), 16)
-		sessionIDStr := strconv.FormatUint(uint64(key.sessionID), 10)
-		for p := range protocolMax {
+		for p := 0; p < protocolMax; p++ {
 			protocolStr := protocolToString(p)
-			if data.bytesSent[p] > 0 {
+			if netData.BytesSent[p] > 0 {
 				ch <- prometheus.MustNewConstMetric(
 					nc.bytesSentTotalDesc,
 					prometheus.CounterValue,
-					float64(data.bytesSent[p]),
-					key.name,
+					float64(netData.BytesSent[p]),
+					key.Name,
 					checksumStr,
 					sessionIDStr,
 					protocolStr,
 				)
 			}
-			if data.bytesReceived[p] > 0 {
+			if netData.BytesReceived[p] > 0 {
 				ch <- prometheus.MustNewConstMetric(
 					nc.bytesReceivedTotalDesc,
 					prometheus.CounterValue,
-					float64(data.bytesReceived[p]),
-					key.name,
+					float64(netData.BytesReceived[p]),
+					key.Name,
 					checksumStr,
 					sessionIDStr,
 					protocolStr,
 				)
 			}
 			if nc.config.ConnectionHealth {
-				if data.connectionsAttempted[p] > 0 {
+				if netData.ConnectionsAttempted[p] > 0 {
 					ch <- prometheus.MustNewConstMetric(
 						nc.connectionsAttemptedTotalDesc,
 						prometheus.CounterValue,
-						float64(data.connectionsAttempted[p]),
-						key.name,
+						float64(netData.ConnectionsAttempted[p]),
+						key.Name,
 						checksumStr,
 						sessionIDStr,
 						protocolStr,
 					)
 				}
-				if data.connectionsAccepted[p] > 0 {
+				if netData.ConnectionsAccepted[p] > 0 {
 					ch <- prometheus.MustNewConstMetric(
 						nc.connectionsAcceptedTotalDesc,
 						prometheus.CounterValue,
-						float64(data.connectionsAccepted[p]),
-						key.name,
+						float64(netData.ConnectionsAccepted[p]),
+						key.Name,
 						checksumStr,
 						sessionIDStr,
 						protocolStr,
@@ -302,70 +228,39 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 				}
 			}
 		}
-		if nc.config.RetransmissionRate && data.retransmissionsTotal > 0 {
+
+		if nc.config.RetransmissionRate && netData.RetransmissionsTotal > 0 {
 			ch <- prometheus.MustNewConstMetric(
 				nc.retransmissionsTotalDesc,
 				prometheus.CounterValue,
-				float64(data.retransmissionsTotal),
-				key.name,
+				float64(netData.RetransmissionsTotal),
+				key.Name,
 				checksumStr,
 				sessionIDStr,
 			)
 		}
-	}
+
+		if nc.config.ConnectionHealth {
+			for fKey, count := range netData.ConnectionsFailed {
+				protocol := int(fKey >> 16)
+				failureCode := uint16(fKey)
+				ch <- prometheus.MustNewConstMetric(
+					nc.connectionsFailedTotalDesc,
+					prometheus.CounterValue,
+					float64(count),
+					key.Name,
+					checksumStr,
+					sessionIDStr,
+					protocolToString(protocol),
+					strconv.FormatUint(uint64(failureCode), 10),
+				)
+			}
+		}
+
+		return true // Continue iteration
+	})
 
 	// --- System-Wide Metrics ---
-	if nc.config.ConnectionHealth {
-		// Aggregate connection failures
-		type failureAggregationKey struct {
-			programKey
-			protocol    string
-			failureCode uint16
-		}
-
-		aggregatedFailures := make(map[failureAggregationKey]uint64)
-
-		nc.connectionsFailedTotal.Range(func(startKey uint64, innerMap maps.ConcurrentMap[uint32, *atomic.Uint64]) bool {
-			var progKey programKey
-			if startKey == 0 {
-				progKey = programKey{name: "System", checksum: 0, sessionID: 0}
-			} else if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
-				progKey = programKey{
-					name:      procInfo.Name,
-					checksum:  procInfo.ImageChecksum,
-					sessionID: procInfo.SessionID,
-				}
-			} else {
-				return true // Skip terminated process
-			}
-
-			innerMap.Range(func(key uint32, val *atomic.Uint64) bool {
-				protocol := int(key >> 16)
-				failureCode := uint16(key) // Implicit truncation gets the lower 16 bits
-
-				aggKey := failureAggregationKey{
-					programKey:  progKey,
-					protocol:    protocolToString(protocol),
-					failureCode: failureCode,
-				}
-				aggregatedFailures[aggKey] += val.Load()
-				return true
-			})
-			return true
-		})
-
-		for key, count := range aggregatedFailures {
-			ch <- prometheus.MustNewConstMetric(
-				nc.connectionsFailedTotalDesc,
-				prometheus.CounterValue,
-				float64(count),
-				key.name,
-				"0x"+strconv.FormatUint(uint64(key.checksum), 16),
-				strconv.FormatUint(uint64(key.sessionID), 10),
-				key.protocol,
-				strconv.FormatUint(uint64(key.failureCode), 10))
-		}
-	}
 
 	// --- Protocol Distribution Metrics ---
 	if nc.config.ByProtocol {
@@ -393,29 +288,13 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	nc.log.Debug().Msg("Collected Network metrics")
 }
 
-// getOrCreateProcessMetrics is a helper to retrieve or initialize the metrics struct for a process.
-func (nc *NetCollector) getOrCreateProcessMetrics(startKey uint64) *processMetrics {
-	procMetrics, _ := nc.perProcessMetrics.LoadOrStore(startKey, func() *processMetrics {
-		pm := &processMetrics{
-			RetransmissionsTotal: new(atomic.Uint64),
-		}
-		for i := range protocolMax {
-			pm.BytesSent[i] = new(atomic.Uint64)
-			pm.BytesReceived[i] = new(atomic.Uint64)
-			pm.ConnectionsAttempted[i] = new(atomic.Uint64)
-			pm.ConnectionsAccepted[i] = new(atomic.Uint64)
-		}
-		return pm
-	})
-	return procMetrics
-}
-
 // RecordDataSent records bytes sent for a process and protocol.
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordDataSent(startKey uint64, protocol int, bytes uint32) {
-	if startKey > 0 && nc.stateManager.IsTrackedStartKey(startKey) {
-		metrics := nc.getOrCreateProcessMetrics(startKey)
-		metrics.BytesSent[protocol].Add(uint64(bytes))
+	if startKey > 0 {
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordDataSent(protocol, bytes)
+		}
 	}
 
 	if nc.config.ByProtocol {
@@ -428,9 +307,10 @@ func (nc *NetCollector) RecordDataSent(startKey uint64, protocol int, bytes uint
 // RecordDataReceived records bytes received for a process and protocol.
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordDataReceived(startKey uint64, protocol int, bytes uint32) {
-	if startKey > 0 && nc.stateManager.IsTrackedStartKey(startKey) {
-		metrics := nc.getOrCreateProcessMetrics(startKey)
-		metrics.BytesReceived[protocol].Add(uint64(bytes))
+	if startKey > 0 {
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordDataReceived(protocol, bytes)
+		}
 	}
 
 	if nc.config.ByProtocol {
@@ -443,74 +323,37 @@ func (nc *NetCollector) RecordDataReceived(startKey uint64, protocol int, bytes 
 // RecordConnectionAttempted records a connection attempt.
 // This is on the hot path and must be highly performant.
 func (nc *NetCollector) RecordConnectionAttempted(startKey uint64, protocol int) {
-	if nc.config.ConnectionHealth && startKey > 0 &&
-		nc.stateManager.IsTrackedStartKey(startKey) {
-
-		metrics := nc.getOrCreateProcessMetrics(startKey)
-		metrics.ConnectionsAttempted[protocol].Add(1)
+	if nc.config.ConnectionHealth && startKey > 0 {
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordConnectionAttempted(protocol)
+		}
 	}
 }
 
 // RecordConnectionAccepted records a connection acceptance.
 func (nc *NetCollector) RecordConnectionAccepted(startKey uint64, protocol int) {
-	if nc.config.ConnectionHealth && startKey > 0 &&
-		nc.stateManager.IsTrackedStartKey(startKey) {
-
-		metrics := nc.getOrCreateProcessMetrics(startKey)
-		metrics.ConnectionsAccepted[protocol].Add(1)
+	if nc.config.ConnectionHealth && startKey > 0 {
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordConnectionAccepted(protocol)
+		}
 	}
 }
 
 // RecordConnectionFailed records a connection failure.
 func (nc *NetCollector) RecordConnectionFailed(startKey uint64, protocol int, failureCode uint16) {
 	if nc.config.ConnectionHealth {
-		// We check for tracking only if startKey > 0. startKey 0 is system-level and always tracked for failures.
-		if startKey > 0 && !nc.stateManager.IsTrackedStartKey(startKey) {
-			return
+		// startKey 0 is used for system-level failures and is always tracked.
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordConnectionFailed(protocol, failureCode)
 		}
-
-		// Get or create the inner map for the startKey.
-		innerMap, _ := nc.connectionsFailedTotal.LoadOrStore(startKey, func() maps.ConcurrentMap[uint32, *atomic.Uint64] {
-			return maps.NewConcurrentMap[uint32, *atomic.Uint64]()
-		})
-
-		// Get or create the atomic counter for the specific failure type.
-		key := failureKey(protocol, failureCode)
-		counter, _ := innerMap.LoadOrStore(key, func() *atomic.Uint64 {
-			return new(atomic.Uint64)
-		})
-		counter.Add(1)
 	}
 }
 
 // RecordRetransmission records a TCP retransmission.
 func (nc *NetCollector) RecordRetransmission(startKey uint64) {
-	if nc.config.RetransmissionRate && startKey > 0 &&
-		nc.stateManager.IsTrackedStartKey(startKey) {
-
-		metrics := nc.getOrCreateProcessMetrics(startKey)
-		metrics.RetransmissionsTotal.Add(1)
-	}
-}
-
-// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
-// This method is called by the KernelStateManager after a scrape is complete to
-// allow the collector to safely clean up its internal state for terminated processes.
-func (nc *NetCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
-	cleanedCount := 0
-	for startKey := range terminatedProcs {
-		// Clean up the primary per-process map.
-		if _, deleted := nc.perProcessMetrics.LoadAndDelete(startKey); deleted {
-			cleanedCount++
+	if nc.config.RetransmissionRate && startKey > 0 {
+		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordRetransmission()
 		}
-
-		// Clean up the connection failures map, which is also keyed by StartKey.
-		if nc.config.ConnectionHealth {
-			nc.connectionsFailedTotal.Delete(startKey)
-		}
-	}
-
-	if cleanedCount > 0 {
-		nc.log.Debug().Int("count", cleanedCount).Msg("Cleaned up network counters for terminated processes")
 	}
 }

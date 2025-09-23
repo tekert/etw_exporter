@@ -55,37 +55,20 @@ func (c *ProcessCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect creates and sends the metrics on each scrape.
 func (c *ProcessCollector) Collect(ch chan<- prometheus.Metric) {
-	stateManager := c.sm
-
-	// Use a map to ensure we only report each unique program once per scrape.
-	reportedPrograms := make(map[programKey]struct{})
-
-	// Iterate over all processes that were active at any point during the scrape interval.
-	stateManager.RangeProcesses(func(p *statemanager.ProcessInfo) bool {
-		// We clone the process info to get a consistent snapshot.
-		procInfo := p.Clone()
-
-		key := programKey{
-			name:      procInfo.Name,
-			checksum:  procInfo.ImageChecksum,
-			sessionID: procInfo.SessionID,
-		}
-
-		// If we haven't created an info metric for this program signature yet, create one.
-		if _, reported := reportedPrograms[key]; !reported {
-			ch <- prometheus.MustNewConstMetric(
-				c.processInfoDesc,
-				prometheus.GaugeValue,
-				1,
-				key.name,
-				"0x"+strconv.FormatUint(uint64(key.checksum), 16),
-				strconv.FormatUint(uint64(key.sessionID), 10),
-			)
-			reportedPrograms[key] = struct{}{}
-		}
+	// The new aggregation model means we can iterate over the pre-aggregated
+	// map keys, which is much more efficient than iterating over all raw process
+	// instances. This inherently provides one entry per unique program.
+	c.sm.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey, metrics *statemanager.AggregatedProgramMetrics) bool {
+		ch <- prometheus.MustNewConstMetric(
+			c.processInfoDesc,
+			prometheus.GaugeValue,
+			1,
+			key.Name,
+			"0x"+strconv.FormatUint(uint64(key.ImageChecksum), 16),
+			strconv.FormatUint(uint64(key.SessionID), 10),
+		)
 		return true // Continue iteration
 	})
 
-	c.log.Debug().Int("unique_programs_reported", len(reportedPrograms)).
-		Msg("Collected process info metrics")
+	c.log.Debug().Msg("Collected process info metrics")
 }

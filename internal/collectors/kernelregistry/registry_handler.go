@@ -17,7 +17,6 @@ type Handler struct {
 	config          *config.RegistryConfig
 	stateManager    *statemanager.KernelStateManager
 	log             *phusluadapter.SampledLogger
-	opcodeMap       [256]string // Opcode lookup table, encapsulated within the handler.
 }
 
 // NewRegistryHandler creates a new registry handler.
@@ -28,32 +27,6 @@ func NewRegistryHandler(config *config.RegistryConfig, sm *statemanager.KernelSt
 		stateManager:    sm,
 		log:             logger.NewSampledLoggerCtx("registry_handler"),
 	}
-
-	// Initialize the opcode lookup table for this handler instance.
-	h.opcodeMap[10] = "create"
-	h.opcodeMap[11] = "open"
-	h.opcodeMap[12] = "delete"
-	h.opcodeMap[13] = "query"
-	h.opcodeMap[14] = "set_value"
-	h.opcodeMap[15] = "delete_value"
-	h.opcodeMap[16] = "query_value"
-	h.opcodeMap[17] = "enumerate_key"
-	h.opcodeMap[18] = "enumerate_value_key"
-	h.opcodeMap[19] = "query_multiple_value"
-	h.opcodeMap[20] = "set_information"
-	h.opcodeMap[21] = "flush"
-	h.opcodeMap[22] = "kcb_create"
-	h.opcodeMap[23] = "kcb_delete"
-	h.opcodeMap[24] = "kcb_rundown_begin"
-	h.opcodeMap[25] = "kcb_rundown_end"
-	h.opcodeMap[26] = "virtualize"
-	h.opcodeMap[27] = "close"
-	h.opcodeMap[28] = "set_security"
-	h.opcodeMap[29] = "query_security"
-	h.opcodeMap[30] = "commit"
-	h.opcodeMap[31] = "prepare"
-	h.opcodeMap[32] = "rollback"
-	h.opcodeMap[33] = "mount_hive"
 
 	return h
 }
@@ -70,7 +43,7 @@ func (h *Handler) RegisterRoutes(router handlers.Router) {
 
 	// Provider: NT Kernel Logger (Registry) ({ae53722e-c863-11d2-8659-00c04fa321a1})
 	for i := 10; i <= 50; i++ {
-		router.AddRoute(*guids.RegistryKernelGUID, uint16(i), h.HandleRegistryEvent) // 10-33
+		router.AddRoute(*guids.RegistryKernelGUID, uint16(i), h.HandleRegistryEvent)         // 10-33
 		router.AddRoute(*guids.SystemRegistryProviderGuid, uint16(i), h.HandleRegistryEvent) // 10-33
 	}
 }
@@ -167,14 +140,9 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 
 	opcode := er.EventHeader.EventDescriptor.Opcode
 
-	// Bounds check for the array lookup.
-	if int(opcode) >= len(h.opcodeMap) {
-		return nil
-	}
-
-	operation := h.opcodeMap[opcode]
-	if operation == "" {
-		// This opcode is not mapped, so we ignore it.
+	// Check if this is an opcode we are configured to track by looking it up
+	// in the authoritative array in the statemanager. An empty string means it's not tracked.
+	if statemanager.RegistryOpcodeToString[opcode] == "" {
 		return nil
 	}
 
@@ -193,7 +161,7 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 		return nil
 	}
 
-	h.customCollector.RecordRegistryOperation(startKey, operation, status)
+	h.customCollector.RecordRegistryOperation(startKey, opcode, status)
 
 	return nil
 }
@@ -213,14 +181,8 @@ func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
 
 	opcode := helper.EventRec.EventHeader.EventDescriptor.Opcode
 
-	// Bounds check for the array lookup.
-	if int(opcode) >= len(h.opcodeMap) {
-		return nil
-	}
-
-	operation := h.opcodeMap[opcode]
-	if operation == "" {
-		// This opcode is not mapped, so we ignore it.
+	// Check if this is an opcode we are configured to track.
+	if statemanager.RegistryOpcodeToString[opcode] == "" {
 		return nil
 	}
 
@@ -236,7 +198,7 @@ func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
 		return nil // Process not known, skip.
 	}
 
-	h.customCollector.RecordRegistryOperation(startKey, operation, uint32(status))
+	h.customCollector.RecordRegistryOperation(startKey, opcode, uint32(status))
 
 	return nil
 }

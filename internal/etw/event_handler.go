@@ -181,7 +181,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 
 	// Initialize enabled collectors and register their routes.
 	if eh.config.DiskIO.Enabled {
-		collector := kerneldiskio.NewDiskIOCustomCollector(eh.stateManager)
+		collector := kerneldiskio.NewDiskIOCustomCollector(&eh.config.DiskIO, eh.stateManager)
 		eh.diskHandler.AttachCollector(collector) // Attach it to the existing handler
 		prometheus.MustRegister(collector)
 
@@ -194,7 +194,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	}
 
 	if eh.config.ThreadCS.Enabled {
-		collector := kernelthread.NewThreadCSCollector(eh.stateManager)
+		collector := kernelthread.NewThreadCSCollector(&eh.config.ThreadCS, eh.stateManager)
 		eh.threadHandler.AttachCollector(collector) // Attach it to the existing handler
 		prometheus.MustRegister(collector)
 		eh.log.Debug().Msg("ThreadCS collector enabled and attached.")

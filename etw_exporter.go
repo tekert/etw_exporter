@@ -86,15 +86,16 @@ func (e *ETWExporter) setupHTTPServer() {
 	e.log.Debug().Str("metrics_path", e.config.Server.MetricsPath).Msg("Setting up HTTP handlers")
 	mux := http.NewServeMux()
 
-	// Create a handler that wraps the standard promhttp handler
-	// to trigger cleanup *after* a scrape is complete. This is the only reliable
-	// way to ensure cleanup happens after all collectors have finished their work,
-	// as the Prometheus client library may run collectors concurrently.
 	metricsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Serve the metrics to the client.
+		// 1. Aggregate all hot-path metrics into a warm-path snapshot.
+		// This is done once per scrape to provide a consistent view for all collectors.
+		statemanager.GetGlobalStateManager().AggregateMetrics()
+
+		// 2. Serve the metrics to the client using the standard Prometheus handler.
+		// All collectors will now read from the fresh snapshot created above.
 		promhttp.Handler().ServeHTTP(w, r)
 
-		// Now that the scrape is fully complete and the response has been sent,
+		// 3. Now that the scrape is fully complete and the response has been sent,
 		// trigger the coordinated cleanup of terminated entities.
 		statemanager.GetGlobalStateManager().PostScrapeCleanup()
 	})

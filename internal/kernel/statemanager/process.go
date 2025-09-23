@@ -6,8 +6,37 @@ import (
 	"time"
 )
 
+// ProcessData is the central "Process Control Block" for a single process instance.
+// It contains all state and metrics associated with that instance, organized into
+// specialized modules. It is the primary data structure for the hot path.
+type ProcessData struct {
+	Info ProcessInfo // Basic info: PID, Name, StartTime, etc.
+
+	// All modules are now pre-allocated for maximum hot-path performance.
+	// The entire ProcessData object is pooled to manage memory usage.
+	Disk     *DiskModule
+	Memory   *MemoryModule
+	Network  *NetworkModule
+	Registry *RegistryModule
+	Threads  *ThreadModule
+}
+
+// Reset clears the ProcessData object for reuse by the sync.Pool.
+// It calls Reset() on each sub-module to zero out its state.
+func (pd *ProcessData) Reset() {
+	// Reset all sub-modules to prepare the entire object for reuse.
+	pd.Disk.Reset()
+	pd.Memory.Reset()
+	pd.Network.Reset()
+	pd.Registry.Reset()
+	pd.Threads.Reset()
+
+	pd.Info.reset()
+}
+
 // ProcessInfo holds information about a process, including its name, start time,
-// and parent PID. It is protected by a mutex to allow for safe concurrent updates.
+// command line, and other metadata. It is designed to be thread-safe for concurrent
+// updates, with a focus on minimizing lock contention and memory allocations.
 type ProcessInfo struct {
 	PID           uint32
 	StartKey      uint64 // Uniquely identifies a process instance during a boot session. (it's not CreateTime)
@@ -19,6 +48,19 @@ type ProcessInfo struct {
 	SessionID     uint32
 	ImageChecksum uint32
 	mu            sync.Mutex
+}
+
+// reset clears the ProcessInfo struct for reuse.
+func (pi *ProcessInfo) reset() {
+	pi.PID = 0
+	pi.ParentPID = 0
+	pi.StartKey = 0
+	pi.StartTime = time.Time{}
+	pi.CreateTime = time.Time{}
+	pi.LastSeen = time.Time{}
+	pi.Name = ""
+	pi.SessionID = 0
+	pi.ImageChecksum = 0
 }
 
 // Clone creates a safe, deep copy of the ProcessInfo struct.
@@ -77,27 +119,29 @@ func (sm *KernelStateManager) AddProcess(pid uint32, startKey uint64, imageName 
 
 	// If a process with this start key already exists, just update its LastSeen timestamp.
 	// This is crucial for the stale process cleanup logic to work correctly with rundowns.
-	if p, exists := sm.processes.Load(startKey); exists {
-		p.mu.Lock()
-		p.LastSeen = eventTimestamp
-		p.mu.Unlock()
+	if p, exists := sm.instanceData.Load(startKey); exists {
+		p.Info.mu.Lock()
+		p.Info.LastSeen = eventTimestamp
+		p.Info.mu.Unlock()
 		return
 	}
 
-	// The process is new. Get a ProcessInfo object from the pool.
-	pInfo := sm.processInfoPool.Get().(*ProcessInfo)
-	pInfo.PID = pid
-	pInfo.StartKey = startKey
-	pInfo.Name = imageName
-	pInfo.StartTime = eventTimestamp
-	pInfo.CreateTime = createTime
-	pInfo.LastSeen = eventTimestamp
-	pInfo.ParentPID = parentPID
-	pInfo.SessionID = sessionID
-	pInfo.ImageChecksum = imageChecksum
+	// The process is new. Get a fully-formed ProcessData object from the pool.
+	pData := sm.processDataPool.Get().(*ProcessData)
+	pData.Reset() // Ensure the object and all its modules are clean before use.
 
-	// Atomically store the new process info.
-	sm.processes.Store(startKey, pInfo)
+	pData.Info.PID = pid
+	pData.Info.StartKey = startKey
+	pData.Info.Name = imageName
+	pData.Info.StartTime = eventTimestamp
+	pData.Info.CreateTime = createTime
+	pData.Info.LastSeen = eventTimestamp
+	pData.Info.ParentPID = parentPID
+	pData.Info.SessionID = sessionID
+	pData.Info.ImageChecksum = imageChecksum
+
+	// Atomically store the new process data.
+	sm.instanceData.Store(startKey, pData)
 
 	sm.log.Trace().
 		Uint32("pid", pid).
@@ -116,6 +160,9 @@ func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32, startKey uint64
 	if startKey == 0 {
 		return
 	}
+	
+	// Mark in the global terminated list for post-scrape cleanup by collectors
+	sm.terminatedProcesses.Store(startKey, time.Now())
 
 	// Atomically check if the current mapping for the PID still points to the
 	// startKey we are terminating. If it does, we can safely delete the mapping.
@@ -128,8 +175,6 @@ func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32, startKey uint64
 		return currentSK, true // Value does not match, keep it.
 	})
 
-	// Mark in the global terminated list for post-scrape cleanup by collectors.
-	sm.terminatedProcesses.Store(startKey, time.Now())
 	sm.log.Trace().Uint64("start_key", startKey).Msg("Process marked for deletion by StartKey")
 }
 
@@ -139,10 +184,10 @@ func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32, startKey uint64
 // It can resolve names for active processes.
 // If the process is not found, it returns a formatted "unknown" string and false.
 func (sm *KernelStateManager) GetProcessNameBySK(startKey uint64) (string, bool) {
-	if info, exists := sm.processes.Load(startKey); exists {
-		info.mu.Lock()
-		name := info.Name
-		info.mu.Unlock()
+	if pData, exists := sm.instanceData.Load(startKey); exists {
+		pData.Info.mu.Lock()
+		name := pData.Info.Name
+		pData.Info.mu.Unlock()
 		return name, true
 	}
 	return "unknown_sk_" + strconv.FormatUint(startKey, 10), false
@@ -151,19 +196,25 @@ func (sm *KernelStateManager) GetProcessNameBySK(startKey uint64) (string, bool)
 // GetProcessInfoBySK returns a clone of the ProcessInfo struct for a given start key.
 // This provides a consistent, thread-safe snapshot of the process's state.
 func (sm *KernelStateManager) GetProcessInfoBySK(startKey uint64) (ProcessInfo, bool) {
-	if info, exists := sm.processes.Load(startKey); exists {
-		return info.Clone(), true
+	if pData, exists := sm.instanceData.Load(startKey); exists {
+		return pData.Info.Clone(), true
 	}
 	return ProcessInfo{}, false
+}
+
+// GetProcessDataBySK is the new primary entry point for handlers to get the central
+// process data object. It is highly optimized for the hot path.
+func (sm *KernelStateManager) GetProcessDataBySK(startKey uint64) (*ProcessData, bool) {
+	return sm.instanceData.Load(startKey)
 }
 
 // GetKnownProcessNameBySK retrieves the name for a known/tracked process.
 // With the new filtering logic, if a process exists in the map, it is considered known.
 func (sm *KernelStateManager) GetKnownProcessNameBySK(startKey uint64) (string, bool) {
-	if info, exists := sm.processes.Load(startKey); exists {
-		info.mu.Lock()
-		name := info.Name
-		info.mu.Unlock()
+	if pData, exists := sm.instanceData.Load(startKey); exists {
+		pData.Info.mu.Lock()
+		name := pData.Info.Name
+		pData.Info.mu.Unlock()
 		return name, true
 	}
 	return "", false
@@ -215,16 +266,16 @@ func (sm *KernelStateManager) GetPIDFromStartKey(startKey uint64) (uint32, bool)
 // With the new filtering logic, this is equivalent to checking for the process's existence
 // in the main process map.
 func (sm *KernelStateManager) IsTrackedStartKey(startKey uint64) bool {
-	_, exists := sm.processes.Load(startKey)
+	_, exists := sm.instanceData.Load(startKey)
 	return exists
 }
 
 // RangeProcesses iterates over all active processes in the state manager.
 // The provided function is called for each process. If the function returns
 // false, the iteration stops.
-func (sm *KernelStateManager) RangeProcesses(f func(p *ProcessInfo) bool) {
-	sm.processes.Range(func(startKey uint64, p *ProcessInfo) bool {
-		// The ProcessInfo contains the correct, immutable PID and other metadata
+func (sm *KernelStateManager) RangeProcesses(f func(p *ProcessData) bool) {
+	sm.instanceData.Range(func(startKey uint64, p *ProcessData) bool {
+		// The ProcessData contains the correct, immutable PID and other metadata
 		// associated with its StartKey.
 		return f(p)
 	})

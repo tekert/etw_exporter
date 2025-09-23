@@ -63,30 +63,6 @@ func (c *Handler) AttachCollector(collector *DiskCollector) {
 
 // RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
 func (h *Handler) RegisterRoutes(router handlers.Router) {
-	// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271}) - MANIFEST
-	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_READ, h.HandleDiskRead)   // DiskRead
-	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, h.HandleDiskWrite) // DiskWrite
-	router.AddRoute(*guids.MicrosoftWindowsKernelDiskGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, h.HandleDiskFlush) // DiskFlush
-
-	// Provider: NT Kernel Logger (DiskIo) ({3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c}) - MOF
-	// These are now handled as raw events for testing. choose this or manifest, not both.
-	//addThreadMappingRoutes() // Ensure thread routes are added if not already.
-	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_READ, h.HandleDiskReadMofRaw)
-	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_WRITE, h.HandleDiskWriteMofRaw)
-	// eh.addRawRoute(*DiskIOKernelGUID, etw.EVENT_TRACE_TYPE_IO_FLUSH, h.HandleDiskFlushMofRaw)
-
-	// Provider: Microsoft-Windows-Kernel-File ({edd08927-9cc4-4e65-b970-c2560fb5c289})
-	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 12, h.HandleFileCreate) // Create
-	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 14, h.HandleFileClose)  // Close
-	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 15, h.HandleFileRead)   // Read
-	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 16, h.HandleFileWrite)  // Write
-	router.AddRoute(*guids.MicrosoftWindowsKernelFileGUID, 26, h.HandleFileDelete) // DeletePath
-
-	h.log.Debug().Msg("Disk I/O routes registered")
-}
-
-// RegisterRoutes tells the EventHandler which ETW events this handler is interested in.
-func (h *Handler) RegisterRoutes2(router handlers.Router) {
 	if true {
 		// Provider: Microsoft-Windows-Kernel-Disk ({c7bde69a-e1e0-4177-b6ef-283ad1525271})
 		// Provider: System IO Provider ({9e814aad-3204-11d2-9a82-006008a86939}) - Win11+

@@ -156,7 +156,7 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	// per-process metric if startKey is 0.
 
 	// Record context switch in custom collector
-	c.collector.RecordContextSwitch(cpu, newThreadID, startKey, interval)
+	c.collector.RecordContextSwitch(cpu, startKey, interval)
 
 	// Track thread state transitions using integer constants for maximum performance.
 	c.collector.RecordThreadStateTransition(StateWaiting, int8(oldThreadWaitReason))
@@ -225,7 +225,7 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	}
 
 	// Record context switch in custom collector (handles process name lookup internally)
-	c.collector.RecordContextSwitch(cpu, uint32(newThreadID), startKey, interval)
+	c.collector.RecordContextSwitch(cpu, startKey, interval)
 
 	// Track thread state transitions
 	c.collector.RecordThreadStateTransition(StateWaiting, int8(waitReason))

@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
+	"etw_exporter/internal/config"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
@@ -39,27 +40,21 @@ type ThreadStateKey struct {
 type ThreadCollector struct {
 	// Per-CPU data structures for lock-free access on the hot path.
 	// Slices are indexed by CPU number.
-	contextSwitchesPerCPU  []*atomic.Int64
-	contextSwitchIntervals []*IntervalStats
+	contextSwitchesPerCPU []*atomic.Int64
+	// contextSwitchIntervals uses atomic pointers for lock-free double-buffering.
+	contextSwitchIntervals []*atomic.Pointer[IntervalStats]
+	intervalStatsPool      sync.Pool
 
-	// activeCsPerProcess is the "active" buffer for context switch counts.
-	// The ETW handler (writer) writes to this map.
-	// During a scrape, the Collect method (reader) replaces this map with a new
-	// empty one and processes the old map's data. This is a form of double-buffering.
-	activeCsPerProcess map[uint64]int64
-	csPerProcessPool   *sync.Pool // Pool for the map above to reduce allocations
-	// Buffer for keys to be cleaned up post-scrape.
-	keysForCleanup map[uint64]struct{}
-	csMapMutex     sync.RWMutex // Protects pointer access to activeCsPerProcess and keysForCleanup
+	// Per-process context switch counting is now delegated to the KernelStateManager.
+	// The double-buffering mechanism (activeCsPerProcess, csPerProcessPool, keysForCleanup, csMapMutex)
+	// has been removed to simplify the collector and centralize state management.
 
 	// Optimized state tracking with pre-allocated counters to avoid allocations on the hot path.
 	threadStateCounters []*atomic.Int64
 	indexToStateKey     []ThreadStateKey
 
-	log *phusluadapter.SampledLogger
-
-	// Aggregation map pool
-	aggregationPool *sync.Pool
+	log    *phusluadapter.SampledLogger
+	config *config.ThreadCSConfig
 
 	// Metric Descriptors
 	contextSwitchesPerCPUDesc     *prometheus.Desc
@@ -86,36 +81,42 @@ type ProcessContextSwitches struct {
 }
 
 // IntervalStats holds statistical data for context switch intervals.
+// All fields use atomics to allow for lock-free updates on the hot path.
 type IntervalStats struct {
-	mu      sync.Mutex // Protects access to the fields below
-	Count   int64
-	Sum     float64
-	Buckets []int64 // Use a slice for O(1) index access on the hot path
+	Count   atomic.Int64
+	Sum     atomic.Uint64 // Sum of intervals in nanoseconds
+	Buckets []atomic.Int64
 }
 
-// Used to collect and aggregate metrics before sending to Prometheus.
-type programKey struct {
-	name      string
-	checksum  uint32
-	sessionID uint32
+// Reset clears the stats for reuse by the sync.Pool.
+func (is *IntervalStats) Reset() {
+	is.Count.Store(0)
+	is.Sum.Store(0)
+	for i := range is.Buckets {
+		is.Buckets[i].Store(0)
+	}
 }
 
 // Define histogram buckets in milliseconds (exponential buckets from 1μs to ~16.4ms)
 var csIntervalBuckets = prometheus.ExponentialBuckets(0.001, 2, 15)
 
 // NewThreadCSCollector creates a new thread metrics custom collector.
-func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector {
+func NewThreadCSCollector(config *config.ThreadCSConfig, sm *statemanager.KernelStateManager) *ThreadCollector {
 	numCPU := runtime.NumCPU()
 
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
 	csPerCPU := make([]*atomic.Int64, numCPU)
-	csIntervals := make([]*IntervalStats, numCPU)
+	csIntervals := make([]*atomic.Pointer[IntervalStats], numCPU)
 	for i := range numCPU {
 		csPerCPU[i] = new(atomic.Int64)
-		csIntervals[i] = &IntervalStats{
-			// Pre-allocate the slice to match the number of buckets
-			Buckets: make([]int64, len(csIntervalBuckets)),
+
+		// For each CPU, create an initial IntervalStats object and store it in an atomic pointer.
+		is := &IntervalStats{
+			Buckets: make([]atomic.Int64, len(csIntervalBuckets)),
 		}
+		ptr := new(atomic.Pointer[IntervalStats])
+		ptr.Store(is)
+		csIntervals[i] = ptr
 	}
 
 	// Pre-build structures for allocation-free thread state tracking.
@@ -154,10 +155,16 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 
 	collector := &ThreadCollector{
 		stateManager:           sm,
+		config:                 config,
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
-		// activeCsPerProcess is now initialized from the pool
-		keysForCleanup:      make(map[uint64]struct{}),
+		intervalStatsPool: sync.Pool{
+			New: func() any {
+				return &IntervalStats{
+					Buckets: make([]atomic.Int64, len(csIntervalBuckets)),
+				}
+			},
+		},
 		threadStateCounters: threadStateCounters,
 		indexToStateKey:     indexToStateKey,
 		log:                 logger.NewSampledLoggerCtx("thread_collector"),
@@ -185,21 +192,8 @@ func NewThreadCSCollector(sm *statemanager.KernelStateManager) *ThreadCollector 
 		),
 	}
 
-	collector.csPerProcessPool = &sync.Pool{
-		New: func() any {
-			return make(map[uint64]int64, 4096)
-		},
-	}
-	collector.activeCsPerProcess = collector.csPerProcessPool.Get().(map[uint64]int64)
-
-	collector.aggregationPool = &sync.Pool{
-		New: func() any {
-			return make(map[programKey]int64, 512)
-		},
-	}
-
-	// Register the collector with the state manager for post-scrape cleanup.
-	sm.RegisterCleaner(collector)
+	// The collector no longer manages per-process state directly, so it does not
+	// need to register as a PostScrapeCleaner.
 
 	return collector
 }
@@ -218,177 +212,100 @@ func (c *ThreadCollector) Describe(ch chan<- *prometheus.Desc) {
 // It is called by Prometheus on each scrape and must create new metrics each time
 // to avoid race conditions and ensure stale metrics are not exposed.
 func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
-	// The cleanup of thread and process mappings is now handled exclusively by the
-	// ProcessCleanupCollector, which runs after all other collectors have finished
-	// their scrapes. This ensures data consistency and prevents race conditions.
-	// Therefore, no cleanup logic is needed here.
-
-	data := c.collectData()
-	defer func() {
-		// Return the snapshot map to the pool after we're done with it.
-		snapshot := data.ContextSwitchesPerProcess
-		// Clear map for reuse.
-		for k := range snapshot {
-			delete(snapshot, k)
-		}
-		c.csPerProcessPool.Put(snapshot)
-	}()
+	// --- System-Wide Metrics ---
 
 	// Create context switches per CPU metrics
-	for cpu, count := range data.ContextSwitchesPerCPU {
-		ch <- prometheus.MustNewConstMetric(
-			c.contextSwitchesPerCPUDesc,
-			prometheus.CounterValue,
-			float64(count),
-			strconv.FormatUint(uint64(cpu), 10),
-		)
-	}
-
-	// --- Per-Program Context Switch Metrics (with on-the-fly aggregation) ---
-	aggregatedSwitches := c.aggregationPool.Get().(map[programKey]int64)
-	defer func() {
-		// Clear map for reuse and return to pool.
-		for k := range aggregatedSwitches {
-			delete(aggregatedSwitches, k)
-		}
-		c.aggregationPool.Put(aggregatedSwitches)
-	}()
-	stateManager := c.stateManager
-
-	for startKey, count := range data.ContextSwitchesPerProcess {
-		if procInfo, ok := stateManager.GetProcessInfoBySK(startKey); ok {
-			key := programKey{
-				name:      procInfo.Name,
-				checksum:  procInfo.ImageChecksum,
-				sessionID: procInfo.SessionID,
-			}
-			aggregatedSwitches[key] += count
+	for cpu, countPtr := range c.contextSwitchesPerCPU {
+		if count := countPtr.Load(); count > 0 {
+			ch <- prometheus.MustNewConstMetric(
+				c.contextSwitchesPerCPUDesc,
+				prometheus.CounterValue,
+				float64(count),
+				strconv.FormatUint(uint64(cpu), 10),
+			)
 		}
 	}
 
-	for key, count := range aggregatedSwitches {
-		ch <- prometheus.MustNewConstMetric(
-			c.contextSwitchesPerProcessDesc,
-			prometheus.CounterValue,
-			float64(count),
-			key.name,
-			"0x"+strconv.FormatUint(uint64(key.checksum), 16),
-			strconv.FormatUint(uint64(key.sessionID), 10),
-		)
-	}
+	// --- Per-Program Context Switch Metrics (reading from pre-aggregated state) ---
+	c.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey, metrics *statemanager.AggregatedProgramMetrics) bool {
+		if metrics.Threads != nil && metrics.Threads.ContextSwitches > 0 {
+			ch <- prometheus.MustNewConstMetric(
+				c.contextSwitchesPerProcessDesc,
+				prometheus.CounterValue,
+				float64(metrics.Threads.ContextSwitches),
+				key.Name,
+				"0x"+strconv.FormatUint(uint64(key.ImageChecksum), 16),
+				strconv.FormatUint(uint64(key.SessionID), 10),
+			)
+		}
+		return true // Continue iteration
+	})
 
 	// Create context switch interval histograms
-	for cpu, stats := range data.ContextSwitchIntervals {
+	for cpu, statsPtr := range c.contextSwitchIntervals {
+		// Get a new, clean stats object from the pool to swap in.
+		newStats := c.intervalStatsPool.Get().(*IntervalStats)
+		newStats.Reset()
+
+		// Atomically swap the new stats object with the old one.
+		// We now have exclusive ownership of oldStats and can read its values safely.
+		oldStats := statsPtr.Swap(newStats)
+
+		count := oldStats.Count.Load()
+		if count == 0 {
+			// If there was no activity, put both objects back in the pool.
+			c.intervalStatsPool.Put(newStats)
+			c.intervalStatsPool.Put(oldStats)
+			continue
+		}
+
+		// Convert the nanosecond sum to the millisecond sum required by the histogram.
+		sum := float64(oldStats.Sum.Load()) / 1_000_000.0
+
 		// Convert the individual bucket counts to the cumulative counts required by Prometheus.
 		buckets := make(map[float64]uint64, len(csIntervalBuckets))
 		var cumulativeCount uint64
-		for i, count := range stats.Buckets {
-			cumulativeCount += uint64(count)
+		for i := range oldStats.Buckets {
+			cumulativeCount += uint64(oldStats.Buckets[i].Load())
 			buckets[csIntervalBuckets[i]] = cumulativeCount
 		}
 
 		ch <- prometheus.MustNewConstHistogram(
 			c.contextSwitchIntervalsDesc,
-			uint64(stats.Count),
-			stats.Sum,
+			uint64(count),
+			sum,
 			buckets,
 			strconv.FormatUint(uint64(cpu), 10),
 		)
+
+		// After processing, return the old stats object to the pool for reuse.
+		c.intervalStatsPool.Put(oldStats)
 	}
 
 	// Create thread state metrics
-	for stateKey, count := range data.ThreadStates {
-		ch <- prometheus.MustNewConstMetric(
-			c.threadStatesDesc,
-			prometheus.CounterValue,
-			float64(count),
-			stateKey.State,
-			stateKey.WaitReason,
-		)
+	for i, key := range c.indexToStateKey {
+		if count := c.threadStateCounters[i].Load(); count > 0 {
+			ch <- prometheus.MustNewConstMetric(
+				c.threadStatesDesc,
+				prometheus.CounterValue,
+				float64(count),
+				key.State,
+				key.WaitReason,
+			)
+		}
 	}
 
 	c.log.Debug().Msg("Collected thread metrics")
 }
 
-// collectData creates a snapshot of current metrics data.
-// This method is called during metric collection to ensure consistent data.
-func (c *ThreadCollector) collectData() ThreadMetricsData {
-	data := ThreadMetricsData{
-		ContextSwitchesPerCPU:  make(map[uint16]int64),
-		ThreadStates:           make(map[ThreadStateKey]int64),
-		ContextSwitchIntervals: make(map[uint16]*IntervalStats), // Use pointer to avoid copying the lock
-	}
-
-	// Collect CPU context switches
-	for cpu, countPtr := range c.contextSwitchesPerCPU {
-		if countPtr != nil {
-			data.ContextSwitchesPerCPU[uint16(cpu)] = countPtr.Load()
-		}
-	}
-
-	var csSnapshot map[uint64]int64
-	var keysToClean map[uint64]struct{}
-
-	// --- Atomically swap buffers under a WRITE lock ---
-	// This is the only place that takes an exclusive lock. It is held for an
-	// extremely short duration to swap the map pointer and cleanup buffer.
-	c.csMapMutex.Lock()
-	// The current active map becomes the snapshot for this scrape.
-	csSnapshot = c.activeCsPerProcess
-	// The new active map is a fresh, empty map, effectively resetting the counters for the next interval.
-	c.activeCsPerProcess = c.csPerProcessPool.Get().(map[uint64]int64)
-
-	// The cleanup buffer is also swapped out.
-	keysToClean = c.keysForCleanup
-	c.keysForCleanup = make(map[uint64]struct{})
-	c.csMapMutex.Unlock()
-
-	// The collector now has exclusive access to the snapshot. Perform cleanup on it
-	// before processing. This is safe because no other goroutine can access this map.
-	for key := range keysToClean {
-		delete(csSnapshot, key)
-	}
-
-	// The cleaned snapshot is the data for this scrape.
-	data.ContextSwitchesPerProcess = csSnapshot
-
-	// Collect thread states from the pre-allocated slice
-	for i, key := range c.indexToStateKey {
-		count := c.threadStateCounters[i].Load()
-		if count > 0 {
-			data.ThreadStates[key] = count
-		}
-	}
-
-	// Collect context switch interval statistics
-	for cpu, stats := range c.contextSwitchIntervals {
-		if stats != nil {
-			stats.mu.Lock()
-			// Create a deep copy of the stats under the per-CPU lock
-			copiedStats := &IntervalStats{
-				Count:   stats.Count,
-				Sum:     stats.Sum,
-				Buckets: make([]int64, len(csIntervalBuckets)),
-			}
-			copy(copiedStats.Buckets, stats.Buckets)
-			stats.mu.Unlock()
-			data.ContextSwitchIntervals[uint16(cpu)] = copiedStats
-		}
-	}
-
-	return data
-}
-
 // RecordContextSwitch records a context switch event.
 //
 // Parameters:
-// - cpu: CPU number where the context switch occurred
-// - newThreadID: Thread ID of the thread being switched to
-// - startKey: The unique start key of the process
-// - interval: Time since last context switch on this CPU
+//   - cpu: CPU number where the context switch occurred
+//   - startKey: The unique start key of the process
+//   - interval: Time since last context switch on this CPU
 func (c *ThreadCollector) RecordContextSwitch(
 	cpu uint16,
-	newThreadID uint32,
 	startKey uint64,
 	interval time.Duration) {
 
@@ -397,31 +314,22 @@ func (c *ThreadCollector) RecordContextSwitch(
 		c.contextSwitchesPerCPU[cpu].Add(1)
 	}
 
-	// Record context switch per process (lock-free on hot path)
+	// Record context switch per process by delegating to the state manager.
 	if startKey > 0 {
-		// Only create metrics for processes that are tracked
-		if c.stateManager.IsTrackedStartKey(startKey) {
-			// Take a read lock to safely get the pointer to the active map.
-			// This is extremely fast and allows concurrent writers.
-			c.csMapMutex.RLock()
-			// The write to the map itself is safe because only this goroutine writes
-			// to the active map. The lock protects the pointer lookup.
-			c.activeCsPerProcess[startKey]++
-			c.csMapMutex.RUnlock()
+		if pData, ok := c.stateManager.GetProcessDataBySK(startKey); ok {
+			pData.RecordContextSwitch()
 		}
 	}
 
-	// Record context switch interval (fine-grained lock)
+	// Record context switch interval (now completely lock-free)
 	if interval > 0 && int(cpu) < len(c.contextSwitchIntervals) {
-		// Convert to microseconds for integer-based bit manipulation.
+		// Atomically load the current stats object for this CPU.
+		stats := c.contextSwitchIntervals[cpu].Load()
+
+		stats.Count.Add(1)
+		stats.Sum.Add(uint64(interval.Nanoseconds()))
+
 		intervalUs := uint64(interval / time.Microsecond)
-
-		stats := c.contextSwitchIntervals[cpu]
-		stats.mu.Lock()
-
-		stats.Count++
-		stats.Sum += float64(interval.Nanoseconds()) / 1_000_000.0
-
 		// Optimized bucket update using bit manipulation. This is an O(1) operation.
 		// For a value `n`, `bits.Len64(n)-1` is equivalent to `floor(log2(n))`,
 		// which directly gives the index into our power-of-two bucket array.
@@ -442,14 +350,13 @@ func (c *ThreadCollector) RecordContextSwitch(
 		}
 		// For intervalUs = 0, idx remains 0.
 
-		// Increment the single correct bucket. Prometheus handles the cumulative sum.
+		// Atomically increment the single correct bucket. Prometheus scrape handles the cumulative sum.
 		if idx < len(stats.Buckets) {
-			stats.Buckets[idx]++
+			stats.Buckets[idx].Add(1)
 		} else {
 			// If the interval is larger than our largest bucket, increment the last bucket (+Inf).
-			stats.Buckets[len(stats.Buckets)-1]++
+			stats.Buckets[len(stats.Buckets)-1].Add(1)
 		}
-		stats.mu.Unlock()
 	}
 }
 
@@ -484,24 +391,4 @@ func (c *ThreadCollector) RecordThreadCreation() {
 // This is a convenience method that records a "terminated" state transition.
 func (c *ThreadCollector) RecordThreadTermination() {
 	c.RecordThreadStateTransition(StateTerminated, 0)
-}
-
-// CleanupTerminatedProcesses implements the statemanager.PostScrapeCleaner interface.
-// This method is called by the KernelStateManager after a scrape is complete to
-// allow the collector to safely clean up its internal state for terminated processes.
-func (c *ThreadCollector) CleanupTerminatedProcesses(terminatedProcs map[uint64]uint32) {
-	cleanedCount := 0
-	// The map of terminated processes gives us StartKey -> PID.
-	// We take a full write lock here because we are modifying the cleanup map,
-	// which is part of the state swapped during collection.
-	c.csMapMutex.Lock()
-	for startKey := range terminatedProcs {
-		c.keysForCleanup[startKey] = struct{}{}
-		cleanedCount++
-	}
-	c.csMapMutex.Unlock()
-
-	if cleanedCount > 0 {
-		c.log.Debug().Int("count", cleanedCount).Msg("Buffered context switch counters for cleanup on next Collect")
-	}
 }
