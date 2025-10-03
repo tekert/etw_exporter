@@ -37,6 +37,12 @@ func newProcessCorrelationProvider() etw.Provider {
 	}
 }
 
+// newProcessCorrelationProvider is a helper to create a standard provider
+// for process name correlation, reducing code duplication.
+func newKernelProcessCorrelationProvider() uint32 {
+	return etw.EVENT_TRACE_FLAG_PROCESS | etw.EVENT_TRACE_FLAG_IMAGE_LOAD
+}
+
 // AllProviderGroups contains all available provider groups in a simple slice
 var AllProviderGroups = []*ProviderGroup{
 	// DiskIOGroup uses manifest providers for disk I/O events and file I/O events
@@ -46,7 +52,8 @@ var AllProviderGroups = []*ProviderGroup{
 		// Enable MOF-based DiskIO and Thread providers.
 		// EVENT_TRACE_FLAG_DISK_IO is for the legacy DiskIo provider which contains IssuingThreadId.
 		// EVENT_TRACE_FLAG_THREAD is required to map the IssuingThreadId back to a PID.
-		KernelFlags: etw.EVENT_TRACE_FLAG_DISK_IO | etw.EVENT_TRACE_FLAG_THREAD,
+		KernelFlags: etw.EVENT_TRACE_FLAG_DISK_IO | etw.EVENT_TRACE_FLAG_THREAD |
+			newKernelProcessCorrelationProvider(),
 		// --- Modern (Win11+) ---
 		SystemProviders: []etw.Provider{
 			{
@@ -101,7 +108,8 @@ var AllProviderGroups = []*ProviderGroup{
 		// --- Legacy (Win10) ---
 		KernelFlags: etw.EVENT_TRACE_FLAG_CSWITCH |
 			etw.EVENT_TRACE_FLAG_THREAD |
-			etw.EVENT_TRACE_FLAG_DISPATCHER,
+			etw.EVENT_TRACE_FLAG_DISPATCHER |
+			newKernelProcessCorrelationProvider(),
 		// --- Modern (Win11+) ---
 		SystemProviders: []etw.Provider{
 			{
@@ -160,7 +168,7 @@ var AllProviderGroups = []*ProviderGroup{
 	// NetworkGroup uses manifest providers for network I/O events
 	{
 		Name:        "network",
-		KernelFlags: 0, // No kernel flags - using manifest providers only
+		KernelFlags: 0 | newKernelProcessCorrelationProvider(),
 		ManifestProviders: []etw.Provider{
 			{
 				Name: "Microsoft-Windows-Kernel-Network",
@@ -183,7 +191,8 @@ var AllProviderGroups = []*ProviderGroup{
 		Name: "memory",
 		// --- Legacy (Win10) ---
 		KernelFlags: etw.EVENT_TRACE_FLAG_MEMORY_HARD_FAULTS | // For HardFault events
-			etw.EVENT_TRACE_FLAG_THREAD, // For TID->PID mapping
+			etw.EVENT_TRACE_FLAG_THREAD | // For TID->PID mapping
+			newKernelProcessCorrelationProvider(),
 		// --- Modern (Win11+) ---
 		SystemProviders: []etw.Provider{
 			{
@@ -209,7 +218,7 @@ var AllProviderGroups = []*ProviderGroup{
 	{
 		Name: "registry",
 		// --- Legacy (Win10) ---
-		KernelFlags: etw.EVENT_TRACE_FLAG_REGISTRY,
+		KernelFlags: etw.EVENT_TRACE_FLAG_REGISTRY | newKernelProcessCorrelationProvider(),
 		// --- Modern (Win11+) ---
 		SystemProviders: []etw.Provider{
 			{

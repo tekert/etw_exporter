@@ -19,6 +19,8 @@ import (
 
 // NOTE: use example: log = logger.NewSampledLoggerWithContext("event-processor")
 
+// TODO: mae log section flat, no log defaults or log_lib, make it simple
+
 var (
 	// mainSampler holds the global sampler for the application's hot-paths.
 	mainSampler logsampler.Sampler

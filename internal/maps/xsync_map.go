@@ -33,13 +33,15 @@ func (m *XSyncMap[K, V]) LoadAndDelete(key K) (V, bool) {
 	return m.m.LoadAndDelete(key)
 }
 
-// LoadOrStore uses the efficient Compute method for a factory-based get-or-create.
+// LoadOrStore uses the efficient LoadOrCompute method for a factory-based get-or-create.
 func (m *XSyncMap[K, V]) LoadOrStore(key K, valueFactory func() V) (V, bool) {
-	return m.m.Compute(key, func(oldValue V, loaded bool) (newValue V, op xsync.ComputeOp) {
-		if loaded {
-			return oldValue, xsync.CancelOp // Value exists, do nothing.
-		}
-		return valueFactory(), xsync.UpdateOp // Value doesn't exist, create and store.
+	// Use LoadOrCompute as it correctly returns the 'loaded' boolean that matches
+	// our interface contract, unlike the 'Compute' method which returns an 'ok'
+	// boolean (if the key exists AFTER the operation).
+	return m.m.LoadOrCompute(key, func() (V, bool) {
+		// The factory for LoadOrCompute returns (value, cancel).
+		// We never want to cancel, so we always return false.
+		return valueFactory(), false
 	})
 }
 

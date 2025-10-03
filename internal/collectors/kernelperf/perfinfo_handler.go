@@ -334,7 +334,7 @@ func (h *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 //   - ImageSize (uint32): Size of the loaded image in bytes.
 //   - ProcessId (uint32): ID of the process loading the image.
 //   - ImageChecksum (uint32): The checksum of the image.
-//   - TimeDateStamp (uint32): The timestamp from the image header.
+//   - TimeDateStamp (uint32): The timestamp the image was loaded (0 most of the time)
 //   - Reserved0 (uint32): Reserved.
 //   - DefaultBase (pointer): The default base address of the image.
 //   - Reserved1 (uint32): Reserved.
@@ -350,6 +350,9 @@ func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 	var imageBase uint64
 	var imageSize uint64
 	var fileName string
+	var processID uint32
+	var timeDateStamp uint32
+	var imageChecksum  uint32
 
 	// Extract properties using proper helper methods
 	if base, err := helper.GetPropertyUint("ImageBase"); err == nil {
@@ -361,9 +364,29 @@ func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 	if name, err := helper.GetPropertyString("FileName"); err == nil {
 		fileName = name
 	}
+	if pid, err := helper.GetPropertyUint("ProcessId"); err == nil {
+		processID = uint32(pid)
+	}
+	if ts, err := helper.GetPropertyUint("TimeDateStamp"); err == nil {
+		timeDateStamp = uint32(ts)
+	}
+	if ts, err := helper.GetPropertyUint("ImageChecksum"); err == nil {
+		imageChecksum = uint32(ts)
+	}
 
-	// Add the image to the central state manager's unified, high-performance store.
-	h.stateManager.AddImage(imageBase, imageSize, fileName)
+	// if processID == 34916 {
+	// 	h.log.Debug().
+	// 		Uint32("pid", processID).
+	// 		Uint64("base", imageBase).
+	// 		Uint64("size", imageSize).
+	// 		Str("file", fileName).
+	// 		Uint32("timestamp", timeDateStamp).
+	// 		Msg("Image Load event for executable")
+	// }
+
+	// The state manager's AddImage method now contains all logic for storing the image,
+	// reference counting, and triggering process enrichment for main executables.
+	h.stateManager.AddImage(processID, imageBase, imageSize, fileName, timeDateStamp, imageChecksum)
 
 	return nil
 }
@@ -411,7 +434,11 @@ func (h *Handler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 	// Mark the image for deletion in the central state manager.
 	// The actual removal will happen post-scrape, ensuring that any in-flight
 	// events can still resolve addresses to this image.
-	h.stateManager.MarkImageForDeletion(imageBase)
+	//h.stateManager.MarkImageForDeletion(imageBase)
+
+	// Decrement the image's reference count. The state manager will mark it for
+	// deletion if the count reaches zero.
+	h.stateManager.UnloadImage(imageBase)
 
 	return nil
 }

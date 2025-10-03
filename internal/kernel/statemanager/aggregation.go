@@ -1,11 +1,16 @@
 package statemanager
 
+import (
+	"etw_exporter/internal/windowsapi"
+)
+
 // ProgramAggregationKey defines the unique fields used to group process instances
 // into a single aggregated program (by name+hash) metric.
 type ProgramAggregationKey struct {
-	Name          string
-	ImageChecksum uint32
-	SessionID     uint32
+	Name        string
+	ServiceName string
+	PeChecksum  uint32
+	SessionID   uint32
 }
 
 // AggregatedProgramMetrics holds the aggregated metrics for a single program signature.
@@ -68,14 +73,43 @@ func (sm *KernelStateManager) AggregateMetrics() {
 	// 1. Get a fresh map from the pool for the new aggregation results.
 	newAggregatedData := sm.aggregationDataPool.Get().(map[ProgramAggregationKey]*AggregatedProgramMetrics)
 
-	// 2. Iterate over all active process instances on the hot path.
-	sm.instanceData.Range(func(startKey uint64, pData *ProcessData) bool {
+	// Track which service tags we've already attempted to resolve in this scrape.
+	// This prevents duplicate Windows API calls for the same tag across different processes.
+	unknownTagsAttempted := make(map[uint32]bool)
+
+	// 2. Iterate over all active process instances.
+	sm.processManager.RangeProcesses(func(pData *ProcessData) bool {
+		// --- Lazy Service Tag Resolution (COLD PATH) ---
+		// If this process has a SubProcessTag but no ServiceName, attempt to resolve it
+		// via Windows API. This only happens for services started after exporter launch.
+		pData.Info.mu.Lock()
+		tag := pData.Info.SubProcessTag
+		serviceName := pData.Info.ServiceName
+		pid := pData.Info.PID
+		pData.Info.mu.Unlock()
+
+		if tag > 0 && serviceName == "" && !unknownTagsAttempted[tag] {
+			unknownTagsAttempted[tag] = true
+			if resolvedName, err := windowsapi.QueryServiceNameByTag(pid, tag); err == nil {
+				GlobalDiagnostics.RecordServiceEnrichedAPI()
+				// Cache the resolved name for future threads with this tag
+				sm.systemState.RegisterServiceTag(tag, resolvedName)
+				// Apply to this process immediately for this scrape
+				pData.Info.mu.Lock()
+				if pData.Info.ServiceName == "" {
+					pData.Info.ServiceName = resolvedName
+				}
+				pData.Info.mu.Unlock()
+			}
+		}
+		// --- End Service Tag Resolution ---
 		// Create the aggregation key from the process's static info.
 		pData.Info.mu.Lock()
 		key := ProgramAggregationKey{
-			Name:          pData.Info.Name,
-			ImageChecksum: pData.Info.ImageChecksum,
-			SessionID:     pData.Info.SessionID,
+			Name:        pData.Info.Name,
+			ServiceName: pData.Info.ServiceName,
+			PeChecksum:  pData.Info.UniqueHash,
+			SessionID:   pData.Info.SessionID,
 		}
 		pData.Info.mu.Unlock()
 
@@ -116,11 +150,14 @@ func (sm *KernelStateManager) AggregateMetrics() {
 
 		// --- Aggregate Memory Module ---
 		if memModule := pData.Memory; memModule != nil {
-			// Lazily initialize the aggregated memory module.
-			if aggMetrics.Memory == nil {
-				aggMetrics.Memory = &AggregatedMemoryMetrics{}
+			count := memModule.Metrics.HardPageFaults.Load()
+			if count > 0 {
+				// Lazily initialize the aggregated memory module only if there's data.
+				if aggMetrics.Memory == nil {
+					aggMetrics.Memory = &AggregatedMemoryMetrics{}
+				}
+				aggMetrics.Memory.HardPageFaults += count
 			}
-			aggMetrics.Memory.HardPageFaults += memModule.Metrics.HardPageFaults.Load()
 		}
 
 		// --- Aggregate Network Module ---
@@ -193,17 +230,15 @@ func (sm *KernelStateManager) AggregateMetrics() {
 
 	// 4. Clear the old map and return it to the pool for reuse in the next scrape.
 	if oldAggregatedData != nil {
-		for k := range oldAggregatedData {
-			delete(oldAggregatedData, k)
-		}
+		clear(oldAggregatedData)
 		sm.aggregationDataPool.Put(oldAggregatedData)
 	}
 }
 
 // RangeAggregatedMetrics allows a collector to safely iterate over the most recently
 // aggregated program metrics. The lock ensures the map isn't swapped during iteration.
-func (sm *KernelStateManager) RangeAggregatedMetrics(f func(key ProgramAggregationKey,
-	metrics *AggregatedProgramMetrics) bool) {
+func (sm *KernelStateManager) RangeAggregatedMetrics(
+	f func(key ProgramAggregationKey, metrics *AggregatedProgramMetrics) bool) {
 
 	sm.aggregationMu.Lock()
 	data := sm.aggregatedData

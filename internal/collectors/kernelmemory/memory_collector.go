@@ -47,7 +47,7 @@ func NewMemoryCollector(config *config.MemoryConfig, sm *statemanager.KernelStat
 		c.hardPageFaultsPerProcessDesc = prometheus.NewDesc(
 			"etw_memory_hard_pagefaults_per_process_total",
 			"Total hard page faults by program.",
-			[]string{"process_name", "image_checksum", "session_id"}, nil)
+			[]string{"process_name", "service_name", "pe_checksum", "session_id"}, nil)
 	}
 
 	// The collector no longer manages instance state, so it doesn't need to be a cleaner.
@@ -73,19 +73,24 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 
 	if c.config.EnablePerProcess {
 		// --- Per-Program Metrics (reading from pre-aggregated state) ---
-		c.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey, metrics *statemanager.AggregatedProgramMetrics) bool {
+		c.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey,
+			metrics *statemanager.AggregatedProgramMetrics) bool {
+
 			// Check if this program has any memory metrics to report.
 			if metrics.Memory == nil || metrics.Memory.HardPageFaults == 0 {
 				return true // Continue to next program
 			}
 
+			imageChecksumHex := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
+			sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 			ch <- prometheus.MustNewConstMetric(
 				c.hardPageFaultsPerProcessDesc,
 				prometheus.CounterValue,
 				float64(metrics.Memory.HardPageFaults),
 				key.Name,
-				"0x"+strconv.FormatUint(uint64(key.ImageChecksum), 16),
-				strconv.FormatUint(uint64(key.SessionID), 10),
+				key.ServiceName,
+				imageChecksumHex,
+				sessionIDStr,
 			)
 			return true // Continue iteration
 		})
@@ -94,15 +99,41 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 	c.log.Debug().Msg("Collected memory metrics")
 }
 
-// ProcessHardPageFaultEvent increments the hard page fault counters.
-// This is now a thin wrapper that delegates the actual work to the KernelStateManager.
-func (c *MemCollector) ProcessHardPageFaultEvent(startKey uint64) {
-	c.hardPageFaultsTotal.Add(1)
+// // ProcessHardPageFaultEvent increments the hard page fault counters for a known process.
+// func (c *MemCollector) ProcessHardPageFaultEvent(startKey uint64) {
+// 	c.hardPageFaultsTotal.Add(1)
 
-	if c.config.EnablePerProcess && startKey > 0 {
-		// Delegate to the new centralized state manager logic.
-		if pData, ok := c.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordHardPageFault()
-		}
-	}
+// 	if c.config.EnablePerProcess {
+// 		// Delegate to the new centralized state manager logic.
+// 		if pData, ok := c.stateManager.GetProcessDataBySK(startKey); ok {
+// 			pData.RecordHardPageFault()
+// 		} else {
+// 			//c.log.SampledWarn("memory_collect_known").
+// 			c.log.Error().
+// 				Uint64("start_key", startKey).
+// 				Msg("Failed to find process data for hard page fault event")
+// 		}
+// 	}
+// }
+
+// // ProcessPendingHardPageFaultEvent increments the hard page fault counters for a
+// // process that is not yet known to the state manager.
+// func (c *MemCollector) ProcessPendingHardPageFaultEvent(pid uint32) {
+// 	c.hardPageFaultsTotal.Add(1)
+
+// 	if c.config.EnablePerProcess {
+// 		c.stateManager.RecordPendingHardPageFault(pid)
+// 	}
+// }
+
+// IncrementTotalHardPageFaults is called by the handler for every hard fault event.
+// It increments the global, system-wide counter.
+func (c *MemCollector) IncrementTotalHardPageFaults() {
+	c.hardPageFaultsTotal.Add(1)
+}
+
+// IsPerProcessEnabled is a helper for the handler to quickly check if it needs
+// to extract per-process data, avoiding unnecessary work if the feature is disabled.
+func (c *MemCollector) IsPerProcessEnabled() bool {
+	return c.config.EnablePerProcess
 }

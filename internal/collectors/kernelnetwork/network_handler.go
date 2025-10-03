@@ -92,7 +92,7 @@ func (nh *Handler) HandleTCPDataSent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordDataSent(startKey, ProtocolTCP, uint32(size))
 	return nil
@@ -127,7 +127,7 @@ func (nh *Handler) HandleTCPDataReceived(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(processID))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(processID))
 
 	nh.collector.RecordDataReceived(startKey, ProtocolTCP, uint32(size))
 	return nil
@@ -164,7 +164,7 @@ func (nh *Handler) HandleTCPConnectionAttempted(helper *etw.EventRecordHelper) e
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordConnectionAttempted(startKey, ProtocolTCP)
 	return nil
@@ -189,7 +189,7 @@ func (nh *Handler) HandleTCPConnectionAccepted(helper *etw.EventRecordHelper) er
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordConnectionAccepted(startKey, ProtocolTCP)
 	return nil
@@ -214,7 +214,7 @@ func (nh *Handler) HandleTCPDataRetransmitted(helper *etw.EventRecordHelper) err
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordRetransmission(startKey)
 	return nil
@@ -270,7 +270,7 @@ func (nh *Handler) HandleUDPDataSent(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordDataSent(startKey, ProtocolUDP, uint32(size))
 	return nil
@@ -300,7 +300,7 @@ func (nh *Handler) HandleUDPDataReceived(helper *etw.EventRecordHelper) error {
 	if err != nil {
 		return err
 	}
-	startKey, _ := nh.sm.GetProcessStartKey(uint32(pid))
+	startKey, _ := nh.sm.GetProcessCurrentStartKey(uint32(pid))
 
 	nh.collector.RecordDataReceived(startKey, ProtocolUDP, uint32(size))
 	return nil

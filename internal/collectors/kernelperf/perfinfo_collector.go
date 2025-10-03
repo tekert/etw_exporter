@@ -56,7 +56,7 @@ type PerfCollector struct {
 	sm *statemanager.KernelStateManager
 
 	// Pending ISR tracking for latency correlation
-	pendingISRs map[ISRKey]*ISREvent // {CPU, Vector} -> ISR event
+	pendingISRs map[uint16][]*ISREvent // CPU -> slice of pending ISRs
 
 	// Performance metrics data
 	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
@@ -132,7 +132,7 @@ func NewPerfInfoCollector(config *config.PerfInfoConfig, sm *statemanager.Kernel
 	collector := &PerfCollector{
 		config:                 config,
 		sm:                     sm,
-		pendingISRs:            make(map[ISRKey]*ISREvent, 256), // Pre-size for performance
+		pendingISRs:            make(map[uint16][]*ISREvent, 64), // Pre-size for max CPU count
 		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
 		isrToDpcLatencyCount:   0,
 		isrToDpcLatencySum:     0.0,
@@ -387,12 +387,10 @@ func (c *PerfCollector) ProcessISREvent(cpu uint16, vector uint16,
 	// An ISR typically queues a DPC, so increment the queued count for this CPU.
 	c.dpcQueuedCount[cpu]++
 
-	key := ISRKey{CPU: cpu, Vector: vector}
-
 	// Store pending ISR for later correlation with DPC (using a pooled object)
 	isr := isrEventPool.Get().(*ISREvent)
 	*isr = ISREvent{InitialTime: initialTime, RoutineAddress: routineAddress, CPU: cpu, Vector: vector}
-	c.pendingISRs[key] = isr
+	c.pendingISRs[cpu] = append(c.pendingISRs[cpu], isr)
 
 	// Only track per-driver metrics if enabled
 	if c.config.EnablePerDriver {
@@ -433,17 +431,17 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 
 	// Find matching ISR on same CPU for latency calculation
 	var matchedISR *ISREvent
-	var matchedKey ISRKey
+	var matchedIndex = -1 // To remove the element from the slice later
 
-	// Look for ISR with closest timestamp on same CPU - optimize for hot path
+	// Look for ISR with closest timestamp on the same CPU. This is much faster.
 	closestTime := time.Hour // Start with large value
-	for key, isr := range c.pendingISRs {
-		if key.CPU == cpu {
+	if isrsOnCPU, ok := c.pendingISRs[cpu]; ok {
+		for i, isr := range isrsOnCPU {
 			timeDiff := initialTime.Sub(isr.InitialTime)
 			if timeDiff >= 0 && timeDiff < closestTime {
 				closestTime = timeDiff
 				matchedISR = isr
-				matchedKey = key
+				matchedIndex = i
 			}
 		}
 	}
@@ -453,8 +451,12 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 		latencyMicros := float64(closestTime.Microseconds())
 		c.recordISRToDPCLatency(latencyMicros)
 
-		// Remove the matched ISR to prevent duplicate matches
-		delete(c.pendingISRs, matchedKey)
+		// Remove the matched ISR from the slice to prevent duplicate matches.
+		// This is an efficient way to remove an element from a slice without preserving order.
+		isrsOnCPU := c.pendingISRs[cpu]
+		isrsOnCPU[matchedIndex] = isrsOnCPU[len(isrsOnCPU)-1]
+		c.pendingISRs[cpu] = isrsOnCPU[:len(isrsOnCPU)-1]
+
 		// Return the ISREvent to the pool for reuse
 		isrEventPool.Put(matchedISR)
 	}
@@ -580,11 +582,22 @@ func (c *PerfCollector) recordDPCDuration(driverName string, durationMicros floa
 func (c *PerfCollector) cleanupOldISRs(currentTime time.Time) {
 	const maxAge = 10 * time.Millisecond
 
-	for key, isr := range c.pendingISRs {
-		if currentTime.Sub(isr.InitialTime) > maxAge {
-			delete(c.pendingISRs, key)
-			// Return the ISREvent to the pool for reuse
-			isrEventPool.Put(isr)
+	for cpu, isrs := range c.pendingISRs {
+		survivingISRs := isrs[:0] // Re-slice to avoid allocation
+		for _, isr := range isrs {
+			if currentTime.Sub(isr.InitialTime) <= maxAge {
+				survivingISRs = append(survivingISRs, isr)
+			} else {
+				// This ISR is old, return it to the pool.
+				isrEventPool.Put(isr)
+			}
+		}
+
+		if len(survivingISRs) > 0 {
+			c.pendingISRs[cpu] = survivingISRs
+		} else {
+			// If no ISRs survived on this CPU, delete the entry to keep the map clean.
+			delete(c.pendingISRs, cpu)
 		}
 	}
 }

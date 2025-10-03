@@ -25,6 +25,10 @@ var (
 
 	// # MOF Providers (Win10 and below) (NT  Kernel Logger) - require kernel session
 
+	// Process MOF class - provides process name correlation
+	// [Guid("{3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c}")]
+	ProcessKernelGUID = etw.MustParseGUID("{3d6fa8d0-fe05-11d0-9dda-00c04fd7ba7c}") // ProcessCorrelation
+
 	// SystemConfig GUID for hardware configuration events (MOF)
 	SystemConfigGUID = etw.MustParseGUID("{01853a65-418f-4f36-aefc-dc0f1d2fd235}") // SystemConfig
 

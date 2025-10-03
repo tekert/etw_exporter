@@ -19,9 +19,9 @@ import (
 // metrics from the KernelStateManager.
 type DiskCollector struct {
 	// System-wide metrics, keyed by disk number.
-	diskIOCount      map[uint32]*[statemanager.DiskOpCount]*atomic.Int64 // disk -> [op] -> count
-	diskBytesRead    map[uint32]*atomic.Int64                            // disk -> count
-	diskBytesWritten map[uint32]*atomic.Int64                            // disk -> count
+	diskIOCount      map[uint32]*[statemanager.DiskOpCount]atomic.Int64 // disk -> [op] -> count
+	diskBytesRead    map[uint32]*atomic.Int64                           // disk -> count
+	diskBytesWritten map[uint32]*atomic.Int64                           // disk -> count
 
 	// Per-process metrics are now managed and aggregated by the KernelStateManager.
 	// This collector is now a "dumb" reader of that aggregated state.
@@ -51,7 +51,7 @@ func NewDiskIOCustomCollector(config *config.DiskIOConfig, sm *statemanager.Kern
 		config:       config,
 
 		// Initialize system-wide maps
-		diskIOCount:      make(map[uint32]*[statemanager.DiskOpFlush + 1]*atomic.Int64),
+		diskIOCount:      make(map[uint32]*[statemanager.DiskOpCount]atomic.Int64),
 		diskBytesRead:    make(map[uint32]*atomic.Int64),
 		diskBytesWritten: make(map[uint32]*atomic.Int64),
 
@@ -76,17 +76,17 @@ func NewDiskIOCustomCollector(config *config.DiskIOConfig, sm *statemanager.Kern
 		processIOCountDesc: prometheus.NewDesc(
 			"etw_disk_process_io_operations_total",
 			"Total number of disk I/O operations per process, disk, and operation type",
-			[]string{"process_name", "image_checksum", "session_id", "disk", "operation"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "disk", "operation"}, nil,
 		),
 		processReadBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_read_bytes_total",
 			"Total bytes read from disk per process and disk",
-			[]string{"process_name", "image_checksum", "session_id", "disk"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "disk"}, nil,
 		),
 		processWrittenBytesDesc: prometheus.NewDesc(
 			"etw_disk_process_written_bytes_total",
 			"Total bytes written to disk per process and disk",
-			[]string{"process_name", "image_checksum", "session_id", "disk"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "disk"}, nil,
 		),
 	}
 
@@ -121,16 +121,14 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 	// --- System-Wide Metrics ---
 	for diskNumber, opArray := range c.diskIOCount {
 		diskStr := strconv.FormatUint(uint64(diskNumber), 10)
-		for op, count := range opArray {
-			if count != nil {
-				ch <- prometheus.MustNewConstMetric(
-					c.diskIOCountDesc,
-					prometheus.CounterValue,
-					float64(count.Load()),
-					diskStr,
-					statemanager.DiskOpToString[op],
-				)
-			}
+		for op := range opArray {
+			ch <- prometheus.MustNewConstMetric(
+				c.diskIOCountDesc,
+				prometheus.CounterValue,
+				float64(opArray[op].Load()),
+				diskStr,
+				statemanager.DiskOpToString[op],
+			)
 		}
 	}
 	for diskNumber, bytes := range c.diskBytesRead {
@@ -158,7 +156,7 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue to next program
 		}
 
-		checksumStr := "0x" + strconv.FormatUint(uint64(key.ImageChecksum), 16)
+		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 
 		for diskNum, diskData := range metrics.Disk.Disks {
@@ -174,7 +172,8 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(count),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampStr,
 					sessionIDStr,
 					diskStr,
 					statemanager.DiskOpToString[op],
@@ -188,7 +187,8 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(diskData.BytesRead),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampStr,
 					sessionIDStr,
 					diskStr,
 				)
@@ -201,7 +201,8 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(diskData.BytesWritten),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampStr,
 					sessionIDStr,
 					diskStr,
 				)
@@ -219,10 +220,9 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 // Parameters:
 //   - diskNumber: Physical disk number to initialize maps for
 func (c *DiskCollector) createDiskIoCounts(diskNumber uint32) {
-	c.diskIOCount[diskNumber] = new([statemanager.DiskOpCount]*atomic.Int64)
-	for i := 0; i < int(statemanager.DiskOpCount); i++ {
-		c.diskIOCount[diskNumber][i] = new(atomic.Int64)
-	}
+	// This function is now only for system-wide metrics.
+	// The array is of value types, not pointers.
+	c.diskIOCount[diskNumber] = new([statemanager.DiskOpCount]atomic.Int64)
 	c.diskBytesRead[diskNumber] = new(atomic.Int64)
 	c.diskBytesWritten[diskNumber] = new(atomic.Int64)
 }

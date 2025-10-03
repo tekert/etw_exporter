@@ -90,12 +90,12 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 		bytesSentTotalDesc: prometheus.NewDesc(
 			"etw_network_sent_bytes_total",
 			"Total bytes sent over network by program and protocol.",
-			[]string{"process_name", "image_checksum", "session_id", "protocol"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		),
 		bytesReceivedTotalDesc: prometheus.NewDesc(
 			"etw_network_received_bytes_total",
 			"Total bytes received over network by program and protocol.",
-			[]string{"process_name", "image_checksum", "session_id", "protocol"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		),
 	}
 
@@ -108,17 +108,17 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 		nc.connectionsAttemptedTotalDesc = prometheus.NewDesc(
 			"etw_network_connections_attempted_total",
 			"Total number of network connections attempted by program and protocol.",
-			[]string{"process_name", "image_checksum", "session_id", "protocol"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		)
 		nc.connectionsAcceptedTotalDesc = prometheus.NewDesc(
 			"etw_network_connections_accepted_total",
 			"Total number of network connections accepted by program and protocol.",
-			[]string{"process_name", "image_checksum", "session_id", "protocol"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		)
 		nc.connectionsFailedTotalDesc = prometheus.NewDesc(
 			"etw_network_connections_failed_total",
 			"Total number of network connection failures by program, protocol, and failure code.",
-			[]string{"process_name", "image_checksum", "session_id", "protocol", "failure_code"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol", "failure_code"}, nil,
 		)
 	}
 
@@ -134,7 +134,7 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 		nc.retransmissionsTotalDesc = prometheus.NewDesc(
 			"etw_network_retransmissions_total",
 			"Total number of TCP retransmissions by program.",
-			[]string{"process_name", "image_checksum", "session_id"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id"}, nil,
 		)
 	}
 
@@ -175,7 +175,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue to next program
 		}
 
-		checksumStr := "0x" + strconv.FormatUint(uint64(key.ImageChecksum), 16)
+		peTimestampSrt := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 		netData := metrics.Network
 
@@ -187,7 +187,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(netData.BytesSent[p]),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampSrt,
 					sessionIDStr,
 					protocolStr,
 				)
@@ -198,7 +199,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(netData.BytesReceived[p]),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampSrt,
 					sessionIDStr,
 					protocolStr,
 				)
@@ -210,7 +212,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 						prometheus.CounterValue,
 						float64(netData.ConnectionsAttempted[p]),
 						key.Name,
-						checksumStr,
+						key.ServiceName,
+						peTimestampSrt,
 						sessionIDStr,
 						protocolStr,
 					)
@@ -221,7 +224,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 						prometheus.CounterValue,
 						float64(netData.ConnectionsAccepted[p]),
 						key.Name,
-						checksumStr,
+						key.ServiceName,
+						peTimestampSrt,
 						sessionIDStr,
 						protocolStr,
 					)
@@ -235,7 +239,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(netData.RetransmissionsTotal),
 				key.Name,
-				checksumStr,
+				key.ServiceName,
+				peTimestampSrt,
 				sessionIDStr,
 			)
 		}
@@ -249,7 +254,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					prometheus.CounterValue,
 					float64(count),
 					key.Name,
-					checksumStr,
+					key.ServiceName,
+					peTimestampSrt,
 					sessionIDStr,
 					protocolToString(protocol),
 					strconv.FormatUint(uint64(failureCode), 10),

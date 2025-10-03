@@ -32,7 +32,7 @@ type AppConfig struct {
 	Logging LoggingConfig `toml:"logging"`
 }
 
-// ServerConfig contains HTTP server settings
+// ServerConfig defines the settings for the HTTP server.
 type ServerConfig struct {
 	// Listen address (default: ":9189")
 	ListenAddress string `toml:"listen_address"`
@@ -42,9 +42,12 @@ type ServerConfig struct {
 
 	// Enable pprof endpoint for debugging (default: true)
 	PprofEnabled bool `toml:"pprof_enabled"`
+
+	// Enable debug endpoint handler (default: false)
+	DebugEnabled bool `toml:"debug_enabled"`
 }
 
-// SessionWatcherConfig contains settings for monitoring and restarting ETW sessions.
+// SessionWatcherConfig defines settings for the ETW session watcher.
 type SessionWatcherConfig struct {
 	// Enable the session watcher to automatically restart sessions if they are stopped externally.
 	Enabled bool `toml:"enabled"`
@@ -301,6 +304,7 @@ func DefaultConfig() *AppConfig {
 			ListenAddress: "localhost:9189",
 			MetricsPath:   "/metrics",
 			PprofEnabled:  true,
+			DebugEnabled:  true,
 		},
 		Collectors: CollectorConfig{
 			ProcessFilter: ProcessFilterConfig{
@@ -338,8 +342,8 @@ func DefaultConfig() *AppConfig {
 			},
 		},
 		SessionWatcher: SessionWatcherConfig{
-			Enabled:              true,
-			RestartKernelSession: true,
+			Enabled:                true,
+			RestartKernelSession:   true,
 			RestartExporterSession: true,
 		},
 		Logging: LoggingConfig{

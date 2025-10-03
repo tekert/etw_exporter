@@ -73,36 +73,75 @@ func (h *Handler) GetCustomCollector() prometheus.Collector {
 //   - ByteCount (uint32): Amount of data read.
 //
 // This handler increments a counter for each hard page fault. It resolves the
-// Thread ID to a Process ID to attribute the fault correctly.
+// Thread ID to a process StartKey to attribute the fault correctly.
 func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
-	threadID, err := helper.GetPropertyUint("TThreadId")
-	if err != nil {
-		h.log.SampledWarn("pagefault_tid_error").Err(err).Msg("Failed to get thread ID from HardFault event")
-		return err
+	// Increment the global system-wide counter first.
+	h.collector.IncrementTotalHardPageFaults()
+
+	// For per-process metrics, extract identifiers and delegate all complex logic
+	// to the centralized state manager function. This check avoids work if the
+	// feature is disabled.
+	if h.collector.IsPerProcessEnabled() {
+		threadID, err := helper.GetPropertyUint("TThreadId")
+		if err != nil {
+			h.log.SampledWarn("pagefault_tid_error").
+			Err(err).
+			Msg("Failed to get thread ID from HardFault event")
+			// We still counted the global metric, so we don't return an error that would stop the session.
+			return nil
+		}
+		headerPID := helper.EventRec.EventHeader.ProcessId
+		h.stateManager.RecordHardPageFaultForThread(uint32(threadID), headerPID)
 	}
 
-	// First, try to resolve the PID from the TID. This is the most reliable method.
-	pid, isKnown := h.stateManager.GetProcessIDForThread(uint32(threadID))
-
-	// If the TID is not known (due to event ordering races), fall back to the PID in the event header.
-	if !isKnown {
-		// We cannot attribute this event.
-		h.log.SampledWarn("pagefault_pid_error").
-			Uint32("tid", uint32(threadID)).
-			Msg("Could not resolve PID for thread and fallback PID is not a known process")
-		return nil
-	}
-
-	// Get the start key for the resolved PID to ensure correct attribution.
-	startKey, ok := h.stateManager.GetProcessStartKey(pid)
-	if !ok {
-		// Cannot attribute if we don't have a start key.
-		return nil
-	}
-
-	h.collector.ProcessHardPageFaultEvent(startKey)
 	return nil
 }
+
+// func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+// 	threadID, err := helper.GetPropertyUint("TThreadId")
+// 	if err != nil {
+// 		h.log.SampledWarn("pagefault_tid_error").Err(err).Msg("Failed to get thread ID from HardFault event")
+// 		return err
+// 	}
+
+// 	// Attempt to resolve the TID to a StartKey. This is the most accurate and common path.
+// 	// This will also correctly resolve to the "unknown_process" if the thread expired from the pending cache.
+// 	if startKey, ok := h.stateManager.GetStartKeyForThread(uint32(threadID)); ok {
+// 		h.collector.ProcessHardPageFaultEvent(startKey)
+// 		return nil
+// 	}
+
+// 	headerPID := helper.EventRec.EventHeader.ProcessId
+
+// 	// --- Kernel/System PID Fallback ---
+// 	// If the TID is unknown and the PID is the special kernel PID, attribute
+// 	// the event to the System process (PID 4). This correctly handles events
+// 	// originating from kernel-mode activity not tied to a user process.
+// 	if headerPID == specialKernelPID {
+// 		if systemSK, ok := h.stateManager.GetSystemProcessStartKey(); ok {
+// 			h.collector.ProcessHardPageFaultEvent(systemSK)
+// 			debug.RecordKernelThreadHit()
+// 		} else {
+// 			// This is highly unlikely but we log it. The metric will be lost.
+// 			h.log.SampledWarn("system_process_not_found").
+// 				Uint32("tid", uint32(threadID)).
+// 				Msg("Could not find System process (PID 4) to attribute kernel event")
+// 		}
+// 		return nil
+// 	}
+
+// 	// --- Pending Path ---
+// 	// If the PID is a regular one, the thread's parent process is not yet known.
+// 	// Record this as a pending metric against the PID from the event header.
+// 	h.collector.ProcessPendingHardPageFaultEvent(headerPID)
+
+// 	h.log.SampledTrace("hardpage_pending").
+// 		Uint32("tid", uint32(threadID)).
+// 		Uint32("header_pid", headerPID).
+// 		Msg("Could not resolve StartKey for thread, recording as pending metric")
+
+// 	return nil
+// }
 
 // HandleManifestHardPageFaultEvent is a placeholder for a hypothetical manifest-based provider.
 // It demonstrates how a new provider for the same logical event would be handled.

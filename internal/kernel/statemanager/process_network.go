@@ -32,9 +32,7 @@ func (nm *NetworkModule) Reset() {
 		nm.Metrics.ConnectionsAccepted[i].Store(0)
 	}
 	// Clear the map for the garbage collector.
-	for k := range nm.ConnectionsFailed {
-		delete(nm.ConnectionsFailed, k)
-	}
+	clear(nm.ConnectionsFailed)
 }
 
 // NetworkMetrics contains the atomic counters for network-related events.

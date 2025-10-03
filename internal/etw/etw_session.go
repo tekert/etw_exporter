@@ -7,12 +7,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/phuslu/log"
+	plog "github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
-	guids "etw_exporter/internal/etw/guids"
-
 	"etw_exporter/internal/config"
+	"etw_exporter/internal/etw/guids"
 	"etw_exporter/internal/logger"
 
 	"golang.org/x/sys/windows"
@@ -38,7 +37,7 @@ type SessionManager struct {
 	eventHandler    *EventHandler
 	config          *config.CollectorConfig
 	appConfig       *config.AppConfig // Add AppConfig to access SessionWatcher settings
-	log             log.Logger        // Session manager logger
+	log             plog.Logger       // Session manager logger
 
 	running            bool
 	isStopping         atomic.Bool // Flag to indicate the manager is in the process of shutting down.
@@ -121,17 +120,19 @@ func (s *SessionManager) Start() error {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.startStaleProcessCleanup()
+			//s.startStaleProcessCleanup() // ! TESTING --- IGNORE ---
 		}()
 	}
 
-	// Start the safety net cleanup routine to prevent memory leaks if scrapes stop.
-	// These are mark for deletion that are kept until scrape that must be deleted if no scrape happens.
-	s.wg.Add(1)
-	go func() {
-		defer s.wg.Done()
-		s.startScrapeSafetyNet()
-	}()
+	// If the legacy kernel session is in use, start the API-based reconciler
+	// to provide a "synthetic rundown" for cleanup.
+	if s.kernelSession != nil {
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.startStaleKernelProcessCleanup()
+		}()
+	}
 
 	s.isStopping.Store(false) // Ensure shutdown flag is cleared on start
 	s.running = true
@@ -236,8 +237,11 @@ func (s *SessionManager) RestartSession(sessionGUID etw.GUID) {
 		}
 		s.mu.RUnlock()
 
-		// ! TODO: refactor the retry mechanism and maybe use goetw StoppedTraces() channel and the Context to
-		// !  with this, So in case we lose events we can get a signal that the consumer lost the session.
+		// TODO: refactor the retry mechanism and maybe use goetw StoppedTraces() channel and the Context to
+		//   watch this, So in case we lose events we can get a signal that the consumer lost the session.
+
+		// ! TODO(important): dont restart if another process is using it, wait until its free to use instead.
+		//  or make an options.
 
 		// This loop ensures that only one goroutine can attempt a restart for a given session at a time.
 		// If a restart is already in progress, this goroutine will wait, and then re-check the session's health
@@ -286,7 +290,7 @@ func (s *SessionManager) RestartSession(sessionGUID etw.GUID) {
 		s.log.Warn().Str("session", sessionName).Msg("Session stopped externally. Attempting to restart...")
 
 		// Retry logic
-		for i := 0; i < 10; i++ { // Try up to 10 times
+		for i := range 10 { // Try up to 10 times
 			err := s.consumer.RestartSessions(sessionToRestart)
 
 			if err == nil {
@@ -504,86 +508,103 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	return nil
 }
 
-// startScrapeSafetyNet runs a periodic task to force-cleanup entries that have been
-// marked for deletion for a very long time. This acts as a safety net to prevent
-// unbounded memory growth in the terminated maps if Prometheus stops scraping.
-func (s *SessionManager) startScrapeSafetyNet() {
-	const checkInterval = 1 * time.Hour
-	const hardCapMaxAge = 6 * time.Hour
+// // startStaleKernelProcessCleanup runs a periodic task that uses a Windows API snapshot of
+// // running processes as the "ground truth". It reconciles this with the ETW-tracked
+// // state, cleaning up any processes that are no longer running. This is the primary
+// // self-healing mechanism for the process state when using the NT Kernel Logger, which
+// // lacks rundown events.
+// func (s *SessionManager) startStaleKernelProcessCleanup() {
+// 	const reconcileInterval = 5 * time.Minute
 
-	log.Info().
-		Str("interval", checkInterval.String()).
-		Str("max_age", hardCapMaxAge.String()).
-		Msg("Starting scrape safety net routine")
+// 	s.log.Info().
+// 		Str("interval", reconcileInterval.String()).
+// 		Msg("Starting API-based process reconciler routine for kernel session")
 
-	ticker := time.NewTicker(checkInterval)
+// 	ticker := time.NewTicker(reconcileInterval)
+// 	defer ticker.Stop()
+
+// 	for {
+// 		select {
+// 		case <-ticker.C:
+// 			if !s.IsRunning() {
+// 				continue
+// 			}
+// 			s.log.Debug().Msg("Running periodic process reconciliation with API snapshot...")
+// 			s.reconcileProcessesWithApi() // // ! TESTING --- IGNORE ---
+
+// 		case <-s.ctx.Done():
+// 			s.log.Debug().Msg("Stopping API-based process reconciler routine")
+// 			return
+// 		}
+// 	}
+// }
+
+// func (s *SessionManager) reconcileProcessesWithApi() {
+// 	snapshot, err := windowsapi.GetProcessSnapshot()
+// 	if err != nil {
+// 		s.log.Error().Err(err).Msg("Failed to get process snapshot for reconciliation")
+// 		return
+// 	}
+
+// 	// The snapshot map contains PIDs of all currently running processes.
+// 	// We will use this to clean up any terminated processes in our state manager.
+// 	sm := s.eventHandler.GetStateManager()
+// 	cleanedCount := sm.CleanupTerminatedProcessesBySnapshot(snapshot)
+
+// 	s.log.Debug().
+// 		Int("cleaned_count", cleanedCount).
+// 		Int("snapshot_total", len(snapshot)).
+// 		Msg("Completed process reconciliation cycle")
+// }
+
+// startStaleKernelProcessCleanup runs a periodic task that forces the NT Kernel Logger
+// to emit rundown events for all running processes. This is achieved by briefly
+// restarting the process provider within the session. This serves as the primary
+// self-healing and state reconciliation mechanism when using the legacy kernel session.
+func (s *SessionManager) startStaleKernelProcessCleanup() {
+	// The interval should be reasonably long to avoid unnecessary event storms.
+	const rundownInterval = 5 * time.Minute
+
+	s.log.Info().
+		Str("interval", rundownInterval.String()).
+		Msg("Starting periodic ETW-based process rundown routine for kernel session")
+
+	ticker := time.NewTicker(rundownInterval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ticker.C:
-			sm := s.eventHandler.GetStateManager()
-			sm.ForceCleanupOldEntries(hardCapMaxAge)
-			log.Debug().Msg("Ran periodic safety net cleanup")
+			if !s.IsRunning() {
+				continue
+			}
+			s.log.Debug().Msg("Triggering periodic kernel process rundown...")
+			s.triggerKernelProcessRundown()
 
 		case <-s.ctx.Done():
-			log.Debug().Msg("Stopping scrape safety net routine")
+			s.log.Debug().Msg("Stopping periodic kernel process rundown routine")
 			return
 		}
 	}
 }
 
-// startStaleProcessCleanup runs a periodic task to remove stale process entries.
-// (compares against current process rundown)
-func (s *SessionManager) startStaleProcessCleanup() {
-	//	const cleanupInterval = 5 * time.Minute
-	const cleanupInterval = 5 * time.Minute
-	// max age must be slightly longer than the interval to avoid race conditions
-	const processMaxAge = cleanupInterval + 10*time.Second
-	// Time to wait for the OS to process the rundown request and emit events
-	const rundownWait = 5 * time.Second
+func (s *SessionManager) triggerKernelProcessRundown() {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	log.Info().
-		Str("interval", cleanupInterval.String()).
-		Str("max_age", processMaxAge.String()).
-		Msg("Starting stale process cleanup routine (ETW Rundown)")
-
-	ticker := time.NewTicker(cleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// Only trigger rundown if the session is actually running.
-			if !s.IsRunning() {
-				continue
-			}
-
-			// 1. Trigger a process rundown to refresh the `LastSeen` timestamp for all active processes.
-			if err := s.TriggerProcessRundown(); err != nil {
-				log.Error().Err(err).Msg("Skipping cleanup due to rundown failure")
-				continue
-			}
-
-			// 2. Wait for a moment to allow the rundown events to be processed.
-			log.Debug().Dur("wait_time", rundownWait).Msg("Waiting for rundown events to be processed")
-			select {
-			case <-time.After(rundownWait):
-				// Wait finished, continue to cleanup.
-			case <-s.ctx.Done():
-				log.Debug().Msg("Shutdown signaled during rundown wait, stopping cleanup.")
-				return // Exit the goroutine immediately.
-			}
-
-			// 3. Clean up processes that were not "seen" during the rundown (i.e., their
-			//    `LastSeen` timestamp is now older than the max age).
-			sm := s.eventHandler.GetStateManager()
-			sm.CleanupStaleProcesses(processMaxAge)
-			log.Debug().Msg("Ran stale process cleanup")
-
-		case <-s.ctx.Done():
-			log.Debug().Msg("Stopping stale process cleanup routine")
-			return
-		}
+	if s.kernelSession == nil {
+		s.log.Warn().Msg("Cannot trigger kernel rundown: kernel session is not active.")
+		return
 	}
+
+	// This is a non-destructive way to get a full process rundown. It quickly
+	// disables and re-enables the process provider, which causes ETW to emit
+	// rundown events for all active processes, ensuring our state is synchronized.
+	err := s.kernelSession.RestartKernelProvider(etw.EVENT_TRACE_FLAG_PROCESS)
+	if err != nil {
+		s.log.Error().Err(err).Msg("Failed to trigger kernel process rundown via provider restart")
+		return
+	}
+
+	s.log.Info().Msg("Successfully triggered kernel process rundown")
 }

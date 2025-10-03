@@ -154,7 +154,7 @@ func (h *Handler) HandleRegistryEventRaw(er *etw.EventRecord) error {
 	}
 
 	processID := er.EventHeader.ProcessId
-	startKey, ok := h.stateManager.GetProcessStartKey(processID)
+	startKey, ok := h.stateManager.GetProcessCurrentStartKey(processID)
 	if !ok {
 		// Process is not known or has already terminated. We can't reliably attribute
 		// this event, so we skip it.
@@ -193,7 +193,7 @@ func (h *Handler) HandleRegistryEvent(helper *etw.EventRecordHelper) error {
 	}
 
 	processID := helper.EventRec.EventHeader.ProcessId
-	startKey, ok := h.stateManager.GetProcessStartKey(processID)
+	startKey, ok := h.stateManager.GetProcessCurrentStartKey(processID)
 	if !ok {
 		return nil // Process not known, skip.
 	}

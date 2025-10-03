@@ -36,17 +36,14 @@ type DiskModule struct {
 
 // Reset clears the maps and counters, making the module ready for reuse.
 func (dm *DiskModule) Reset() {
-	// Clear the map for the garbage collector.
-	for k := range dm.Disks {
-		delete(dm.Disks, k)
-	}
+	clear(dm.Disks)
 }
 
 // DiskMetrics contains the atomic counters for a single disk.
 type DiskMetrics struct {
-	IOCount      [DiskOpCount]*atomic.Int64
-	BytesRead    *atomic.Int64
-	BytesWritten *atomic.Int64
+	IOCount      [DiskOpCount]atomic.Int64
+	BytesRead    atomic.Int64
+	BytesWritten atomic.Int64
 }
 
 // newDiskModule creates and initializes a new DiskModule.
@@ -58,14 +55,9 @@ func newDiskModule() *DiskModule {
 
 // newDiskMetrics creates and initializes a new DiskMetrics struct with all counters.
 func newDiskMetrics() *DiskMetrics {
-	dm := &DiskMetrics{
-		BytesRead:    new(atomic.Int64),
-		BytesWritten: new(atomic.Int64),
-	}
-	for i := range int(DiskOpCount) {
-		dm.IOCount[i] = new(atomic.Int64)
-	}
-	return dm
+	// With atomic values instead of pointers, the zero value of the struct is ready to use.
+	// This eliminates 5 heap allocations per call compared to the previous implementation.
+	return &DiskMetrics{}
 }
 
 // getOrCreateDiskMetrics retrieves or creates the metrics for a specific disk number.
@@ -93,8 +85,7 @@ func (dm *DiskModule) getOrCreateDiskMetrics(diskNumber uint32) *DiskMetrics {
 	return metrics
 }
 
-// RecordDiskIO is the new home for the disk I/O recording logic.
-// It's a method on ProcessData, designed for high-performance, concurrent access.
+// RecordDiskIO records a disk I/O operation for this process.
 func (pd *ProcessData) RecordDiskIO(diskNumber uint32, transferSize uint32, isWrite bool) {
 	diskMetrics := pd.Disk.getOrCreateDiskMetrics(diskNumber)
 

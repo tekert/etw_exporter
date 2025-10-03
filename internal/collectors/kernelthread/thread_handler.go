@@ -28,11 +28,9 @@ type Handler struct {
 func NewThreadHandler(sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
 		lastCpuSwitch: make([]atomic.Int64, runtime.NumCPU()),
-		//customCollector: NewThreadCSCollector(sm),
-		stateManager: sm,
-		log:          logger.NewSampledLoggerCtx("thread_handler"),
-		//log:             logger.NewLoggerWithContext("thread_handler"),
-		collector: nil, // Starts with no collector
+		stateManager:  sm,
+		log:           logger.NewSampledLoggerCtx("thread_handler"),
+		collector:     nil, // Starts with no collector
 	}
 }
 
@@ -51,19 +49,17 @@ func (h *Handler) RegisterRoutes(router handlers.Router) {
 	// Provider: NT Kernel Logger (Thread) ({3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c})
 	// Provider: System Scheduler ({9e814aad-3204-11d2-9a82-006008a86939})
 	// Define routes for ThreadKernelGUID
-	threadRoutes := map[uint8]handlers.EventHandlerFunc{
-		etw.EVENT_TRACE_TYPE_START:    h.HandleThreadStart, // ThreadStart
-		etw.EVENT_TRACE_TYPE_DC_START: h.HandleThreadStart, // ThreadRundown
-		etw.EVENT_TRACE_TYPE_DC_END:   h.HandleThreadStart, // ThreadRundownEnd (Go to Start to refresh)
-		etw.EVENT_TRACE_TYPE_END:      h.HandleThreadEnd,   // ThreadEnd
-		50:                            h.HandleReadyThread, // ReadyThread
+	threadRoutes := map[uint8]handlers.RawEventHandlerFunc{
+		etw.EVENT_TRACE_TYPE_START:    h.HandleThreadStartRaw,   // ThreadStart
+		etw.EVENT_TRACE_TYPE_DC_START: h.HandleThreadStartRaw,   // ThreadRundown
+		etw.EVENT_TRACE_TYPE_DC_END:   h.HandleThreadStartRaw,   // ThreadRundownEnd (Go to Start to refresh)
+		etw.EVENT_TRACE_TYPE_END:      h.HandleThreadEndRaw,     // ThreadEnd
+		50:                            h.HandleReadyThreadRaw,   // ReadyThread
+		36:                            h.HandleContextSwitchRaw, // CSwitch (very high frequency)
 	}
 
-	handlers.RegisterRoutesForGUID(router, guids.ThreadKernelGUID, threadRoutes)          // < win 10
-	handlers.RegisterRoutesForGUID(router, etw.SystemSchedulerProviderGuid, threadRoutes) // >= win 11
-
-	// Note: CSwitch (36) is handled in the raw EventRecordCallback in the main event
-	// handler for maximum performance. A route is not registered for it here.
+	handlers.RegisterRawRoutesForGUID(router, guids.ThreadKernelGUID, threadRoutes)          // <= win 10
+	handlers.RegisterRawRoutesForGUID(router, etw.SystemSchedulerProviderGuid, threadRoutes) // >= win 11
 }
 
 // HandleContextSwitchRaw processes context switch events directly from the EVENT_RECORD.
@@ -97,40 +93,19 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 		return nil
 	}
 
-	var newThreadID uint32
-	var oldThreadWaitReason int8
-
-	// Get minimum supported version
-	if er.EventHeader.EventDescriptor.Version >= 2 {
-		// Supported versions
-		//cswitch := (*etw.MofCSwitch_V2)(unsafe.Pointer(er.UserData)) // With v2 we cover what we need
-		cswitch, ok := etw.UnsafeCast[etw.MofCSwitch_V2](er)
-		if !ok {
-			c.log.SampledError("fail-decode").
-				Uint8("version", er.EventHeader.EventDescriptor.Version).
-				Uint8("opcode", er.EventHeader.EventDescriptor.Opcode).
-				Uint16("datalen", er.UserDataLength).
-				Msg("Failed to decode CSwitch event")
-			return nil // Not a fatal error, just skip processing.
-		}
-
-		newThreadID = cswitch.NewThreadId
-		oldThreadWaitReason = cswitch.OldThreadWaitReason
+	// Read properties using direct offsets.
+	newThreadID, err := er.GetUint32At(0)
+	if err != nil {
+		c.log.SampledError("fail-newthreadid").
+			Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
+		return err
 	}
-
-	// // Read properties using direct offsets.
-	// newThreadID, err := er.GetUint32At(0)
-	// if err != nil {
-	// 	c.log.SampledError("fail-newthreadid").
-	// 		Err(err).Msg("Failed to read NewThreadId from raw CSwitch event")
-	// 	return err
-	// }
-	// oldThreadWaitReason, err := er.GetUint8At(12)
-	// if err != nil {
-	// 	c.log.SampledError("fail-waitreason").
-	// 		Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
-	// 	return err
-	// }
+	oldThreadWaitReason, err := er.GetUint8At(12)
+	if err != nil {
+		c.log.SampledError("fail-waitreason").
+			Err(err).Msg("Failed to read OldThreadWaitReason from raw CSwitch event")
+		return err
+	}
 
 	// Get CPU number from processor index
 	cpu := er.ProcessorNumber()
@@ -144,12 +119,9 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 		interval = time.Duration(eventTimeNano - lastSwitchNano)
 	}
 
-	// Get process ID for the NEW thread (incoming thread)
-	var startKey uint64
-	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
-		// Now that we have the PID, get its StartKey to form a unique identifier.
-		startKey, _ = c.stateManager.GetProcessStartKey(pid)
-	}
+	// Get the unique StartKey for the NEW thread (incoming thread).
+	// This is a single, direct lookup that is robust against TID reuse.
+	startKey, _ := c.stateManager.GetStartKeyForThread(uint32(newThreadID))
 
 	// A startKey of 0 means we couldn't attribute the I/O to a known process.
 	// The collector will still record the system-wide metric, but will skip the
@@ -193,6 +165,7 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 //
 // This handler tracks context switches per CPU and per process, calculates
 // context switch intervals, and records thread state transitions.
+// Deprecated: Use HandleContextSwitchRaw for better performance.
 func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	if c.collector == nil {
 		return nil
@@ -219,10 +192,7 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 	}
 
 	// Get process ID for the NEW thread (incoming thread)
-	var startKey uint64
-	if pid, exists := c.stateManager.GetProcessIDForThread(uint32(newThreadID)); exists {
-		startKey, _ = c.stateManager.GetProcessStartKey(pid)
-	}
+	startKey, _ := c.stateManager.GetStartKeyForThread(uint32(newThreadID))
 
 	// Record context switch in custom collector (handles process name lookup internally)
 	c.collector.RecordContextSwitch(cpu, startKey, interval)
@@ -255,7 +225,7 @@ func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
 //
 // This event indicates a thread is transitioning from a wait state to ready state,
 // meaning it's eligible for scheduling but not yet running.
-func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
+func (c *Handler) HandleReadyThreadRaw(record *etw.EventRecord) error {
 	// Track thread state transition to ready
 	if c.collector != nil {
 		c.collector.RecordThreadStateTransition(StateReady, 0)
@@ -278,28 +248,34 @@ func (c *Handler) HandleReadyThread(helper *etw.EventRecordHelper) error {
 //   - Schema: MOF
 //
 // Schema (from MOF):
-//   - ProcessId (uint32): Process identifier of the thread's parent process.
-//   - TThreadId (uint32): Thread identifier of the newly created or enumerated thread.
-//   - StackBase (pointer): Base address of the thread's kernel-mode stack.
-//   - StackLimit (pointer): Limit of the thread's kernel-mode stack.
-//   - UserStackBase (pointer): Base address of the thread's user-mode stack.
-//   - UserStackLimit (pointer): Limit of the thread's user-mode stack.
-//   - Affinity (uint32): The set of processors on which the thread is allowed to run.
-//   - Win32StartAddr (pointer): Starting address of the function to be executed by this thread.
-//   - TebBase (pointer): Thread Environment Block (TEB) base address.
-//   - SubProcessTag (uint32): Identifies the service if the thread is owned by a service.
-//   - BasePriority (uint8): The scheduler priority of the thread.
-//   - PagePriority (uint8): A memory page priority hint for memory pages accessed by the thread.
-//   - IoPriority (uint8): An I/O priority hint for scheduling I/O generated by the thread.
-//   - ThreadFlags (uint8): Not used.
+//   - ProcessId (uint32): Process identifier of the thread's parent process.           [offset 0]
+//   - TThreadId (uint32): Thread identifier of the newly created or enumerated thread. [offset 4]
+//   - StackBase (pointer): Base address of the thread's kernel-mode stack.             [offset 8]
+//   - StackLimit (pointer): Limit of the thread's kernel-mode stack.                   [offset 16]
+//   - UserStackBase (pointer): Base address of the thread's user-mode stack.           [offset 24]
+//   - UserStackLimit (pointer): Limit of the thread's user-mode stack.                 [offset 32]
+//   - Affinity (uint32): The set of processors on which the thread is allowed to run.  [offset 40]
+//   - Win32StartAddr (pointer): Starting address of the function to be executed by this thread. [offset 48]
+//   - TebBase (pointer): Thread Environment Block (TEB) base address.                  [offset 56]
+//   - SubProcessTag (uint32): Identifies the service if the thread is owned by a service. [offset 64]
+//   - BasePriority (uint8): The scheduler priority of the thread.                      [offset 68]
+//   - PagePriority (uint8): A memory page priority hint for memory pages accessed by the thread. [offset 69]
+//   - IoPriority (uint8): An I/O priority hint for scheduling I/O generated by the thread. [offset 70]
+//   - ThreadFlags (uint8): Not used. [offset 71].
+//   - ThreadName (uint16[], >v3 only): uint16[] The name of the thread (if set).       [offset 72]
 //
 // This handler maintains the thread-to-process mapping for context switch tracking.
-func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
-	threadID, _ := helper.GetPropertyUint("TThreadId")
-	processID, _ := helper.GetPropertyUint("ProcessId")
+func (c *Handler) HandleThreadStartRaw(er *etw.EventRecord) error {
+
+	processID, _ := er.GetUint32At(0)
+	newThreadID, _ := er.GetUint32At(4)
+
+	// SubProcessTag is at offset 64 on 64-bit systems
+	subProcessTag, _ := er.GetUint32At(64)
 
 	// Store thread to process mapping for context switch metrics
-	c.stateManager.AddThread(uint32(threadID), uint32(processID))
+	// Pass the event's timestamp to AddThread to prevent state corruption from PID reuse.
+	c.stateManager.AddThread(newThreadID, processID, er.Timestamp(), subProcessTag)
 
 	// Track thread creation
 	if c.collector != nil {
@@ -336,13 +312,14 @@ func (c *Handler) HandleThreadStart(helper *etw.EventRecordHelper) error {
 //   - PagePriority (uint8): A memory page priority hint for memory pages accessed by the thread.
 //   - IoPriority (uint8): An I/O priority hint for scheduling I/O generated by the thread.
 //   - ThreadFlags (uint8): Not used.
+//   - ThreadName (string, v4 only): [Patched In] The name of the thread (if set).
 //
 // This handler cleans up the thread-to-process mapping and records termination metrics.
-func (c *Handler) HandleThreadEnd(helper *etw.EventRecordHelper) error {
-	threadID, _ := helper.GetPropertyUint("TThreadId")
+func (c *Handler) HandleThreadEndRaw(er *etw.EventRecord) error {
+	newThreadID, _ := er.GetUint32At(4)
 
 	// Mark the thread for deletion. The actual cleanup will happen after the next scrape.
-	c.stateManager.MarkThreadForDeletion(uint32(threadID))
+	c.stateManager.MarkThreadForDeletion(newThreadID)
 
 	// Track thread termination
 	if c.collector != nil {

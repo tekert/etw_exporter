@@ -236,7 +236,7 @@ func (c *ETWStatsCollector) collectProviderEventStats(ch chan<- prometheus.Metri
 	c.newProviderMetric(ch, "thread-kernel", c.eventHandler.GetThreadEventCount())
 	c.newProviderMetric(ch, "microsoft-windows-kernel-file", c.eventHandler.GetFileEventCount())
 	c.newProviderMetric(ch, "perfinfo-kernel", c.eventHandler.GetPerfInfoEventCount())
-	c.newProviderMetric(ch, "system-config", c.eventHandler.GetSystemConfigEventCount())
+	c.newProviderMetric(ch, "system-config-kernel", c.eventHandler.GetSystemConfigEventCount())
 	c.newProviderMetric(ch, "image-kernel", c.eventHandler.GetImageEventCount())
 	c.newProviderMetric(ch, "pagefault-kernel", c.eventHandler.GetPageFaultEventCount())
 	c.newProviderMetric(ch, "microsoft-windows-kernel-network", c.eventHandler.GetNetworkEventCount())

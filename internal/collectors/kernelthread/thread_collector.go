@@ -178,7 +178,7 @@ func NewThreadCSCollector(config *config.ThreadCSConfig, sm *statemanager.Kernel
 		contextSwitchesPerProcessDesc: prometheus.NewDesc(
 			"etw_thread_context_switches_process_total",
 			"Total number of context switches per program.",
-			[]string{"process_name", "image_checksum", "session_id"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id"}, nil,
 		),
 		contextSwitchIntervalsDesc: prometheus.NewDesc(
 			"etw_thread_context_switch_interval_milliseconds",
@@ -234,7 +234,8 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(metrics.Threads.ContextSwitches),
 				key.Name,
-				"0x"+strconv.FormatUint(uint64(key.ImageChecksum), 16),
+				key.ServiceName,
+				"0x"+strconv.FormatUint(uint64(key.PeChecksum), 16),
 				strconv.FormatUint(uint64(key.SessionID), 10),
 			)
 		}

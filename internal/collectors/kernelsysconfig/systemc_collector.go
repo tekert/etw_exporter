@@ -7,6 +7,7 @@ import (
 	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
 
@@ -29,14 +30,26 @@ type LogicalDiskInfo struct {
 	FileSystem        string
 }
 
+// ServiceInfo holds the data parsed from a SystemConfig_Services ETW event.
+// It provides a structured representation of a service's configuration.
+type ServiceInfo struct {
+	ProcessId     uint32
+	ServiceState  uint32
+	SubProcessTag uint32
+	ServiceName   string
+	DisplayName   string
+	ProcessName   string
+}
+
 // SysConfCollector stores static system configuration data collected from ETW.
 // It acts as a singleton global repository for this information and a Prometheus collector.
 type SysConfCollector struct {
 	physicalDisks map[uint32]PhysicalDiskInfo // diskNumber -> disk info
 	logicalDisks  map[uint32]LogicalDiskInfo  // diskNumber -> logical disk info
 
-	mu  sync.RWMutex
-	log log.Logger
+	stateManager *statemanager.KernelStateManager
+	mu           sync.RWMutex
+	log          log.Logger
 
 	// Metric Descriptors
 	physicalDiskInfoDesc *prometheus.Desc
@@ -48,10 +61,11 @@ type SysConfCollector struct {
 }
 
 // NewSystemConfigCollector creates a new system configuration collector.
-func NewSystemConfigCollector() *SysConfCollector {
+func NewSystemConfigCollector(sm *statemanager.KernelStateManager) *SysConfCollector {
 	return &SysConfCollector{
 		physicalDisks:    make(map[uint32]PhysicalDiskInfo),
 		logicalDisks:     make(map[uint32]LogicalDiskInfo),
+		stateManager:     sm,
 		log:              logger.NewLoggerWithContext("system_config_collector"),
 		requestedMetrics: make(map[string]bool),
 
@@ -156,4 +170,13 @@ func (sc *SysConfCollector) AddLogicalDisk(info LogicalDiskInfo) {
 	defer sc.mu.Unlock()
 	sc.logicalDisks[info.DiskNumber] = info
 	sc.log.Debug().Interface("disk_info", info).Msg("Added logical disk info")
+}
+
+// AddServiceInfo adds a service tag mapping to the central state manager.
+func (sc *SysConfCollector) AddServiceInfo(info ServiceInfo) {
+	sc.stateManager.RegisterServiceTag(info.SubProcessTag, info.ServiceName)
+	sc.log.Debug().
+		Uint32("tag", info.SubProcessTag).
+		Str("name", info.ServiceName).
+		Msg("Reported service tag mapping to state manager")
 }

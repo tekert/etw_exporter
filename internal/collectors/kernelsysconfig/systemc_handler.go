@@ -6,6 +6,7 @@ import (
 
 	"etw_exporter/internal/etw/guids"
 	"etw_exporter/internal/etw/handlers"
+	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 )
 
@@ -16,9 +17,9 @@ type Handler struct {
 }
 
 // NewSystemConfigHandler creates a new system configuration event handler.
-func NewSystemConfigHandler() *Handler {
+func NewSystemConfigHandler(sm *statemanager.KernelStateManager) *Handler {
 	return &Handler{
-		collector: NewSystemConfigCollector(),
+		collector: NewSystemConfigCollector(sm),
 		log:       logger.NewLoggerWithContext("system_config_handler"),
 	}
 }
@@ -36,6 +37,7 @@ func (h *Handler) RegisterRoutes(router handlers.Router) {
 	configRoutes := map[uint8]handlers.EventHandlerFunc{
 		etw.EVENT_TRACE_TYPE_CONFIG_PHYSICALDISK: h.HandleSystemConfigPhyDisk,
 		etw.EVENT_TRACE_TYPE_CONFIG_LOGICALDISK:  h.HandleSystemConfigLogDisk,
+		etw.EVENT_TRACE_TYPE_CONFIG_SERVICES:     h.HandleSystemConfigServices,
 	}
 
 	handlers.RegisterRoutesForGUID(router, guids.SystemConfigGUID, configRoutes)       // < win 10
@@ -330,6 +332,40 @@ func (h *Handler) HandleSystemConfigVideo(helper *etw.EventRecordHelper) error {
 // when an NT Kernel Logger session is stopped.
 // https://learn.microsoft.com/en-us/windows/win32/etw/systemconfig-services
 func (h *Handler) HandleSystemConfigServices(helper *etw.EventRecordHelper) error {
+	subProcessTag, err := helper.GetPropertyUint("SubProcessTag")
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to get SubProcessTag for services config")
+		return err
+	}
+
+	ProcessId, err := helper.GetPropertyUint("ProcessId")
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to get ProcessId for services config")
+		return err
+	}
+
+	displayName, err := helper.GetPropertyString("DisplayName")
+	if err != nil {
+		// Log the service display name for informational purposes.
+		h.log.Warn().Err(err).Msgf("Service Display Name: %s", displayName)
+	}
+
+	// The MOF schema indicates ServiceName is a string array, but in practice it's a single string.
+	serviceName, err := helper.GetPropertyString("ServiceName")
+	if err != nil {
+		h.log.Error().Err(err).Msg("Failed to get ServiceName for services config")
+		return err
+	}
+
+	// Pass the raw data to the collector, which will handle updating the state manager.
+	info := ServiceInfo{
+		ProcessId:     uint32(ProcessId),
+		DisplayName:   displayName,
+		SubProcessTag: uint32(subProcessTag),
+		ServiceName:   serviceName,
+	}
+	h.collector.AddServiceInfo(info)
+
 	return nil
 }
 

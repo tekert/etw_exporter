@@ -16,14 +16,12 @@ import (
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/debug"
-
 	etwmain "etw_exporter/internal/etw"
 	"etw_exporter/internal/etw/watcher"
-
 	"etw_exporter/internal/kernel/statemanager"
 )
 
-// ETWExporter encapsulates the core components of the application.
+// ETWExporter manages the lifecycle of the application.
 type ETWExporter struct {
 	config       *config.AppConfig
 	etwSession   *etwmain.SessionManager
@@ -107,9 +105,17 @@ func (e *ETWExporter) setupHTTPServer() {
             <body>
             <h1>ETW Exporter v` + version + ` </h1>
             <p><a href="` + e.config.Server.MetricsPath + `">Metrics</a></p>
+            <p><a href="/debug/state">Debug State</a></p>
             </body>
             </html>`))
 	})
+
+	// Register debug handlers if enabled.
+	if e.config.Server.DebugEnabled {
+		sm := statemanager.GetGlobalStateManager()
+		debug.RegisterHandlers(mux, sm)
+		e.log.Info().Msg("Debug state endpoint enabled at /debug/state")
+	}
 
 	e.httpServer = &http.Server{
 		Addr:    e.config.Server.ListenAddress,
@@ -132,7 +138,7 @@ func (e *ETWExporter) Run() error {
 		stop()
 	}()
 
-	debug.DCounter = debug.NewDebugCounter(ctx) // ! testing
+	//debug.DCounter = debug.NewDebugCounter(ctx) // ! testing
 
 	if e.config.Server.PprofEnabled {
 		go func() {

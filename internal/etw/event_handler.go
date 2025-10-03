@@ -147,7 +147,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 
 	// Always register the system config handler.
 	// Provider: NT Kernel Logger (EventTraceConfig) ({01853a65-418f-4f36-aefc-dc0f1d2fd235})
-	eh.sysconfigHandler = kernelsysconfig.NewSystemConfigHandler()
+	eh.sysconfigHandler = kernelsysconfig.NewSystemConfigHandler(eh.stateManager)
 	eh.sysconfigHandler.RegisterRoutes(eh)
 
 	// Helper to Register the thread handler for thread name mappings.
@@ -339,19 +339,19 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 		return false // Stop processing, we've handled it.
 	}
 
-	// TODO: enable when I finish porting al collectors to the raw handler
-	// eventID := record.EventID()
-	// // Route the rest of the registered raw events
-	// if handlers, ok := h.routeMap[providerID]; ok {
-	// 	if handler := handlers.get(eventID); handler.rawHandler != nil {
-	// 		// Increment counter for raw-routed events.
-	// 		if counter, ok := h.guidToCounter[providerID]; ok {
-	// 			counter.Add(1)
-	// 		}
-	// 		handler.rawHandler(record)
-	// 		return false // Stop processing
-	// 	}
-	// }
+	// TODO: finish porting all known system collectors to use the raw handler
+	eventID := record.EventID()
+	// Route the rest of the registered raw events
+	if handlers, ok := h.routeMap[providerID]; ok {
+		if handler := handlers.get(eventID); handler.rawHandler != nil {
+			// Increment counter for raw-routed events.
+			if counter, ok := h.guidToCounter[providerID]; ok {
+				counter.Add(1)
+			}
+			handler.rawHandler(record)
+			return false // Stop processing
+		}
+	}
 
 	return true // Continue to the next callback stage for all other events.
 }

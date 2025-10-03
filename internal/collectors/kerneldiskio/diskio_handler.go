@@ -160,7 +160,7 @@ func (d *Handler) HandleDiskRead(helper *etw.EventRecordHelper) error {
 
 	// https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
 	pid := helper.EventRec.EventHeader.ProcessId
-	startKey, _ := d.stateManager.GetProcessStartKey(pid)
+	startKey, _ := d.stateManager.GetProcessCurrentStartKey(pid)
 
 	d.customCollector.RecordDiskIO(uint32(diskNumber), startKey, uint32(transferSize), false)
 
@@ -209,7 +209,7 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 
 	// https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
 	pid := helper.EventRec.EventHeader.ProcessId
-	startKey, _ := d.stateManager.GetProcessStartKey(pid)
+	startKey, _ := d.stateManager.GetProcessCurrentStartKey(pid)
 	d.log.Trace().Uint32("fallback_pid", pid).Msg("DiskWrite using fallback PID from event header")
 
 	d.customCollector.RecordDiskIO(uint32(diskNumber), startKey, uint32(transferSize), true)
@@ -229,7 +229,7 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 //   - Provider GUID: {3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c} (DiskIoGuid)
 //   - Event ID(s): 10 (EVENT_TRACE_TYPE_IO_READ)
 //   - Event Name(s): Read
-//   - Event Version(s): 0, 1, 2
+//   - Event Version(s): 3
 //   - Schema: MOF
 //
 // Schema (from MOF class DiskIo_TypeGroup1, 64-bit layout):
@@ -242,7 +242,7 @@ func (d *Handler) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 //   - Irp (win:Pointer): Pointer to the I/O Request Packet. Offset: 32
 //   - HighResResponseTime (win:UInt64): High-resolution response time. Offset: 40
 //   - IssuingThreadId (win:UInt32): ID of the thread that issued the I/O. Offset: 48
-func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
+func (d *Handler) HandleDiskReadMofRaw(er *etw.EventRecord) error {
 	if d.customCollector == nil {
 		return nil
 	}
@@ -250,21 +250,21 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 	var diskNumber, transferSize, issuingTID uint32
 	var err error
 
-	diskNumber, err = record.GetUint32At(0)
+	diskNumber, err = er.GetUint32At(0)
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse DiskNumber (32-bit)")
 		return err
 	}
-	transferSize, err = record.GetUint32At(8)
+	transferSize, err = er.GetUint32At(8)
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse TransferSize (32-bit)")
 		return err
 	}
 	var at uintptr = 48
-	if record.PointerSize() != 8 {
+	if er.PointerSize() != 8 {
 		at = 40
 	}
-	issuingTID, err = record.GetUint32At(at) // Pointer size 8
+	issuingTID, err = er.GetUint32At(at) // Pointer size 8
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse IssuingThreadId (32-bit)")
 		return err
@@ -274,18 +274,15 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 
 	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if pid, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
-			// We got a PID, now try to get its startKey.
-			if sk, ok := d.stateManager.GetProcessStartKey(pid); ok {
-				startKey = sk
-			}
+		if sk, ok := d.stateManager.GetStartKeyForThread(issuingTID); ok {
+			startKey = sk
 		}
 	}
 
 	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
 	if startKey == 0 {
-		headerPID := record.EventHeader.ProcessId
-		if sk, ok := d.stateManager.GetProcessStartKey(headerPID); ok {
+		headerPID := er.EventHeader.ProcessId
+		if sk, ok := d.stateManager.GetProcessCurrentStartKey(headerPID); ok {
 			startKey = sk
 		}
 	}
@@ -310,7 +307,7 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 //   - Provider GUID: {3d6fa8d4-fe05-11d0-9dda-00c04fd7ba7c} (DiskIoGuid)
 //   - Event ID(s): 11 (EVENT_TRACE_TYPE_IO_WRITE)
 //   - Event Name(s): Write
-//   - Event Version(s): 0, 1, 2
+//   - Event Version(s): 3
 //   - Schema: MOF
 //
 // Schema (from MOF class DiskIo_TypeGroup1, 64-bit layout):
@@ -323,7 +320,7 @@ func (d *Handler) HandleDiskReadMofRaw(record *etw.EventRecord) error {
 //   - Irp (win:Pointer): Pointer to the I/O Request Packet. Offset: 32
 //   - HighResResponseTime (win:UInt64): High-resolution response time. Offset: 40
 //   - IssuingThreadId (win:UInt32): ID of the thread that issued the I/O. Offset: 48
-func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
+func (d *Handler) HandleDiskWriteMofRaw(er *etw.EventRecord) error {
 	if d.customCollector == nil {
 		return nil
 	}
@@ -331,21 +328,21 @@ func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
 	var diskNumber, transferSize, issuingTID uint32
 	var err error
 
-	diskNumber, err = record.GetUint32At(0)
+	diskNumber, err = er.GetUint32At(0)
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse DiskNumber (32-bit)")
 		return err
 	}
-	transferSize, err = record.GetUint32At(8)
+	transferSize, err = er.GetUint32At(8)
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse TransferSize (32-bit)")
 		return err
 	}
 	var at uintptr = 48
-	if record.PointerSize() != 8 {
+	if er.PointerSize() != 8 {
 		at = 40
 	}
-	issuingTID, err = record.GetUint32At(at) // Pointer size 8
+	issuingTID, err = er.GetUint32At(at) // Pointer size 8
 	if err != nil {
 		d.log.SampledError("diskread-raw-parse-err").Err(err).Msg("Failed to parse IssuingThreadId (32-bit)")
 		return err
@@ -355,18 +352,15 @@ func (d *Handler) HandleDiskWriteMofRaw(record *etw.EventRecord) error {
 
 	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if pid, ok := d.stateManager.GetProcessIDForThread(issuingTID); ok {
-			// We got a PID, now try to get its startKey.
-			if sk, ok := d.stateManager.GetProcessStartKey(pid); ok {
-				startKey = sk
-			}
+		if sk, ok := d.stateManager.GetStartKeyForThread(issuingTID); ok {
+			startKey = sk
 		}
 	}
 
 	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
 	if startKey == 0 {
-		headerPID := record.EventHeader.ProcessId
-		if sk, ok := d.stateManager.GetProcessStartKey(headerPID); ok {
+		headerPID := er.EventHeader.ProcessId
+		if sk, ok := d.stateManager.GetProcessCurrentStartKey(headerPID); ok {
 			startKey = sk
 		}
 	}
@@ -446,6 +440,7 @@ func (d *Handler) HandleDiskFlushMofRaw(record *etw.EventRecord) error {
 	return nil
 }
 
+// TODO: move this to file collector (but aggregation is the problem)
 // ----------------------------------------------------------
 // ------------ FILES ---------------------------------------
 // ----------------------------------------------------------

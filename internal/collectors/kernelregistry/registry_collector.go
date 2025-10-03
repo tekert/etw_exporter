@@ -49,7 +49,7 @@ func NewRegistryCollector(config *config.RegistryConfig, sm *statemanager.Kernel
 		processOperationsTotalDesc: prometheus.NewDesc(
 			"etw_registry_operations_process_total",
 			"Total number of registry operations per program.",
-			[]string{"process_name", "image_checksum", "session_id", "operation", "result"}, nil,
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "operation", "result"}, nil,
 		),
 	}
 
@@ -108,7 +108,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue
 		}
 
-		checksumStr := "0x" + strconv.FormatUint(uint64(key.ImageChecksum), 16)
+		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 
 		for opKey, count := range metrics.Registry.Operations {
@@ -126,7 +126,8 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 				prometheus.CounterValue,
 				float64(count),
 				key.Name,
-				checksumStr,
+				key.ServiceName,
+				peTimestampStr,
 				sessionIDStr,
 				opString,
 				result,
