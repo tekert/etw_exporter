@@ -174,7 +174,7 @@ func (sc *SysConfCollector) AddLogicalDisk(info LogicalDiskInfo) {
 
 // AddServiceInfo adds a service tag mapping to the central state manager.
 func (sc *SysConfCollector) AddServiceInfo(info ServiceInfo) {
-	sc.stateManager.RegisterServiceTag(info.SubProcessTag, info.ServiceName)
+	sc.stateManager.Services.RegisterServiceTag(info.SubProcessTag, info.ServiceName)
 	sc.log.Trace().
 		Uint32("tag", info.SubProcessTag).
 		Str("name", info.ServiceName).

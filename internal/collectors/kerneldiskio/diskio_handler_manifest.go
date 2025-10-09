@@ -149,7 +149,7 @@ func (d *HandlerManifest) HandleDiskRead(helper *etw.EventRecordHelper) error {
 
 	// https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
 	pid := helper.EventRec.EventHeader.ProcessId
-	pData, _ := d.stateManager.GetCurrentProcessDataByPID(pid)
+	pData, _ := d.stateManager.Processes.GetCurrentProcessDataByPID(pid)
 
 	d.customCollector.RecordDiskIO(uint32(diskNumber), pData, uint32(transferSize), false)
 
@@ -198,7 +198,7 @@ func (d *HandlerManifest) HandleDiskWrite(helper *etw.EventRecordHelper) error {
 
 	// https://learn.microsoft.com/en-us/archive/msdn-magazine/2009/october/core-instrumentation-events-in-windows-7-part-2
 	pid := helper.EventRec.EventHeader.ProcessId
-	pData, _ := d.stateManager.GetCurrentProcessDataByPID(pid)
+	pData, _ := d.stateManager.Processes.GetCurrentProcessDataByPID(pid)
 	d.log.Trace().Uint32("fallback_pid", pid).Msg("DiskWrite using fallback PID from event header")
 
 	d.customCollector.RecordDiskIO(uint32(diskNumber), pData, uint32(transferSize), true)

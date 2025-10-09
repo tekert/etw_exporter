@@ -78,7 +78,7 @@ func (sm *KernelStateManager) AggregateMetrics() {
 	unknownTagsAttempted := make(map[uint32]bool)
 
 	// Iterate over all active process instances.
-	sm.processManager.RangeProcesses(func(pData *ProcessData) bool {
+	sm.Processes.RangeProcesses(func(pData *ProcessData) bool {
 		// --- Lazy Service Tag Resolution (COLD PATH) ---
 		// If this process has a SubProcessTag but no ServiceName, attempt to resolve it
 		// via Windows API. This only happens for services started after exporter launch.
@@ -93,7 +93,7 @@ func (sm *KernelStateManager) AggregateMetrics() {
 			if resolvedName, err := windowsapi.QueryServiceNameByTag(pid, tag); err == nil {
 				GlobalDiagnostics.RecordServiceEnrichedAPI()
 				// Cache the resolved name for future threads with this tag
-				sm.systemState.RegisterServiceTag(tag, resolvedName)
+				sm.Services.RegisterServiceTag(tag, resolvedName)
 				// Apply to this process immediately for this scrape
 				pData.Info.mu.Lock()
 				if pData.Info.ServiceName == "" {

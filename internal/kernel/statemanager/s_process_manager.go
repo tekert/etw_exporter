@@ -4,6 +4,7 @@ package statemanager
 
 import (
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,9 @@ type ProcessManager struct {
 	// Process Start Key state for robust tracking
 	pidToCurrentStartKey    maps.ConcurrentMap[uint32, uint64]       // key: uint32 (PID), value: uint64 (current StartKey)  // not used
 	pidToCurrentProcessData maps.ConcurrentMap[uint32, *ProcessData] // key: uint32 (PID), value: *ProcessData (direct access)
+
+	// Back-reference to the orchestrator to access shared state like the scrape counter.
+	stateManager *KernelStateManager
 
 	// Process filtering state
 	processFilterEnabled bool
@@ -71,6 +75,12 @@ func newProcessManager(log *phusluadapter.SampledLogger) *ProcessManager {
 	pm.instanceData.Store(UnknownProcessStartKey, unknownProc)
 
 	return pm
+}
+
+// setStateManager sets the reference to the KernelStateManager to resolve circular dependencies
+// and allow access to shared state.
+func (pm *ProcessManager) setStateManager(sm *KernelStateManager) {
+	pm.stateManager = sm
 }
 
 // EnrichProcessWithImageData handles enrichment data from an Image/Load event.
@@ -171,13 +181,16 @@ func (pm *ProcessManager) AddProcess(
 		Msg("Process added to process manager")
 }
 
+// TODO: instead of mark for deletion, delete it and aggregate by name+checksum+sessionID?
 // MarkProcessForDeletion marks a process for deletion. This is the single, consolidated
 // function for handling process termination.
 func (pm *ProcessManager) MarkProcessForDeletion(
 	pid uint32,
 	startKey uint64,
-	terminationTime time.Time,
-	terminatedAtScrape uint64) {
+	terminationTime time.Time) {
+
+	// Get the current scrape generation internally, keeping the public API clean.
+	currentScrape := pm.stateManager.scrapeCounter.Load()
 
 	//  Update the ProcessData object if it exists to set the termination time.
 	if pData, exists := pm.instanceData.Load(startKey); exists {
@@ -194,7 +207,7 @@ func (pm *ProcessManager) MarkProcessForDeletion(
 	}
 
 	// Mark in the global terminated list with the scrape generation when it was terminated.
-	pm.terminatedProcesses.Store(startKey, terminatedAtScrape)
+	pm.terminatedProcesses.Store(startKey, currentScrape)
 
 	// The pidToCurrentStartKey mapping is intentionally NOT deleted here.
 	// The mapping must persist for the entire grace period to allow late-arriving
@@ -307,6 +320,84 @@ func (pm *ProcessManager) RangeProcesses(f func(p *ProcessData) bool) {
 func (pm *ProcessManager) GetProcessCount() int {
 	var count int
 	pm.instanceData.Range(func(_ uint64, _ *ProcessData) bool {
+		count++
+		return true
+	})
+	return count
+}
+
+// GetProcessNameBySK returns the process name for a given start key.
+// It can resolve names for active processes.
+// If the process is not found, it returns a formatted "unknown" string and false.
+func (pm *ProcessManager) GetProcessNameBySK(startKey uint64) (string, bool) {
+	if pData, exists := pm.GetProcessDataBySK(startKey); exists {
+		pData.Info.mu.Lock()
+		name := pData.Info.Name
+		pData.Info.mu.Unlock()
+		return name, true
+	}
+	return "unknown_sk_" + strconv.FormatUint(startKey, 10), false
+}
+
+// GetProcessInfoBySK returns a clone of the ProcessInfo struct for a given start key.
+// This provides a consistent, thread-safe snapshot of the process's state.
+func (pm *ProcessManager) GetProcessInfoBySK(startKey uint64) (ProcessInfo, bool) {
+	if pData, exists := pm.GetProcessDataBySK(startKey); exists {
+		return pData.Info.Clone(), true
+	}
+	return ProcessInfo{}, false
+}
+
+// GetKnownProcessNameBySK retrieves the name for a known/tracked process.
+func (pm *ProcessManager) GetKnownProcessNameBySK(startKey uint64) (string, bool) {
+	if pData, exists := pm.GetProcessDataBySK(startKey); exists {
+		pData.Info.mu.Lock()
+		name := pData.Info.Name
+		pData.Info.mu.Unlock()
+		return name, true
+	}
+	return "", false
+}
+
+// IsKnownProcessID checks if a process with the given PID is being tracked.
+func (pm *ProcessManager) IsKnownProcessID(pid uint32) bool {
+	startKey, ok := pm.GetProcessCurrentStartKey(pid)
+	if !ok {
+		return false
+	}
+	return pm.IsTrackedStartKey(startKey)
+}
+
+// GetProcessNameByID returns the process name for a given PID.
+func (pm *ProcessManager) GetProcessNameByID(pid uint32) (string, bool) {
+	if startKey, ok := pm.GetProcessCurrentStartKey(pid); ok {
+		return pm.GetProcessNameBySK(startKey)
+	}
+	return "unknown_pid_" + strconv.FormatUint(uint64(pid), 10), false
+}
+
+// GetKnownProcessNameByID is a convenience helper that combines checking if a process
+// is known/tracked with retrieving its name.
+func (pm *ProcessManager) GetKnownProcessNameByID(pid uint32) (string, bool) {
+	startKey, ok := pm.GetProcessCurrentStartKey(pid)
+	if !ok {
+		return "", false
+	}
+	return pm.GetKnownProcessNameBySK(startKey)
+}
+
+// IsTrackedStartKey checks if a process with the given start key is being tracked.
+func (pm *ProcessManager) IsTrackedStartKey(startKey uint64) bool {
+	_, exists := pm.GetProcessDataBySK(startKey)
+	return exists
+}
+
+// --- Debug Provider Methods ---
+
+// GetTerminatedProcessCount returns the number of processes marked for termination.
+func (pm *ProcessManager) GetTerminatedProcessCount() int {
+	var count int
+	pm.terminatedProcesses.Range(func(u uint64, u2 uint64) bool {
 		count++
 		return true
 	})

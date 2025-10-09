@@ -99,7 +99,7 @@ func (h *Handler) HandleImageLoadEvent(helper *etw.EventRecordHelper) error {
 
 	// The state manager's AddImage method now contains all logic for storing the image,
 	// reference counting, and triggering process enrichment for main executables.
-	h.stateManager.AddImage(processID, imageBase, imageSize, fileName, timeDateStamp, imageChecksum)
+	h.stateManager.Images.AddImage(processID, imageBase, imageSize, fileName, timeDateStamp, imageChecksum)
 
 	return nil
 }
@@ -140,7 +140,7 @@ func (h *Handler) HandleImageUnloadEvent(helper *etw.EventRecordHelper) error {
 
 	// Decrement the image's reference count. The state manager facade will handle
 	// notifying any interested listeners before marking the image for deletion.
-	h.stateManager.UnloadImage(imageBase)
+	h.stateManager.Images.UnloadImage(imageBase)
 
 	return nil
 }

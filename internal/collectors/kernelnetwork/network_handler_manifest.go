@@ -92,7 +92,7 @@ func (nh *HandlerManifest) HandleTCPDataSent(helper *etw.EventRecordHelper) erro
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -130,7 +130,7 @@ func (nh *HandlerManifest) HandleTCPDataReceived(helper *etw.EventRecordHelper) 
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(processID))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(processID))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -170,7 +170,7 @@ func (nh *HandlerManifest) HandleTCPConnectionAttempted(helper *etw.EventRecordH
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -198,7 +198,7 @@ func (nh *HandlerManifest) HandleTCPConnectionAccepted(helper *etw.EventRecordHe
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -226,7 +226,7 @@ func (nh *HandlerManifest) HandleTCPDataRetransmitted(helper *etw.EventRecordHel
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -267,7 +267,7 @@ func (nh *HandlerManifest) HandleTCPConnectionFailed(helper *etw.EventRecordHelp
 	}
 
 	// System-level failures are attributed to the "System" process (PID 4).
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(statemanager.SystemProcessID)
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID)
 	if !ok {
 		nh.log.SampledWarn("network_process_error").Msg("Could not find System process (PID 4) to attribute connection failure.")
 		return nil
@@ -301,7 +301,7 @@ func (nh *HandlerManifest) HandleUDPDataSent(helper *etw.EventRecordHelper) erro
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -334,7 +334,7 @@ func (nh *HandlerManifest) HandleUDPDataReceived(helper *etw.EventRecordHelper) 
 	if err != nil {
 		return err
 	}
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(uint32(pid))
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(uint32(pid))
 	if !ok {
 		return nil // Process not known, skip.
 	}
@@ -375,7 +375,7 @@ func (nh *HandlerManifest) HandleUDPConnectionFailed(helper *etw.EventRecordHelp
 	}
 
 	// System-level failures are attributed to the "System" process (PID 4).
-	pData, ok := nh.sm.GetCurrentProcessDataByPID(statemanager.SystemProcessID)
+	pData, ok := nh.sm.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID)
 	if !ok {
 		nh.log.SampledWarn("network_process_error").Msg("Could not find System process (PID 4) to attribute connection failure.")
 		return nil

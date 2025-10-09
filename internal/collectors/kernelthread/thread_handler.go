@@ -122,7 +122,7 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 
 	// Directly resolve the thread to its process and increment the counter on the hot path.
 	// This simplifies the aggregation logic significantly.
-	if pData, ok := c.stateManager.GetCurrentProcessDataByThread(newThreadID); ok {
+	if pData, ok := c.stateManager.Threads.GetCurrentProcessDataByThread(newThreadID); ok {
 		pData.RecordContextSwitch()
 	}
 
@@ -207,7 +207,7 @@ func (c *Handler) HandleThreadStartRaw(er *etw.EventRecord) error {
 
 	// Store thread to process mapping for context switch metrics
 	// Pass the event's timestamp to AddThread to prevent state corruption from PID reuse.
-	c.stateManager.AddThread(newThreadID, processID, er.Timestamp(), subProcessTag)
+	c.stateManager.Threads.AddThread(newThreadID, processID, er.Timestamp(), subProcessTag)
 
 	// Track thread creation
 	if c.collector != nil {
@@ -251,7 +251,7 @@ func (c *Handler) HandleThreadEndRaw(er *etw.EventRecord) error {
 	newThreadID, _ := er.GetUint32At(4)
 
 	// Mark the thread for deletion. The actual cleanup will happen after the next scrape.
-	c.stateManager.MarkThreadForDeletion(newThreadID)
+	c.stateManager.Threads.MarkThreadForDeletion(newThreadID)
 
 	// Track thread termination
 	if c.collector != nil {

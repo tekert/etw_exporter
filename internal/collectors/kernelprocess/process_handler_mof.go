@@ -83,7 +83,7 @@ func (ph *HandlerMof) HandleProcessStart(helper *etw.EventRecordHelper) error {
 		return nil
 	}
 
-	ph.stateManager.AddProcess(
+	ph.stateManager.Processes.AddProcess(
 		uint32(processID),
 		startKey,
 		processName,
@@ -123,7 +123,7 @@ func (ph *HandlerMof) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	}
 
 	// Mark the process for deletion using its unique start key.
-	ph.stateManager.MarkProcessForDeletion(pid, startKey, timestamp)
+	ph.stateManager.Processes.MarkProcessForDeletion(pid, startKey, timestamp)
 
 	return nil
 }

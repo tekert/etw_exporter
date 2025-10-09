@@ -315,7 +315,7 @@ func (c *PerfCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// Prune metrics for unloaded drivers from the persistent map.
-	cleanedImages := c.sm.GetCleanedImages()
+	cleanedImages := c.sm.Images.GetCleanedImages()
 	if len(cleanedImages) > 0 {
 		c.log.Debug().Strs("drivers", cleanedImages).Msg("Pruning driver metrics for unloaded images")
 		for _, imageName := range cleanedImages {
@@ -590,7 +590,7 @@ func (c *PerfCollector) correlateISR(buffer *metricsBuffer, cpu uint16, dpcIniti
 // resolveDriverName is an optimized version that does not require a lock.
 func (c *PerfCollector) resolveDriverName(routineAddress uint64) string {
 	// The state manager now has a high-performance cache. We query it directly.
-	imageInfo, ok := c.sm.GetImageForAddress(routineAddress)
+	imageInfo, ok := c.sm.Images.GetImageForAddress(routineAddress)
 	if !ok {
 		return "unknown"
 	}

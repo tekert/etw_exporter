@@ -149,7 +149,7 @@ func (d *HandlerMof) HandleDiskReadMofRaw(er *etw.EventRecord) error {
 
 	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if p, ok := d.stateManager.GetCurrentProcessDataByThread(issuingTID); ok {
+		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
 			pData = p
 		}
 	}
@@ -157,14 +157,22 @@ func (d *HandlerMof) HandleDiskReadMofRaw(er *etw.EventRecord) error {
 	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
 	if pData == nil {
 		headerPID := er.EventHeader.ProcessId
-		if p, ok := d.stateManager.GetCurrentProcessDataByPID(headerPID); ok {
+		d.log.SampledWarn("disk_read_pdata").
+			Uint32("issuing_tid", issuingTID).
+			Msg("DiskRead IssuingThreadId returned no process data, falling back to header PID")
+		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
 			pData = p
+		} else {
+			d.log.SampledWarn("disk_read_pdata2").
+				Uint32("issuing_tid", issuingTID).
+				Uint32("header_pid", headerPID).
+				Msg("DiskRead header PID also returned no process data, attributing to system-wide only")
 		}
 	}
 
 	// A pData == nil means we couldn't attribute the I/O to a known process.
 	// The collector will still record the system-wide metric, but will skip the
-	// per-process metric if startKey is 0.
+	// per-process metric if pData is nil.
 	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, false)
 
 	return nil
@@ -227,7 +235,7 @@ func (d *HandlerMof) HandleDiskWriteMofRaw(er *etw.EventRecord) error {
 
 	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
 	if issuingTID != 0 {
-		if p, ok := d.stateManager.GetCurrentProcessDataByThread(issuingTID); ok {
+		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
 			pData = p
 		}
 	}
@@ -238,14 +246,19 @@ func (d *HandlerMof) HandleDiskWriteMofRaw(er *etw.EventRecord) error {
 			Uint32("issuing_tid", issuingTID).
 			Msg("DiskWrite IssuingThreadId returned no process data, falling back to header PID")
 		headerPID := er.EventHeader.ProcessId
-		if p, ok := d.stateManager.GetCurrentProcessDataByPID(headerPID); ok {
+		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
 			pData = p
+		} else {
+			d.log.SampledWarn("disk_write_pdata2").
+				Uint32("issuing_tid", issuingTID).
+				Uint32("header_pid", headerPID).
+				Msg("DiskWrite header PID also returned no process data, attributing to system-wide only")
 		}
 	}
 
 	// A startKey of 0 means we couldn't attribute the I/O to a known process.
 	// The collector will still record the system-wide metric, but will skip the
-	// per-process metric if startKey is 0.
+	// per-process metric if pData is nil.
 	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, true)
 
 	return nil

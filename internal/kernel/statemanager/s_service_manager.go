@@ -1,8 +1,27 @@
 package statemanager
 
+import (
+	"etw_exporter/internal/maps"
+
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
+)
+
+// ServiceManager is responsible for mapping SubProcessTags to service names.
+type ServiceManager struct {
+	serviceTags maps.ConcurrentMap[uint32, string] // Key: SubProcessTag, Value: ServiceName
+	log         *phusluadapter.SampledLogger
+}
+
+// newServiceManager creates and initializes a new ServiceManager.
+func newServiceManager(log *phusluadapter.SampledLogger) *ServiceManager {
+	return &ServiceManager{
+		log:         log,
+		serviceTags: maps.NewConcurrentMap[uint32, string](),
+	}
+}
+
 // RegisterServiceTag stores a mapping between a SubProcessTag and a service name.
-// This is called by the SystemConfig collector when it discovers service information.
-func (sm *SystemState) RegisterServiceTag(tag uint32, name string) {
+func (sm *ServiceManager) RegisterServiceTag(tag uint32, name string) {
 	if tag > 0 && name != "" {
 		sm.serviceTags.Store(tag, name)
 	}
@@ -11,7 +30,7 @@ func (sm *SystemState) RegisterServiceTag(tag uint32, name string) {
 // resolveAndApplyServiceName checks if a process needs a service name and applies it.
 // This is a one-time operation per process instance, triggered by the first thread
 // that provides a valid SubProcessTag.
-func (sm *SystemState) resolveAndApplyServiceName(pData *ProcessData, subProcessTag uint32) {
+func (sm *ServiceManager) resolveAndApplyServiceName(pData *ProcessData, subProcessTag uint32) {
 	if subProcessTag == 0 {
 		return
 	}
@@ -52,10 +71,12 @@ func (sm *SystemState) resolveAndApplyServiceName(pData *ProcessData, subProcess
 	pData.Info.mu.Unlock()
 }
 
+// --- Debug Provider Methods ---
+
 // GetServiceCount returns the current number of cached service tags.
-func (ss *SystemState) GetServiceCount() int {
+func (sm *ServiceManager) GetServiceCount() int {
 	var count int
-	ss.serviceTags.Range(func(u uint32, s string) bool {
+	sm.serviceTags.Range(func(u uint32, s string) bool {
 		count++
 		return true
 	})
@@ -63,8 +84,8 @@ func (ss *SystemState) GetServiceCount() int {
 }
 
 // RangeServices iterates over services for the debug http handler.
-func (ss *SystemState) RangeServices(f func(tag uint32, name string)) {
-	ss.serviceTags.Range(func(tag uint32, name string) bool {
+func (sm *ServiceManager) RangeServices(f func(tag uint32, name string)) {
+	sm.serviceTags.Range(func(tag uint32, name string) bool {
 		f(tag, name)
 		return true
 	})

@@ -88,7 +88,7 @@ func (ph *HandlerManifest) HandleProcessStart(helper *etw.EventRecordHelper) err
 	startKey := windowsapi.GetStartKeyFromSequence(sequenceNumber)
 	//startKey3, _ := helper.EventRec.ExtProcessStartKey()
 
-	ph.stateManager.AddProcess(
+	ph.stateManager.Processes.AddProcess(
 		uint32(processID),
 		startKey,
 		processName,
@@ -134,7 +134,7 @@ func (ph *HandlerManifest) HandleProcessEnd(helper *etw.EventRecordHelper) error
 	sequenceNumber, _ := helper.GetPropertyUint("ProcessSequenceNumber")
 	startKey := windowsapi.GetStartKeyFromSequence(sequenceNumber)
 
-	ph.stateManager.MarkProcessForDeletion(uint32(processID), startKey, timestamp)
+	ph.stateManager.Processes.MarkProcessForDeletion(uint32(processID), startKey, timestamp)
 	return nil
 }
 
@@ -176,7 +176,7 @@ func (ph *HandlerManifest) HandleThreadStartRaw(er *etw.EventRecord) error {
 		subProcessTag = 0
 	}
 
-	ph.stateManager.AddThread(threadID, processID, er.Timestamp(), subProcessTag)
+	ph.stateManager.Threads.AddThread(threadID, processID, er.Timestamp(), subProcessTag)
 	return nil
 }
 
@@ -210,7 +210,7 @@ func (ph *HandlerManifest) HandleThreadEndRaw(er *etw.EventRecord) error {
 		return err
 	}
 
-	ph.stateManager.MarkThreadForDeletion(threadID)
+	ph.stateManager.Threads.MarkThreadForDeletion(threadID)
 	return nil
 }
 
@@ -241,7 +241,7 @@ func (ph *HandlerManifest) HandleImageLoad(helper *etw.EventRecordHelper) error 
 	timeDateStamp, _ := helper.GetPropertyUint("TimeDateStamp")
 	// timestamp := helper.Timestamp()
 
-	ph.stateManager.AddImage(
+	ph.stateManager.Images.AddImage(
 		uint32(processID),
 		imageBase,
 		imageSize,
@@ -275,6 +275,6 @@ func (ph *HandlerManifest) HandleImageLoad(helper *etw.EventRecordHelper) error 
 func (ph *HandlerManifest) HandleImageUnload(helper *etw.EventRecordHelper) error {
 	imageBase, _ := helper.GetPropertyUint("ImageBase")
 
-	ph.stateManager.UnloadImage(imageBase)
+	ph.stateManager.Images.UnloadImage(imageBase)
 	return nil
 }

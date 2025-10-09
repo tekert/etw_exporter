@@ -141,8 +141,6 @@ func (e *ETWExporter) Run() error {
 		stop()
 	}()
 
-	//debug.DCounter = debug.NewDebugCounter(ctx) // ! testing
-
 	if e.config.Server.PprofEnabled {
 		go func() {
 			// Recover from panics in this goroutine to trigger a graceful shutdown.
