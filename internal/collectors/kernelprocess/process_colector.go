@@ -65,7 +65,7 @@ func (c *ProcessCollector) Collect(ch chan<- prometheus.Metric) {
 			1,
 			key.Name,
 			key.ServiceName,
-			"0x"+strconv.FormatUint(uint64(key.PeChecksum), 16),
+			"0x"+strconv.FormatUint(uint64(key.UniqueHash), 16),
 			strconv.FormatUint(uint64(key.SessionID), 10),
 		)
 		return true // Continue iteration

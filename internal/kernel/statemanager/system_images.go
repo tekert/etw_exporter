@@ -4,7 +4,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"time"
 )
 
 // --- Image Management ---
@@ -36,8 +35,8 @@ func (ss *SystemState) AddImage(
 	imageBase,
 	imageSize uint64,
 	fileName string,
-	loadTimestamp uint32,
-	imageChecksum uint32) {
+	peTimestamp uint32,
+	peChecksum uint32) {
 
 	// --- Part 1: Store the image and handle reference counting ---
 	if imageBase != 0 && imageSize != 0 {
@@ -65,8 +64,14 @@ func (ss *SystemState) AddImage(
 	// the process name. We pass it to the process manager, which contains the
 	// logic to decide if the new name is better than the existing one. This is more
 	// reliable than using the name from Process/Start alone.
-	if strings.HasSuffix(strings.ToLower(fileName), ".exe") {
-		ss.processManager.EnrichProcessWithImageData(pid, imageChecksum, fileName)
+	if ss.processManager.Enabled {
+		if strings.HasSuffix(strings.ToLower(fileName), ".exe") {
+			//if peChecksum == 0 {
+			//	ss.processManager.EnrichProcessWithImageData(pid, imageSize, fileName)
+			//} else {
+			ss.processManager.EnrichProcessWithImageData(pid, uint64(peChecksum), fileName)
+			//}
+		}
 	}
 
 	// --- Part 3: Logging ---
@@ -74,14 +79,14 @@ func (ss *SystemState) AddImage(
 		Uint64("image_base", imageBase).
 		Uint64("image_size", imageSize).
 		Str("image_name", fileName).
-		Uint32("load_timestamp", loadTimestamp).
-		Uint32("image_checksum", imageChecksum).
+		Uint32("load_timestamp", peTimestamp).
+		Uint32("image_checksum", peChecksum).
 		Msg("Image loaded")
 }
 
 // UnloadImage decrements the reference count for an image and marks it for deletion
 // if the count reaches zero.
-func (ss *SystemState) UnloadImage(imageBase uint64) {
+func (ss *SystemState) UnloadImage(imageBase uint64, terminatedAtGeneration uint64) {
 	ss.imagesMutex.RLock()
 	info, exists := ss.images[imageBase]
 	ss.imagesMutex.RUnlock()
@@ -89,7 +94,7 @@ func (ss *SystemState) UnloadImage(imageBase uint64) {
 	if exists {
 		// If the ref count drops to zero or below, mark it for deletion.
 		if info.RefCount.Add(-1) <= 0 {
-			ss.terminatedImages.Store(imageBase, time.Now())
+			ss.terminatedImages.Store(imageBase, terminatedAtGeneration)
 
 			ss.log.Trace().Uint64("image_base", imageBase).
 				Str("image_name", info.ImageName).
@@ -98,13 +103,13 @@ func (ss *SystemState) UnloadImage(imageBase uint64) {
 	}
 }
 
-// MarkImageForDeletion flags an image for cleanup after the next scrape.
-func (ss *SystemState) MarkImageForDeletion(imageBase uint64) {
+// markImageForDeletion flags an image for cleanup after the next scrape.
+func (ss *SystemState) markImageForDeletion(imageBase uint64, terminatedAtGeneration uint64) {
 	ss.imagesMutex.RLock()
 	_, exists := ss.images[imageBase]
 	ss.imagesMutex.RUnlock()
 	if exists {
-		ss.terminatedImages.Store(imageBase, time.Now())
+		ss.terminatedImages.Store(imageBase, terminatedAtGeneration)
 	}
 }
 
@@ -180,6 +185,28 @@ func (ss *SystemState) GetImageCount() int {
 	ss.imagesMutex.RLock()
 	defer ss.imagesMutex.RUnlock()
 	return len(ss.images)
+}
+
+// GetCleanedImages returns the names of all images currently marked for termination.
+// This a helper that provides a snapshot for collectors to use when pruning their own metrics.
+func (ss *SystemState) GetCleanedImages() []string {
+	var cleanedNames []string
+
+	// A read lock is sufficient to ensure a consistent view of both the terminated
+	// list and the main image list from which we retrieve the names.
+	ss.imagesMutex.RLock()
+	defer ss.imagesMutex.RUnlock()
+
+	ss.terminatedImages.Range(func(imageBase uint64, _ uint64) bool {
+		// Look up the image info using the base address. The image will still
+		// exist in the main map at this point in the scrape cycle.
+		if info, exists := ss.images[imageBase]; exists {
+			cleanedNames = append(cleanedNames, info.ImageName)
+		}
+		return true
+	})
+
+	return cleanedNames
 }
 
 // RangeImages iterates over images for the debug http handler.

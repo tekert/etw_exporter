@@ -17,7 +17,7 @@ const (
 // The key is unique within a boot session and handles PID reuse correctly by
 // incorporating the unique EPROCESS kernel pointer.
 // This implementation is a non-allocating version of FNV-1a.
-func GenerateStartKey(pid uint32, parentPid uint32, eprocessPtr uint64) uint64 {
+func (*KernelStateManager) GenerateStartKey(pid uint32, parentPid uint32, eprocessPtr uint64) uint64 {
 	if eprocessPtr == 0 {
 		return 0 // Invalid
 	}

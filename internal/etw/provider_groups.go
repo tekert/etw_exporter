@@ -2,9 +2,7 @@ package etwmain
 
 import (
 	"etw_exporter/internal/config"
-	"fmt"
 
-	"github.com/phuslu/log"
 	"github.com/tekert/goetw/etw"
 
 	guids "etw_exporter/internal/etw/guids"
@@ -26,14 +24,17 @@ type ProviderGroup struct {
 
 // newProcessCorrelationProvider is a helper to create a standard provider
 // for process name correlation, reducing code duplication.
+// TODO: on win10 this has no real use, no thread rundowns or image rundowns
+//
+//	process are the same as the NT Kernel Logger provider and supports rundown but no thread/image.
 func newProcessCorrelationProvider() etw.Provider {
 	return etw.Provider{
-		Name:             "Microsoft-Windows-Kernel-Process",
-		GUID:             *guids.MicrosoftWindowsKernelProcessGUID,
-		EnableLevel:      0xFF,
-		MatchAnyKeyword:  0x10, // WINEVENT_KEYWORD_PROCESS
-		MatchAllKeyword:  0x0,
-		EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+		// Name:             "Microsoft-Windows-Kernel-Process",
+		// GUID:             *guids.MicrosoftWindowsKernelProcessGUID,
+		// EnableLevel:      0xFF,
+		// MatchAnyKeyword:  0x10 | 0x20 | 0x40, // WINEVENT_KEYWORD_PROCESS, WINEVENT_KEYWORD_THREAD, WINEVENT_KEYWORD_IMAGE
+		// MatchAllKeyword:  0x0,
+		// //EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
 	}
 }
 
@@ -59,7 +60,7 @@ var AllProviderGroups = []*ProviderGroup{
 			{
 				Name:            "SystemProcessProvider", // For TID->PID mapping
 				GUID:            *etw.SystemProcessProviderGuid,
-				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD | etw.SYSTEM_PROCESS_KW_GENERAL,
 			},
 			{
 				Name:            "SystemIoProvider",
@@ -74,16 +75,19 @@ var AllProviderGroups = []*ProviderGroup{
 		},
 		// --- Common ---
 		ManifestProviders: []etw.Provider{
-			newProcessCorrelationProvider(), // For disk I/O process name correlation
-			{
-				Name: "Microsoft-Windows-Kernel-Disk",
-				GUID: *guids.MicrosoftWindowsKernelDiskGUID,
-				// Enable all disk I/O events: Read (10), Write (11), Flush (14)
-				EnableLevel:     0xFF, // All levels
-				MatchAnyKeyword: 0x0,  // All keywords
-				MatchAllKeyword: 0x0,
-				//EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
-			},
+			// Use System providers, Microsoft-Windows-Kernel-Disk only reports user space and
+			// doesnt match the clock in the NT Kernel logger session.
+			// (and manifest process doesnt support thread rundowns, for simplicity we use the NT Kernel logger in win10)
+			// newProcessCorrelationProvider(), // For disk I/O process name correlation
+			// {
+			// 	Name: "Microsoft-Windows-Kernel-Disk",
+			// 	GUID: *guids.MicrosoftWindowsKernelDiskGUID,
+			// 	// Enable all disk I/O events: Read (10), Write (11), Flush (14)
+			// 	EnableLevel:     0xFF, // All levels
+			// 	MatchAnyKeyword: 0x0,  // All keywords
+			// 	MatchAllKeyword: 0x0,
+			// 	//EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+			// },
 			// {
 			// 	Name: "Microsoft-Windows-Kernel-File",
 			// 	GUID: *MicrosoftWindowsKernelFileGUID,
@@ -120,7 +124,7 @@ var AllProviderGroups = []*ProviderGroup{
 			{
 				Name:            "SystemProcessProvider",
 				GUID:            *etw.SystemProcessProviderGuid,
-				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD | etw.SYSTEM_PROCESS_KW_GENERAL,
 			},
 		},
 		// --- Common ---
@@ -168,17 +172,30 @@ var AllProviderGroups = []*ProviderGroup{
 	// NetworkGroup uses manifest providers for network I/O events
 	{
 		Name:        "network",
-		KernelFlags: 0 | newKernelProcessCorrelationProvider(),
-		ManifestProviders: []etw.Provider{
+		KernelFlags: etw.EVENT_TRACE_FLAG_NETWORK_TCPIP | newKernelProcessCorrelationProvider(),
+		SystemProviders: []etw.Provider{
 			{
-				Name: "Microsoft-Windows-Kernel-Network",
-				GUID: *guids.MicrosoftWindowsKernelNetworkGUID,
-				// Enable network events: TCP/UDP data sent/received, connections
-				EnableLevel:      0xFF, // All levels
-				MatchAnyKeyword:  0x30, // KERNEL_NETWORK_KEYWORD_IPV4 | KERNEL_NETWORK_KEYWORD_IPV6
-				MatchAllKeyword:  0x0,
-				EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+				Name:            "SystemProcessProvider",
+				GUID:            *etw.SystemProcessProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_GENERAL,
 			},
+			{
+				Name:            "SystemIoProvider",
+				GUID:            *etw.SystemIoProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_IO_KW_NETWORK,
+			},
+		},
+		// --- Common ---
+		ManifestProviders: []etw.Provider{
+			// {
+			// 	Name: "Microsoft-Windows-Kernel-Network",
+			// 	GUID: *guids.MicrosoftWindowsKernelNetworkGUID,
+			// 	// Enable network events: TCP/UDP data sent/received, connections
+			// 	EnableLevel:      0xFF, // All levels
+			// 	MatchAnyKeyword:  0x30, // KERNEL_NETWORK_KEYWORD_IPV4 | KERNEL_NETWORK_KEYWORD_IPV6
+			// 	MatchAllKeyword:  0x0,
+			// 	EnableProperties: etw.EVENT_ENABLE_PROPERTY_PROCESS_START_KEY,
+			// },
 			newProcessCorrelationProvider(),
 		},
 		IsEnabled: func(config *config.CollectorConfig) bool {
@@ -201,9 +218,9 @@ var AllProviderGroups = []*ProviderGroup{
 				MatchAnyKeyword: etw.SYSTEM_MEMORY_KW_HARD_FAULTS,
 			},
 			{
-				Name:            "SystemProcessProvider", // For TID->PID mapping
+				Name:            "SystemProcessProvider",
 				GUID:            *etw.SystemProcessProviderGuid,
-				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_THREAD | etw.SYSTEM_PROCESS_KW_GENERAL,
 			},
 		},
 		ManifestProviders: []etw.Provider{
@@ -226,6 +243,11 @@ var AllProviderGroups = []*ProviderGroup{
 				GUID:            *guids.SystemRegistryProviderGuid,
 				MatchAnyKeyword: etw.SYSTEM_REGISTRY_KW_GENERAL,
 			},
+			{
+				Name:            "SystemProcessProvider",
+				GUID:            *etw.SystemProcessProviderGuid,
+				MatchAnyKeyword: etw.SYSTEM_PROCESS_KW_GENERAL,
+			},
 		},
 		ManifestProviders: []etw.Provider{
 			newProcessCorrelationProvider(), // For process name correlation
@@ -244,24 +266,26 @@ func (pg *ProviderGroup) init() error {
 	return nil
 }
 
-// InitProviders initializes all enabled provider groups based on the config
-// and ensures necessary privileges are set
-func InitProviders(config *config.CollectorConfig) error {
-	// Initialize all enabled provider groups
-	var once bool = false
+// IsProcessManagerNeeded inspects the configuration and enabled provider
+// groups to decide if the full ProcessManager needs to be enabled.
+func IsProcessManagerNeeded(config *config.CollectorConfig) bool {
 	for _, group := range GetEnabledProviders(config) {
-		// Ensure we have the necessary privileges for kernel sessions if PROFILE flag is set
-		if group.KernelFlags&etw.EVENT_TRACE_FLAG_PROFILE != 0 && !once {
-			etw.EnableProfilingPrivileges()
-			log.Warn().Msg("SE_SYSTEM_PROFILE_NAME Privilege enabled for profiling")
-			once = true
+		if (group.KernelFlags & etw.EVENT_TRACE_FLAG_PROCESS) != 0 {
+			return true
 		}
-		if err := group.init(); err != nil {
-			log.Error().Err(err).Str("group", group.Name).Msg("ProviderGroup Init failed")
-			return fmt.Errorf("failed to initialize provider group %s: %w", group.Name, err)
+		for _, p := range group.ManifestProviders {
+			if p.GUID == *guids.MicrosoftWindowsKernelProcessGUID {
+				return true
+			}
+		}
+		for _, p := range group.SystemProviders {
+			if p.GUID == *etw.SystemProcessProviderGuid &&
+				(p.MatchAnyKeyword&etw.SYSTEM_PROCESS_KW_GENERAL != 0) {
+				return true
+			}
 		}
 	}
-	return nil
+	return false
 }
 
 // GetEnabledProviders returns all enabled provider groups

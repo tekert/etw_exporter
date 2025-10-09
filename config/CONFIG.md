@@ -43,8 +43,8 @@ enabled = true
 - **enabled**: Set to `true` to enable this collector.
 
 **Metrics Provided:**
-- `etw_process_info{process_name, image_checksum, session_id}`: A gauge metric that is `1` for every running program tracked by the exporter.
-  - **Note on `image_checksum`**: A value of `0x0` for the checksum is expected for many processes. The PE checksum is optional for user-mode applications and is often absent. It is also not applicable to special system processes like `System` or `Idle`. All other metrics will also report a checksum of `0x0` for these programs.
+- `etw_process_info{process_name, pe_checksum, session_id}`: A gauge metric that is `1` for every running program tracked by the exporter.
+  - **Note on `pe_checksum`**: TODO
 
 ### Process Filtering
 
@@ -75,9 +75,9 @@ enabled = true
 - `etw_disk_io_operations_total{disk, operation}`: Total count of I/O operations (`read`, `write`, `flush`) per physical disk.
 - `etw_disk_read_bytes_total{disk}`: Total bytes read per physical disk.
 - `etw_disk_written_bytes_total{disk}`: Total bytes written per physical disk.
-- `etw_disk_process_io_operations_total{process_name, image_checksum, session_id, disk, operation}`: Total count of I/O operations per program and disk.
-- `etw_disk_process_read_bytes_total{process_name, image_checksum, session_id, disk}`: Total bytes read per program and disk.
-- `etw_disk_process_written_bytes_total{process_name, image_checksum, session_id, disk}`: Total bytes written per program and disk.
+- `etw_disk_process_io_operations_total{process_name, pe_checksum, session_id, disk, operation}`: Total count of I/O operations per program and disk.
+- `etw_disk_process_read_bytes_total{process_name, pe_checksum, session_id, disk}`: Total bytes read per program and disk.
+- `etw_disk_process_written_bytes_total{process_name, pe_checksum, session_id, disk}`: Total bytes written per program and disk.
 
 ### Thread Context Switch Collector
 
@@ -92,7 +92,7 @@ enabled = false
 
 **Metrics Provided:**
 - `etw_thread_context_switches_cpu_total{cpu}`: Total number of context switches per CPU.
-- `etw_thread_context_switches_process_total{process_name, image_checksum, session_id}`: Total number of context switches per program.
+- `etw_thread_context_switches_process_total{process_name, pe_checksum, session_id}`: Total number of context switches per program.
 - `etw_thread_context_switch_interval_milliseconds{cpu}`: A histogram of the time between context switches on each CPU.
 - `etw_thread_states_total{state, wait_reason}`: A count of thread state transitions (e.g., `running`, `waiting`).
 
@@ -141,16 +141,17 @@ enable_retrasmission_rate = false
 - **enable_retrasmission_rate**: Enables metrics for tracking TCP retransmissions.
 
 **Metrics Provided:**
-- `etw_network_sent_bytes_total{process_name, image_checksum, session_id, protocol}`: Total bytes sent per program and protocol (`tcp`/`udp`).
-- `etw_network_received_bytes_total{process_name, image_checksum, session_id, protocol}`: Total bytes received per program and protocol.
+- `etw_network_sent_bytes_total{process_name, pe_checksum, session_id, protocol}`: Total bytes sent per program and protocol (`tcp`/`udp`).
+- `etw_network_received_bytes_total{process_name, pe_checksum, session_id, protocol}`: Total bytes received per program and protocol.
 - With `enable_connection_stats`:
-    - `etw_network_connections_attempted_total{process_name, image_checksum, session_id, protocol}`
-    - `etw_network_connections_accepted_total{process_name, image_checksum, session_id, protocol}`
-    - `etw_network_connections_failed_total{process_name, image_checksum, session_id, protocol, failure_code}`
+    - `etw_network_connections_attempted_total{process_name, pe_checksum, session_id, protocol}`
+    - `etw_network_connections_accepted_total{process_name, pe_checksum, session_id, protocol}`
+    - `etw_network_connections_failed_total{process_name, pe_checksum, session_id, protocol, failure_code}`
 - With `enable_by_protocol`:
-    - `etw_network_traffic_bytes_total{protocol, direction}`
+    - `etw_network_traffic_sent_bytes_total{protocol}`
+    - `etw_network_traffic_received_bytes_total{protocol}`
 - With `enable_retrasmission_rate`:
-    - `etw_network_retransmissions_total{process_name, image_checksum, session_id}`
+    - `etw_network_retransmissions_total{process_name, pe_checksum, session_id}`
 
 ### Memory Collector
 
@@ -168,7 +169,7 @@ enable_per_process = true
 **Metrics Provided:**
 - `etw_memory_hard_pagefaults_total`: Total number of hard page faults system-wide.
 - With `enable_per_process`:
-    - `etw_memory_hard_pagefaults_per_process_total{process_name, image_checksum, session_id}`: Total hard page faults by program.
+    - `etw_memory_hard_pagefaults_per_process_total{process_name, pe_checksum, session_id}`: Total hard page faults by program.
 
 ### Registry Collector
 
@@ -186,7 +187,7 @@ enable_per_process = true
 **Metrics Provided:**
 - `etw_registry_operations_total{operation, result}`: Total number of registry operations by type (e.g., `create_key`, `set_value`) and result (`success`/`failure`).
 - With `enable_per_process`:
-    - `etw_registry_operations_process_total{process_name, image_checksum, session_id, operation, result}`: Total number of registry operations per program.
+    - `etw_registry_operations_process_total{process_name, pe_checksum, session_id, operation, result}`: Total number of registry operations per program.
 
 ## Session Watcher Configuration
 
@@ -195,10 +196,13 @@ The `[session_watcher]` section configures the automatic restart of ETW sessions
 ```toml
 [session_watcher]
 enabled = true
-restart_kernel_session = true
+restart_kernel_session = "forced"
 restart_exporter_session = true
 ```
 
 - **enabled**: Set to `true` to enable the session watcher.
-- **restart_kernel_session**: If `true`, the watcher will attempt to restart the `NT Kernel Logger` session if it is stopped (Used only for Win 10 and below).
+- **restart_kernel_session**: Defines the restart policy for the `NT Kernel Logger` session if it is stopped by another process. This is primarily for systems older than Windows 11.
+  - `"off"`: Do not restart the session.
+  - `"enabled"`: Restart the session only after it is no longer in use by another process. The watcher will wait for the session to become free.
+  - `"forced"`: Immediately attempt to restart the session, potentially taking it over from another process.
 - **restart_exporter_session**: If `true`, the watcher will attempt to restart the main `etw_exporter` session if it is stopped (Recommended to leave this one enabled).

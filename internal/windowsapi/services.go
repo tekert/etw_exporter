@@ -44,16 +44,19 @@ var (
 // hosting the service (e.g., svchost.exe or a dedicated service executable).
 //
 // Implementation based on research from:
-//  - https://wj32.org/wp/2010/03/30/howto-use-i_querytaginformation/
-//  - https://github.com/3gstudent/Windows-EventLog-Bypass
-//  - https://artofpwn.com/2017/06/05/phant0m-killing-windows-event-log.html
 //
-//	 DWORD I_QueryTagInformation(
-//		 _In_opt_ PVOID Unknown,           // Always NULL
-//		 _In_     SC_SERVICE_TAG_QUERY_TYPE InfoLevel,
-//		 _Inout_  PVOID TagInfo
+//   - https://wj32.org/wp/2010/03/30/howto-use-i_querytaginformation/
 //
-//	 );
+//   - https://github.com/3gstudent/Windows-EventLog-Bypass
+//
+//   - https://artofpwn.com/2017/06/05/phant0m-killing-windows-event-log.html
+//
+//     DWORD I_QueryTagInformation(
+//     _In_opt_ PVOID Unknown,           // Always NULL
+//     _In_     SC_SERVICE_TAG_QUERY_TYPE InfoLevel,
+//     _Inout_  PVOID TagInfo
+//
+//     );
 func QueryServiceNameByTag(pid, tag uint32) (string, error) {
 	if tag == 0 {
 		return "", fmt.Errorf("invalid tag: 0")
@@ -107,8 +110,7 @@ func QueryServiceNameByTag(pid, tag uint32) (string, error) {
 // This function uses documented SCM APIs and is a reliable way to find a service name
 // when a tag is not available. It is slower than QueryServiceNameByTag because it
 // must enumerate all system services.
-// Depreacted. Use QueryServiceNameByTag instead.
-func queryServiceNameByPid(pid uint32) (string, error) {
+func QueryServiceNameByPid(pid uint32) (string, error) {
 	if pid == 0 {
 		return "", fmt.Errorf("invalid pid: 0")
 	}
@@ -168,7 +170,7 @@ func ResolveServiceName(pid, tag uint32) string {
 
 	// Strategy 2: Fallback for when tag lookup fails or tag is unavailable.
 	// This is slower but reliable.
-	name, err := queryServiceNameByPid(pid)
+	name, err := QueryServiceNameByPid(pid)
 	if err != nil {
 		return "" // Return empty string on failure
 	}

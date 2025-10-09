@@ -1,3 +1,5 @@
+// This file defines the ProcessManager, a specialized data store responsible exclusively
+// for the lifecycle of ProcessData objects.
 package statemanager
 
 import (
@@ -18,18 +20,18 @@ import (
 type ProcessManager struct {
 	// Process state
 	instanceData        maps.ConcurrentMap[uint64, *ProcessData] // key: uint64 (StartKey), value: *ProcessData
-	terminatedProcesses maps.ConcurrentMap[uint64, time.Time]    // key: uint64 (StartKey), value: time.Time
+	terminatedProcesses maps.ConcurrentMap[uint64, uint64]       // key: uint64 (StartKey), value: scrape generation
 	processDataPool     sync.Pool
 
 	// Process Start Key state for robust tracking
-	pidToCurrentStartKey maps.ConcurrentMap[uint32, uint64] // key: uint32 (PID), value: uint64 (current StartKey)
+	pidToCurrentStartKey    maps.ConcurrentMap[uint32, uint64]       // key: uint32 (PID), value: uint64 (current StartKey)  // not used
+	pidToCurrentProcessData maps.ConcurrentMap[uint32, *ProcessData] // key: uint32 (PID), value: *ProcessData (direct access)
 
 	// Process filtering state
 	processFilterEnabled bool
 	processNameFilters   []*regexp.Regexp
 
-	// Collaborators
-	systemState *SystemState // Reference to resolve pending threads
+	Enabled bool // Perfinfo doesnt requiere processes manager for example.
 
 	log *phusluadapter.SampledLogger
 }
@@ -37,10 +39,11 @@ type ProcessManager struct {
 // newProcessManager creates and initializes a new ProcessManager.
 func newProcessManager(log *phusluadapter.SampledLogger) *ProcessManager {
 	pm := &ProcessManager{
-		log:                  log,
-		instanceData:         maps.NewConcurrentMap[uint64, *ProcessData](),
-		terminatedProcesses:  maps.NewConcurrentMap[uint64, time.Time](),
-		pidToCurrentStartKey: maps.NewConcurrentMap[uint32, uint64](),
+		log:                     log,
+		instanceData:            maps.NewConcurrentMap[uint64, *ProcessData](),
+		terminatedProcesses:     maps.NewConcurrentMap[uint64, uint64](),
+		pidToCurrentStartKey:    maps.NewConcurrentMap[uint32, uint64](), // not used
+		pidToCurrentProcessData: maps.NewConcurrentMap[uint32, *ProcessData](),
 		processDataPool: sync.Pool{
 			New: func() any {
 				return &ProcessData{
@@ -53,6 +56,7 @@ func newProcessManager(log *phusluadapter.SampledLogger) *ProcessManager {
 				}
 			},
 		},
+		Enabled: false,
 	}
 
 	// Initialize the singleton "unknown process"
@@ -69,16 +73,11 @@ func newProcessManager(log *phusluadapter.SampledLogger) *ProcessManager {
 	return pm
 }
 
-// setSystemState sets the reference to the SystemState component to resolve circular dependencies.
-func (pm *ProcessManager) setSystemState(ss *SystemState) {
-	pm.systemState = ss
-}
-
 // EnrichProcessWithImageData handles enrichment data from an Image/Load event.
 // If the process is already known, it enriches it directly. If the Image/Load
 // event arrives before the Process/Start event, it stores the data in a
 // pending map to be applied when the process is created.
-func (pm *ProcessManager) EnrichProcessWithImageData(pid uint32, checksum uint32, imageName string) {
+func (pm *ProcessManager) EnrichProcessWithImageData(pid uint32, checksum uint64, imageName string) {
 	// Attempt to find the live process. This is now the ONLY path.
 	if startKey, ok := pm.pidToCurrentStartKey.Load(pid); ok {
 		if pData, pOk := pm.instanceData.Load(startKey); pOk {
@@ -126,19 +125,11 @@ func (pm *ProcessManager) EnrichProcessWithImageData(pid uint32, checksum uint32
 // AddProcess adds or updates process information.
 func (pm *ProcessManager) AddProcess(
 	pid uint32,
-	eventUniqueKey uint64, // The UniqueProcessKey from the MOF event, used as the immutable primary key.
+	startKey uint64, // The UniqueProcessKey from the MOF event, used as the immutable primary key.
 	eventImageName string,
 	parentPID uint32,
 	sessionID uint32,
 	eventTimestamp time.Time) {
-
-	// Generate a synthetic StartKey from the event data alone
-	// This works even if the process is already gone
-	startKey := GenerateStartKey(pid, parentPID, eventUniqueKey)
-	if startKey == 0 {
-		pm.log.Error().Uint32("pid", pid).Msg("Failed to generate StartKey")
-		return
-	}
 
 	if pData, exists := pm.instanceData.Load(startKey); exists {
 		// We are already tracking this exact process instance. This is likely a duplicate
@@ -159,7 +150,7 @@ func (pm *ProcessManager) AddProcess(
 	pData := pm.processDataPool.Get().(*ProcessData)
 	pData.Reset()
 	pData.Info.PID = pid
-	pData.Info.StartKey = eventUniqueKey
+	pData.Info.StartKey = startKey
 	pData.Info.Name = eventImageName
 	pData.Info.CreateTime = eventTimestamp // Best-effort create time.
 	pData.Info.LastSeen = eventTimestamp
@@ -169,6 +160,7 @@ func (pm *ProcessManager) AddProcess(
 	// Store the new process instance immediately.
 	pm.instanceData.Store(startKey, pData)
 	pm.pidToCurrentStartKey.Store(pid, startKey)
+	pm.pidToCurrentProcessData.Store(pid, pData)
 	GlobalDiagnostics.RecordProcessAdded(pid, pData.Info.Name)
 
 	pm.log.Trace().
@@ -183,17 +175,9 @@ func (pm *ProcessManager) AddProcess(
 // function for handling process termination.
 func (pm *ProcessManager) MarkProcessForDeletion(
 	pid uint32,
-	parentPID uint32,
-	eventUniqueKey uint64,
-	terminationTime time.Time) {
-
-	startKey := GenerateStartKey(pid, parentPID, eventUniqueKey)
-	if startKey == 0 {
-		pm.log.Error().
-			Uint32("pid", pid).
-			Msg("Failed to generate StartKey for process termination")
-		return
-	}
+	startKey uint64,
+	terminationTime time.Time,
+	terminatedAtScrape uint64) {
 
 	//  Update the ProcessData object if it exists to set the termination time.
 	if pData, exists := pm.instanceData.Load(startKey); exists {
@@ -209,9 +193,8 @@ func (pm *ProcessManager) MarkProcessForDeletion(
 		return
 	}
 
-	// Mark in the global terminated list with a timestamp. The post-scrape cleanup
-	// logic will use this timestamp to enforce a grace period before deletion.
-	pm.terminatedProcesses.Store(startKey, time.Now()) // Cleanup uses wall-clock time.
+	// Mark in the global terminated list with the scrape generation when it was terminated.
+	pm.terminatedProcesses.Store(startKey, terminatedAtScrape)
 
 	// The pidToCurrentStartKey mapping is intentionally NOT deleted here.
 	// The mapping must persist for the entire grace period to allow late-arriving
@@ -237,9 +220,6 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 		return 0
 	}
 
-	// Cascade deletion to threads via the SystemState manager.
-	pm.systemState.cleanupThreadsForTerminatedProcesses(procsToClean)
-
 	for startKey := range procsToClean {
 		// Always remove the process info and its primary key mappings.
 		if pData, exists := pm.instanceData.LoadAndDelete(startKey); exists {
@@ -256,6 +236,15 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 				return currentSK, true // Value does not match (PID reused), so keep the new entry.
 			})
 
+			// Atomically remove the direct pid -> pData mapping, using the same
+			// PID reuse-aware logic.
+			pm.pidToCurrentProcessData.Update(pid, func(currentPData *ProcessData, exists bool) (*ProcessData, bool) {
+				if exists && currentPData.Info.StartKey == startKey {
+					return nil, false // StartKey matches, so delete the entry.
+				}
+				return currentPData, true // StartKey does not match (PID reused), so keep the new entry.
+			})
+
 			// --- Recycle the entire ProcessData object ---
 			// The object is reset after it's retrieved from the pool in AddProcess
 			pm.processDataPool.Put(pData)
@@ -266,6 +255,8 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 
 // ApplyConfig applies collector configuration to the process manager.
 func (pm *ProcessManager) ApplyConfig(cfg *config.CollectorConfig) {
+	pm.Enabled = cfg.RequiresProcessManager
+
 	pm.processFilterEnabled = cfg.ProcessFilter.Enabled
 	if !pm.processFilterEnabled {
 		pm.log.Debug().Msg("Process filtering is disabled. All processes will be tracked.")
@@ -285,6 +276,12 @@ func (pm *ProcessManager) ApplyConfig(cfg *config.CollectorConfig) {
 }
 
 // --- Public Getters ---
+
+// GetCurrentProcessDataByPID provides a direct, single-lookup way to get the current
+// ProcessData for a given PID. It is highly optimized for the hot path.
+func (pm *ProcessManager) GetCurrentProcessDataByPID(pid uint32) (*ProcessData, bool) {
+	return pm.pidToCurrentProcessData.Load(pid)
+}
 
 // GetProcessDataBySK is the primary entry point for handlers to get the central
 // process data object. It is highly optimized for the hot path.

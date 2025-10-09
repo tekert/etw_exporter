@@ -52,8 +52,11 @@ type SessionWatcherConfig struct {
 	// Enable the session watcher to automatically restart sessions if they are stopped externally.
 	Enabled bool `toml:"enabled"`
 
-	// Automatically restart the NT Kernel Logger session if it stops.
-	RestartKernelSession bool `toml:"restart_kernel_session"`
+	// Defines the restart policy for the NT Kernel Logger session if it stops.
+	// "off": Do not restart the session.
+	// "enabled": Restart the session only after it is no longer in use by another process.
+	// "forced": Immediately attempt to restart the session, potentially taking it over from another process.
+	RestartKernelSession string `toml:"restart_kernel_session"`
 
 	// Automatically restart the main exporter (manifest) session if it stops.
 	RestartExporterSession bool `toml:"restart_exporter_session"`
@@ -101,6 +104,11 @@ type CollectorConfig struct {
 
 	// Registry collector configuration
 	Registry RegistryConfig `toml:"registry"`
+
+    // RequiresProcessManager is an internal flag set at runtime if any enabled
+    // collector needs full process lifecycle tracking. It is not loaded from TOML.
+    RequiresProcessManager bool `toml:"-"`
+
 }
 
 // DiskIOConfig contains disk I/O collector settings
@@ -343,7 +351,7 @@ func DefaultConfig() *AppConfig {
 		},
 		SessionWatcher: SessionWatcherConfig{
 			Enabled:                true,
-			RestartKernelSession:   true,
+			RestartKernelSession:   "forced",
 			RestartExporterSession: true,
 		},
 		Logging: LoggingConfig{
@@ -523,6 +531,13 @@ func (c *AppConfig) Validate() error {
 	}
 	if !hasEnabledOutput {
 		return fmt.Errorf("at least one logging output must be enabled")
+	}
+
+	switch c.SessionWatcher.RestartKernelSession {
+	case "off", "enabled", "forced":
+		// valid
+	default:
+		return fmt.Errorf("invalid value for session_watcher.restart_kernel_session: %q. Must be one of 'off', 'enabled', 'forced'", c.SessionWatcher.RestartKernelSession)
 	}
 
 	return nil

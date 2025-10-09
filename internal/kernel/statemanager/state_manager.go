@@ -1,3 +1,6 @@
+// This file defines the KernelStateManager, the public-facing facade for all
+// kernel state operations. It orchestrates the ProcessManager and SystemState components
+// to provide a unified, thread-safe API for the rest of the application.
 package statemanager
 
 import (
@@ -5,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"etw_exporter/internal/config"
@@ -14,12 +18,6 @@ import (
 )
 
 const (
-	// entityGracePeriod defines how long a terminated entity's metadata (e.g., TID -> StartKey mapping,
-	// or a ProcessData object) is kept before being cleaned up. This grace period is crucial for
-	// correctly attributing delayed events, such as cached disk I/O, memory faults, that may
-	// arrive after the originating thread or process has already terminated.
-	entityGracePeriod = 10 * time.Second
-
 	// UnknownProcessStartKey is a reserved key for the singleton "unknown process" instance.
 	// Threads whose parent process is not found within the timeout are attributed to this key.
 	UnknownProcessStartKey uint64 = 1
@@ -43,6 +41,10 @@ type KernelStateManager struct {
 	aggregatedData      map[ProgramAggregationKey]*AggregatedProgramMetrics
 	aggregationMu       sync.Mutex
 	aggregationDataPool sync.Pool
+	scrapeCounter       atomic.Uint64
+
+	lastScrapeTime      time.Time
+	lastScrapeTimeMutex sync.Mutex
 
 	log *phusluadapter.SampledLogger
 }
@@ -73,8 +75,7 @@ func GetGlobalStateManager() *KernelStateManager {
 		pm := newProcessManager(log)
 		ss := newSystemState(log)
 
-		// 2. Link them to resolve circular dependencies.
-		pm.setSystemState(ss)
+		// 2. Link SystemState to ProcessManager. The reverse dependency is now gone.
 		ss.setProcessManager(pm)
 
 		// 3. Create the facade and store the components.
@@ -82,6 +83,7 @@ func GetGlobalStateManager() *KernelStateManager {
 			log:            log,
 			processManager: pm,
 			systemState:    ss,
+			lastScrapeTime: time.Now(), // Initialize to startup time.
 			aggregationDataPool: sync.Pool{
 				New: func() any {
 					return make(map[ProgramAggregationKey]*AggregatedProgramMetrics)
@@ -103,24 +105,31 @@ func (sm *KernelStateManager) ApplyConfig(cfg *config.CollectorConfig) {
 	// sm.systemState.ApplyConfig(cfg)
 }
 
+func (sm *KernelStateManager) EnableProcessManager(enable bool) {
+	sm.processManager.Enabled = enable
+}
+
 // --- Coordinated Lifecycle Management ---
 
 // PostScrapeCleanup performs the actual deletion of entities that were marked for termination.
 // This is called by the metrics HTTP handler AFTER a Prometheus scrape is complete.
 func (sm *KernelStateManager) PostScrapeCleanup() {
+	// "Pet" the watchdog by updating the last scrape time.
+	sm.updateLastScrapeTime()
+
 	// Report diagnostic statistics for the completed scrape interval.
 	GlobalDiagnostics.ReportTrackedProcToConsole(sm.GetProcessCount())
 
-	sm.log.Debug().Msg("Starting post-scrape cleanup of terminated entities")
+	// Increment the scrape counter to mark the start of a new generation.
+	// Any entity terminated during the previous scrape cycle will have a value less than this.
+	currentScrape := sm.scrapeCounter.Add(1)
 
-	// Phase 1: Cleanup for stale pending metrics buckets is no longer needed,
-	// as pending threads are cleaned up by their own timeout mechanism.
+	sm.log.Debug().Uint64("generation", currentScrape).Msg("Starting post-scrape cleanup of terminated entities")
 
-	// Phase 2: Cleanup for terminated processes that are past their grace period.
-	cutoff := time.Now().Add(-entityGracePeriod)
+	// An entity is only cleaned up if it was terminated in a *previous* scrape generation.
 	procsToClean := make(map[uint64]struct{}) // Use a simple set of StartKeys.
-	sm.processManager.terminatedProcesses.Range(func(startKey uint64, termTime time.Time) bool {
-		if termTime.Before(cutoff) {
+	sm.processManager.terminatedProcesses.Range(func(startKey uint64, terminatedAtGeneration uint64) bool {
+		if terminatedAtGeneration < currentScrape {
 			procsToClean[startKey] = struct{}{}
 			// It's safe to delete while ranging over this specific concurrent map implementation.
 			sm.processManager.terminatedProcesses.Delete(startKey)
@@ -151,13 +160,20 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 
 		// Log the new summary diagnostic at Debug level.
 		sort.Strings(cleanedProcsDiag)
-		sm.log.Debug().Strs("cleaned_processes_in_interval", cleanedProcsDiag).Msg("Processes cleaned up in this interval")
+		sm.log.Debug().
+			Strs("cleaned_processes_in_interval", cleanedProcsDiag).
+			Msg("Processes cleaned up in this interval")
 
+		// Clean up all threads that belonged to the terminated processes.
+		// This must happen BEFORE the process data is deleted.
+		sm.systemState.cleanupCachedThreads(procsToClean)
+
+		// Now that dependents are gone, clean up the process objects themselves.
 		cleanedProcs = sm.processManager.cleanupProcesses(procsToClean)
 	}
 
-	// Phase 3: Cleanup for individually terminated threads and images (fast path).
-	cleanedThreads, cleanedImages := sm.systemState.cleanupIndividualEntities()
+	//Cleanup for individually terminated threads and images (fast path).
+	cleanedThreads, cleanedImages := sm.systemState.cleanupCachedEntities(currentScrape)
 
 	if cleanedProcs > 0 || cleanedThreads > 0 || cleanedImages > 0 {
 		sm.log.Debug().Int("processes", cleanedProcs).
@@ -176,10 +192,14 @@ func (sm *KernelStateManager) AddProcess(pid uint32, uniqueProcessKey uint64, im
 	sessionID uint32, eventTimestamp time.Time) {
 	sm.processManager.AddProcess(pid, uniqueProcessKey, imageName, parentPID, sessionID, eventTimestamp)
 }
-func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32, parentProcessID uint32, uniqueProcessKey uint64, terminationTime time.Time) {
-	sm.processManager.MarkProcessForDeletion(pid, parentProcessID, uniqueProcessKey, terminationTime)
+func (sm *KernelStateManager) MarkProcessForDeletion(pid uint32, startKey uint64, terminationTime time.Time) {
+	currentScrape := sm.scrapeCounter.Load()
+	sm.processManager.MarkProcessForDeletion(pid, startKey, terminationTime, currentScrape)
 }
-func (sm *KernelStateManager) GetProcessDataBySK(startKey uint64) (*ProcessData, bool) {
+func (sm *KernelStateManager) GetCurrentProcessDataByPID(pid uint32) (*ProcessData, bool) {
+	return sm.processManager.GetCurrentProcessDataByPID(pid)
+}
+func (sm *KernelStateManager) GetProcessDataBySK(startKey uint64) (*ProcessData, bool) { // not used (requieres two lookups)
 	return sm.processManager.GetProcessDataBySK(startKey)
 }
 func (sm *KernelStateManager) GetProcessCurrentStartKey(pid uint32) (uint64, bool) {
@@ -195,10 +215,17 @@ func (sm *KernelStateManager) AddThread(tid, pid uint32, eventTimestamp time.Tim
 }
 
 func (sm *KernelStateManager) MarkThreadForDeletion(tid uint32) {
-	sm.systemState.MarkThreadForDeletion(tid)
+	currentScrape := sm.scrapeCounter.Load()
+	sm.systemState.MarkThreadForDeletion(tid, currentScrape)
 }
-func (sm *KernelStateManager) GetStartKeyForThread(tid uint32) (uint64, bool) {
+func (sm *KernelStateManager) GetStartKeyByThread(tid uint32) (uint64, bool) { // not used (requieres two lookups)
 	return sm.systemState.GetStartKeyForThread(tid)
+}
+
+// GetCurrentProcessDataByThread resolves a TID to its parent's *ProcessData object.
+// This is the new, optimized hot-path function that avoids a second map lookup.
+func (sm *KernelStateManager) GetCurrentProcessDataByThread(tid uint32) (*ProcessData, bool) {
+	return sm.systemState.GetCurrentProcessDataByThread(tid)
 }
 
 // --- Service Tag Methods ---
@@ -209,17 +236,41 @@ func (sm *KernelStateManager) RegisterServiceTag(tag uint32, name string) {
 }
 
 // --- Image Methods ---
-func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, fileName string, loadTimestamp uint32, imageChecksum uint32) {
-	sm.systemState.AddImage(pid, imageBase, imageSize, fileName, loadTimestamp, imageChecksum)
+func (sm *KernelStateManager) AddImage(pid uint32, imageBase, imageSize uint64, fileName string, peTimestamp uint32, peChecksum uint32) {
+	sm.systemState.AddImage(pid, imageBase, imageSize, fileName, peTimestamp, peChecksum)
 }
 func (sm *KernelStateManager) UnloadImage(imageBase uint64) {
-	sm.systemState.UnloadImage(imageBase)
+	currentScrape := sm.scrapeCounter.Load()
+	sm.systemState.UnloadImage(imageBase, currentScrape)
 }
-func (sm *KernelStateManager) MarkImageForDeletion(imageBase uint64) {
-	sm.systemState.MarkImageForDeletion(imageBase)
+func (sm *KernelStateManager) markImageForDeletion(imageBase uint64) { // TODO: not used anymore for now. delete.
+	currentScrape := sm.scrapeCounter.Load()
+	sm.systemState.markImageForDeletion(imageBase, currentScrape)
 }
 func (sm *KernelStateManager) GetImageForAddress(address uint64) (*ImageInfo, bool) {
 	return sm.systemState.GetImageForAddress(address)
+}
+
+// updateLastScrapeTime records the current time as the last successful scrape.
+// This is called by PostScrapeCleanup.
+func (sm *KernelStateManager) updateLastScrapeTime() {
+	sm.lastScrapeTimeMutex.Lock()
+	defer sm.lastScrapeTimeMutex.Unlock()
+	sm.lastScrapeTime = time.Now()
+}
+
+// GetTimeSinceLastScrape returns the duration since the last scrape completed.
+// This is used by the watchdog to detect a stale state.
+func (sm *KernelStateManager) GetTimeSinceLastScrape() time.Duration {
+	sm.lastScrapeTimeMutex.Lock()
+	defer sm.lastScrapeTimeMutex.Unlock()
+	return time.Since(sm.lastScrapeTime)
+}
+
+// GetCleanedImages returns the names of images that have been terminated in the
+// last scrape interval. This is used by collectors to prune their own state.
+func (sm *KernelStateManager) GetCleanedImages() []string {
+	return sm.systemState.GetCleanedImages()
 }
 
 // --- Event Attribution Methods ---

@@ -25,15 +25,24 @@ var (
 // cpu> go tool pprof -http=: -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=30
 // mem> go tool pprof -http=: -source_path=".\" etw_exporter.exe http://localhost:6060/debug/pprof/heap?seconds=30
 //
-// pgo> go tool pprof -proto -output=default.pgo etw_exporter.exe http://localhost:6060/debug/pprof/profile?seconds=300
+// pgo> go tool pprof -proto -output="default.pgo" "etw_exporter.exe" "http://localhost:6060/debug/pprof/profile?seconds=1200"
 //
 // builds flags: -gcflags="all=-B" (bound check elimation) "-s -w" (strip symbols)
+// builds flags: bin size: go build -ldflags="-s -w" .
+
+// go tool pprof -proto http://localhost:6060/debug/pprof/heap > heap1.pb.gz
+// go tool pprof -proto http://localhost:6060/debug/pprof/heap > heap2.pb.gz (another time)
+// go tool pprof -http=:8081 -base heap1.pb.gz heap2.pb.gz
+// --
+// curl -s http://localhost:6060/debug/pprof/allocs > allocs_base.pprof
+// curl -s http://localhost:6060/debug/pprof/allocs > allocs_current.pprof (another time)
+// go tool pprof -http=: etw_exporter.exe -base allocs_base.pprof allocs_current.pprof
 
 // TODO(tekert):
 //  - Skip MOF Opcodes we dont need,
 //  - Security provider? and that's it for now.
 //     https://techcommunity.microsoft.com/blog/windows-itpro-blog/new-security-capabilities-in-event-tracing-for-windows/3949941
-//  - Move Image events to image collector?
+//  - Read from:   Microsoft-Windows-Threat-Intelligence
 //  - Use https://pkg.go.dev/github.com/VictoriaMetrics/metrics instead of prometheus client.. prometheus dependancies are just bad.
 //
 // link to https://learn.microsoft.com/en-us/windows-hardware/test/wpt/cpu-analysis (good article)

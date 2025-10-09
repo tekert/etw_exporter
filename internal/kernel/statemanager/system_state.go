@@ -1,8 +1,9 @@
+// This file defines the SystemState manager, a specialized data store for all state
+// that is not specific to a single process instance. This includes system-wide resources
 package statemanager
 
 import (
 	"sync"
-	"time"
 
 	"etw_exporter/internal/maps"
 
@@ -14,8 +15,8 @@ import (
 // and other global OS-level resources.
 type SystemState struct {
 	// Thread state
-	tidToStartKey     maps.ConcurrentMap[uint32, uint64]
-	terminatedThreads maps.ConcurrentMap[uint32, *threadTerminationRecord] // key: TID (uint32)
+	tidToCurrentProcessData maps.ConcurrentMap[uint32, *ProcessData]
+	terminatedThreads       maps.ConcurrentMap[uint32, *threadTerminationRecord] // key: TID (uint32)
 
 	// Service Tag state
 	serviceTags maps.ConcurrentMap[uint32, string] // Key: SubProcessTag, Value: ServiceName
@@ -24,7 +25,7 @@ type SystemState struct {
 	images             map[uint64]*ImageInfo
 	addressCache       map[uint64]*ImageInfo // Point-address cache for hot-path lookups
 	imagesMutex        sync.RWMutex
-	terminatedImages   maps.ConcurrentMap[uint64, time.Time]
+	terminatedImages   maps.ConcurrentMap[uint64, uint64] // key: ImageBase, value: scrape generation
 	imageInfoPool      sync.Pool
 	internedImageNames map[string]string
 	internMutex        sync.Mutex
@@ -39,13 +40,13 @@ type SystemState struct {
 // newSystemState creates and initializes a new SystemState manager.
 func newSystemState(log *phusluadapter.SampledLogger) *SystemState {
 	ss := &SystemState{
-		log:               log,
-		tidToStartKey:     maps.NewConcurrentMap[uint32, uint64](),
-		terminatedThreads: maps.NewConcurrentMap[uint32, *threadTerminationRecord](),
-		serviceTags:       maps.NewConcurrentMap[uint32, string](),
-		images:            make(map[uint64]*ImageInfo),
-		addressCache:      make(map[uint64]*ImageInfo, 4096),
-		terminatedImages:  maps.NewConcurrentMap[uint64, time.Time](),
+		log:                     log,
+		tidToCurrentProcessData: maps.NewConcurrentMap[uint32, *ProcessData](),
+		terminatedThreads:       maps.NewConcurrentMap[uint32, *threadTerminationRecord](),
+		serviceTags:             maps.NewConcurrentMap[uint32, string](),
+		images:                  make(map[uint64]*ImageInfo),
+		addressCache:            make(map[uint64]*ImageInfo, 4096),
+		terminatedImages:        maps.NewConcurrentMap[uint64, uint64](),
 		imageInfoPool: sync.Pool{
 			New: func() any { return new(ImageInfo) },
 		},
@@ -60,35 +61,23 @@ func (ss *SystemState) setProcessManager(pm *ProcessManager) {
 	ss.processManager = pm
 }
 
-// --- Pending Metrics ---
-
-// transferPendingMetrics is no longer needed and has been removed.
-
 // --- Event Attribution ---
 
 // RecordHardPageFaultForThread ensures that every hard page fault is attributed to the correct process.
 // If the thread is not found, the metric is attributed to "unknown_process".
 func (ss *SystemState) RecordHardPageFaultForThread(tid, pid uint32) {
 	// --- Path 1: Attempt to resolve by Thread ID (The only path) ---
-	if startKey, ok := ss.GetStartKeyForThread(tid); ok {
-		if pData, pOk := ss.processManager.GetProcessDataBySK(startKey); pOk {
-			// Happy path: TID and process data resolved instantly.
-			pData.RecordHardPageFault()
-			return
-		}
-
-		// This is an error: we had a TID mapping, but the process is gone.
-		ss.log.Error().
-			Uint32("tid", tid).
-			Uint64("stale_start_key", startKey).
-			Msg("ERROR: Found StartKey for TID, but process data was gone. Attributing to unknown.")
-	} else {
-		// This is an error: a metric event arrived for a thread we don't know about.
-		ss.log.Error().
-			Uint32("tid", tid).
-			Uint32("pid_from_header", pid).
-			Msg("ERROR: Hard fault event for unknown thread. Attributing to unknown.")
+	if pData, ok := ss.GetCurrentProcessDataByThread(tid); ok {
+		// Happy path: TID and process data resolved instantly.
+		pData.RecordHardPageFault()
+		return
 	}
+
+	// This is an error: a metric event arrived for a thread we don't know about.
+	ss.log.Error().
+		Uint32("tid", tid).
+		Uint32("pid_from_header", pid).
+		Msg("ERROR: Hard fault event for unknown thread. Attributing to unknown.")
 
 	// Fallback for all error cases.
 	if unknownProc, unknownOk := ss.processManager.GetProcessDataBySK(UnknownProcessStartKey); unknownOk {
@@ -98,18 +87,13 @@ func (ss *SystemState) RecordHardPageFaultForThread(tid, pid uint32) {
 
 // --- Cleanup ---
 
-// startPendingThreadCleanup is no longer needed and has been removed.
-
-// cleanupStalePendingMetrics is no longer needed.
-
-// cleanupIndividualEntities handles the fast-path cleanup for threads and images
+// cleanupCachedEntities handles the fast-path cleanup for threads and images
 // that were terminated independently of a process.
-func (ss *SystemState) cleanupIndividualEntities() (cleanedThreads, cleanedImages int) {
+func (ss *SystemState) cleanupCachedEntities(currentGeneration uint64) (cleanedThreads, cleanedImages int) {
 	// Clean up individually terminated threads that are past their grace period.
-	cutoff := time.Now().Add(-entityGracePeriod)
 	threadsToClean := make(map[uint32]uint64) // map[TID]StartKey
 	ss.terminatedThreads.Range(func(tid uint32, record *threadTerminationRecord) bool {
-		if record.TermTime.Before(cutoff) {
+		if record.TerminatedAtGeneration < currentGeneration {
 			threadsToClean[tid] = record.StartKey
 			// Safe to delete from the concurrent map while iterating.
 			ss.terminatedThreads.Delete(tid)
@@ -118,22 +102,24 @@ func (ss *SystemState) cleanupIndividualEntities() (cleanedThreads, cleanedImage
 	})
 
 	for tid, startKeyToClean := range threadsToClean {
-		// Atomically remove the tid -> startKey mapping, but ONLY if it still
-		// points to the key we are cleaning up. If the TID has been reused,
+		// Atomically remove the tid -> pData mapping, but ONLY if it still
+		// points to a process with the key we are cleaning up. If the TID has been reused,
 		// this condition will be false, and we will not touch the new mapping.
-		ss.tidToStartKey.Update(tid, func(currentSK uint64, exists bool) (uint64, bool) {
-			if exists && currentSK == startKeyToClean {
-				return 0, false // Value matches, so delete the entry.
+		ss.tidToCurrentProcessData.Update(tid, func(currentPData *ProcessData, exists bool) (*ProcessData, bool) {
+			if exists && currentPData.Info.StartKey == startKeyToClean {
+				return nil, false // Value matches, so delete the entry.
 			}
-			return currentSK, true // Value does not match (TID reused), so keep the new entry.
+			return currentPData, true // Value does not match (TID reused), so keep the new entry.
 		})
 		cleanedThreads++
 	}
 
 	// Clean up individually unloaded images.
 	imagesToClean := make([]uint64, 0)
-	ss.terminatedImages.Range(func(imageBase uint64, _ time.Time) bool {
-		imagesToClean = append(imagesToClean, imageBase)
+	ss.terminatedImages.Range(func(imageBase uint64, terminatedAtGeneration uint64) bool {
+		if terminatedAtGeneration < currentGeneration {
+			imagesToClean = append(imagesToClean, imageBase)
+		}
 		return true
 	})
 	for _, imageBase := range imagesToClean {
@@ -143,17 +129,18 @@ func (ss *SystemState) cleanupIndividualEntities() (cleanedThreads, cleanedImage
 	return
 }
 
-func (ss *SystemState) cleanupThreadsForTerminatedProcesses(procsToClean map[uint64]struct{}) {
+// cleanupCachedThreads removes all threads associated with the given set past terminated processes.
+func (ss *SystemState) cleanupCachedThreads(procsToClean map[uint64]struct{}) {
 	tidsForDeletion := make([]uint32, 0, 128)
-	ss.tidToStartKey.Range(func(tid uint32, startKey uint64) bool {
-		if _, isTerminated := procsToClean[startKey]; isTerminated {
+	ss.tidToCurrentProcessData.Range(func(tid uint32, pData *ProcessData) bool {
+		if _, isTerminated := procsToClean[pData.Info.StartKey]; isTerminated {
 			tidsForDeletion = append(tidsForDeletion, tid)
 		}
 		return true
 	})
 	if len(tidsForDeletion) > 0 {
 		for _, tid := range tidsForDeletion {
-			ss.tidToStartKey.Delete(tid)
+			ss.tidToCurrentProcessData.Delete(tid)
 			ss.terminatedThreads.Delete(tid) // Also remove from other terminated list
 		}
 	}
@@ -167,7 +154,7 @@ func (ss *SystemState) GetTerminatedThreadAndImageCounts() (threads, images int)
 		threads++
 		return true
 	})
-	ss.terminatedImages.Range(func(u uint64, t time.Time) bool {
+	ss.terminatedImages.Range(func(u uint64, u2 uint64) bool {
 		images++
 		return true
 	})

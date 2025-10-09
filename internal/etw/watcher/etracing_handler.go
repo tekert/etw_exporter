@@ -127,9 +127,15 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 	}
 
 	// Check if the stopped session is one we manage and if restart is enabled.
-	if *sessionGUID == *etw.SystemTraceControlGuid && w.config.RestartKernelSession {
-		w.sessionManager.RestartSession(*sessionGUID)
-	} else if *sessionGUID == *etwmain.EtwExporterGuid && w.config.RestartExporterSession {
+	if *sessionGUID == *etw.SystemTraceControlGuid {
+		if w.config.RestartKernelSession == "forced" {
+			w.sessionManager.RestartSession(*sessionGUID)
+		} else if w.config.RestartKernelSession == "enabled" && !w.sessionManager.IsNtKernelSessionInUse() {
+			w.sessionManager.RestartSession(*sessionGUID)
+		}
+	}
+
+	if *sessionGUID == *etwmain.EtwExporterGuid && w.config.RestartExporterSession {
 		w.sessionManager.RestartSession(*sessionGUID)
 	}
 

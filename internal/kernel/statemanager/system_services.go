@@ -25,6 +25,14 @@ func (sm *SystemState) resolveAndApplyServiceName(pData *ProcessData, subProcess
 	// Store the tag if it's not already there.
 	if pData.Info.SubProcessTag == 0 {
 		pData.Info.SubProcessTag = subProcessTag
+	} else if pData.Info.SubProcessTag != subProcessTag {
+		// If the tag has changed, we log it. This is unexpected but not impossible.
+		sm.log.Warn().
+			Uint64("start_key", pData.Info.StartKey).
+			Uint32("old_tag", pData.Info.SubProcessTag).
+			Uint32("new_tag", subProcessTag).
+			Msg("Process SubProcessTag changed during its lifetime")
+		pData.Info.SubProcessTag = subProcessTag // Update to the new tag.
 	}
 	pData.Info.mu.Unlock()
 
@@ -39,7 +47,7 @@ func (sm *SystemState) resolveAndApplyServiceName(pData *ProcessData, subProcess
 	pData.Info.mu.Lock()
 	// Double-check in case another thread set it while we were looking up the tag.
 	if pData.Info.ServiceName == "" {
-		pData.Info.ServiceName = serviceName // ! TESTING
+		pData.Info.ServiceName = serviceName
 	}
 	pData.Info.mu.Unlock()
 }

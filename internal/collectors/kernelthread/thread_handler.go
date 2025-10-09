@@ -111,7 +111,8 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 	cpu := er.ProcessorNumber()
 
 	// Timestamp (already converted from FILETIME by gotetw)
-	eventTimeNano := er.Timestamp().UnixNano()
+	//eventTimeNano := er.Timestamp().UnixNano() // slower
+	eventTimeNano := er.TimestampNanos()
 
 	// Calculate context switch interval using atomic operations.
 	var interval time.Duration
@@ -119,86 +120,17 @@ func (c *Handler) HandleContextSwitchRaw(er *etw.EventRecord) error {
 		interval = time.Duration(eventTimeNano - lastSwitchNano)
 	}
 
-	// Get the unique StartKey for the NEW thread (incoming thread).
-	// This is a single, direct lookup that is robust against TID reuse.
-	startKey, _ := c.stateManager.GetStartKeyForThread(uint32(newThreadID))
+	// Directly resolve the thread to its process and increment the counter on the hot path.
+	// This simplifies the aggregation logic significantly.
+	if pData, ok := c.stateManager.GetCurrentProcessDataByThread(newThreadID); ok {
+		pData.RecordContextSwitch()
+	}
 
-	// A startKey of 0 means we couldn't attribute the I/O to a known process.
-	// The collector will still record the system-wide metric, but will skip the
-	// per-process metric if startKey is 0.
-
-	// Record context switch in custom collector
-	c.collector.RecordContextSwitch(cpu, startKey, interval)
+	// Records system-wide (non-process-specific) metrics directly with the collector.
+	c.collector.RecordCpuContextSwitch(cpu, interval)
 
 	// Track thread state transitions using integer constants for maximum performance.
-	c.collector.RecordThreadStateTransition(StateWaiting, int8(oldThreadWaitReason))
-	c.collector.RecordThreadStateTransition(StateRunning, 0)
-
-	return nil
-}
-
-// HandleContextSwitch processes context switch events (CSwitch).
-// This handler processes ETW events from the kernel thread provider for context switches,
-// which occur when the Windows scheduler switches execution from one thread to another.
-//
-// ETW Event Details:
-//   - Provider Name: NT Kernel Logger
-//   - Provider GUID: {3d6fa8d1-fe05-11d0-9dda-00c04fd7ba7c}
-//   - Event ID(s): 36
-//   - Event Name(s): CSwitch
-//   - Event Version(s): 2, 3, 4
-//   - Schema: MOF
-//
-// Schema (from MOF):
-//   - NewThreadId (uint32): The thread identifier of the thread being switched to.
-//   - OldThreadId (uint32): The thread identifier of the thread being switched out.
-//   - NewThreadPriority (int8): The priority of the new thread.
-//   - OldThreadPriority (int8): The priority of the old thread.
-//   - PreviousCState (uint8): The C-state that was last used by the processor.
-//   - SpareByte (int8): Not used.
-//   - OldThreadWaitReason (int8): The reason why the old thread was waiting.
-//   - OldThreadWaitMode (int8): The wait mode (KernelMode or UserMode) of the old thread.
-//   - OldThreadState (int8): The state of the old thread (e.g., Waiting, Terminated).
-//   - OldThreadWaitIdealProcessor (sint8): The ideal processor for the old thread to wait on.
-//   - NewThreadWaitTime (uint32): The wait time for the new thread.
-//   - Reserved (uint32): Reserved for future use.
-//
-// This handler tracks context switches per CPU and per process, calculates
-// context switch intervals, and records thread state transitions.
-// Deprecated: Use HandleContextSwitchRaw for better performance.
-func (c *Handler) HandleContextSwitch(helper *etw.EventRecordHelper) error {
-	if c.collector == nil {
-		return nil
-	}
-	// NOTE: This is a fallback/slower path. The primary logic has been moved to
-	// HandleContextSwitchRaw for performance. This function will not be called
-	// for CSwitch events due to the fast-path routing logic in the main event handler.
-
-	// Parse context switch event data according to CSwitch class documentation
-	newThreadID, _ := helper.GetPropertyUint("NewThreadId")
-	waitReason, _ := helper.GetPropertyInt("OldThreadWaitReason")
-
-	// Get CPU number from processor index
-	cpu := uint16(helper.EventRec.ProcessorNumber())
-
-	// Timestamp from the event
-	eventTimeNano := helper.Timestamp().UnixNano()
-
-	// Calculate context switch interval using atomic operations to avoid allocations and locks.
-	var interval time.Duration
-	// Swap the new time and get the old time in a single atomic operation.
-	if lastSwitchNano := c.lastCpuSwitch[cpu].Swap(eventTimeNano); lastSwitchNano > 0 {
-		interval = time.Duration(eventTimeNano - lastSwitchNano)
-	}
-
-	// Get process ID for the NEW thread (incoming thread)
-	startKey, _ := c.stateManager.GetStartKeyForThread(uint32(newThreadID))
-
-	// Record context switch in custom collector (handles process name lookup internally)
-	c.collector.RecordContextSwitch(cpu, startKey, interval)
-
-	// Track thread state transitions
-	c.collector.RecordThreadStateTransition(StateWaiting, int8(waitReason))
+	c.collector.RecordThreadStateTransition(StateWaiting, oldThreadWaitReason)
 	c.collector.RecordThreadStateTransition(StateRunning, 0)
 
 	return nil

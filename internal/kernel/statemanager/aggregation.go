@@ -9,7 +9,7 @@ import (
 type ProgramAggregationKey struct {
 	Name        string
 	ServiceName string
-	PeChecksum  uint32
+	UniqueHash  uint64
 	SessionID   uint32
 }
 
@@ -48,7 +48,7 @@ type AggregatedNetworkMetrics struct {
 	ConnectionsAttempted [protocolMax]uint64
 	ConnectionsAccepted  [protocolMax]uint64
 	RetransmissionsTotal uint64
-	ConnectionsFailed    map[uint32]uint64 // Key: (protocol << 16) | failureCode
+	ConnectionsFailed    map[uint32]uint64 // Key: (protocol << 24) | (addressFamily << 16) | failureCode
 }
 
 // AggregatedRegistryMetrics holds the final, summed registry metrics for a program.
@@ -70,14 +70,14 @@ func newAggregatedProgramMetrics() *AggregatedProgramMetrics {
 // into program-level metrics. This is called once per scrape on the warm path,
 // ensuring collectors read from a fresh, consistent snapshot.
 func (sm *KernelStateManager) AggregateMetrics() {
-	// 1. Get a fresh map from the pool for the new aggregation results.
+	// Get a fresh map from the pool for the new aggregation results.
 	newAggregatedData := sm.aggregationDataPool.Get().(map[ProgramAggregationKey]*AggregatedProgramMetrics)
 
 	// Track which service tags we've already attempted to resolve in this scrape.
 	// This prevents duplicate Windows API calls for the same tag across different processes.
 	unknownTagsAttempted := make(map[uint32]bool)
 
-	// 2. Iterate over all active process instances.
+	// Iterate over all active process instances.
 	sm.processManager.RangeProcesses(func(pData *ProcessData) bool {
 		// --- Lazy Service Tag Resolution (COLD PATH) ---
 		// If this process has a SubProcessTag but no ServiceName, attempt to resolve it
@@ -108,7 +108,7 @@ func (sm *KernelStateManager) AggregateMetrics() {
 		key := ProgramAggregationKey{
 			Name:        pData.Info.Name,
 			ServiceName: pData.Info.ServiceName,
-			PeChecksum:  pData.Info.UniqueHash,
+			UniqueHash:  pData.Info.UniqueHash,
 			SessionID:   pData.Info.SessionID,
 		}
 		pData.Info.mu.Unlock()
@@ -168,19 +168,20 @@ func (sm *KernelStateManager) AggregateMetrics() {
 					ConnectionsFailed: make(map[uint32]uint64),
 				}
 			}
-			aggMetrics.Network.RetransmissionsTotal += netModule.Metrics.RetransmissionsTotal.Load()
-			for i := 0; i < protocolMax; i++ {
-				aggMetrics.Network.BytesSent[i] += netModule.Metrics.BytesSent[i].Load()
-				aggMetrics.Network.BytesReceived[i] += netModule.Metrics.BytesReceived[i].Load()
-				aggMetrics.Network.ConnectionsAttempted[i] += netModule.Metrics.ConnectionsAttempted[i].Load()
-				aggMetrics.Network.ConnectionsAccepted[i] += netModule.Metrics.ConnectionsAccepted[i].Load()
+			aggMetrics.Network.RetransmissionsTotal += netModule.RetransmissionsTotal.Load()
+
+			for i := range protocolMax {
+				aggMetrics.Network.BytesSent[i] += netModule.BytesSent[i].Load()
+				aggMetrics.Network.BytesReceived[i] += netModule.BytesReceived[i].Load()
+				aggMetrics.Network.ConnectionsAttempted[i] += netModule.ConnectionsAttempted[i].Load()
+				aggMetrics.Network.ConnectionsAccepted[i] += netModule.ConnectionsAccepted[i].Load()
 			}
 
-			netModule.mu.RLock()
+			netModule.failedMu.RLock()
 			for key, counter := range netModule.ConnectionsFailed {
 				aggMetrics.Network.ConnectionsFailed[key] += counter.Load()
 			}
-			netModule.mu.RUnlock()
+			netModule.failedMu.RUnlock()
 		}
 
 		// --- Aggregate Registry Module ---
@@ -205,16 +206,13 @@ func (sm *KernelStateManager) AggregateMetrics() {
 		}
 
 		// --- Aggregate Thread Module ---
-		// The ThreadModule is pre-allocated, so we can access it directly.
-		if threadModule := pData.Threads; threadModule != nil {
-			count := threadModule.ContextSwitches.Load()
-			if count > 0 {
-				// Lazily initialize the aggregated thread module.
-				if aggMetrics.Threads == nil {
-					aggMetrics.Threads = &AggregatedThreadMetrics{}
-				}
-				aggMetrics.Threads.ContextSwitches += count
+		// The context switch count is now read from the persistent, cumulative counter on ProcessData.
+		if count := pData.Threads.ContextSwitches.Load(); count > 0 {
+			// Lazily initialize the aggregated thread module.
+			if aggMetrics.Threads == nil {
+				aggMetrics.Threads = &AggregatedThreadMetrics{}
 			}
+			aggMetrics.Threads.ContextSwitches += count
 		}
 
 		// --- Aggregation for other modules will be added here in future steps ---
@@ -222,13 +220,13 @@ func (sm *KernelStateManager) AggregateMetrics() {
 		return true // Continue iteration
 	})
 
-	// 3. Atomically swap the live map with the newly prepared one.
+	// Atomically swap the live map with the newly prepared one.
 	sm.aggregationMu.Lock()
 	oldAggregatedData := sm.aggregatedData
 	sm.aggregatedData = newAggregatedData
 	sm.aggregationMu.Unlock()
 
-	// 4. Clear the old map and return it to the pool for reuse in the next scrape.
+	// Clear the old map and return it to the pool for reuse in the next scrape.
 	if oldAggregatedData != nil {
 		clear(oldAggregatedData)
 		sm.aggregationDataPool.Put(oldAggregatedData)

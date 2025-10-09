@@ -7,6 +7,7 @@ import (
 	"github.com/tekert/goetw/etw"
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 
+	"etw_exporter/internal/collectors/kerneimage"
 	"etw_exporter/internal/collectors/kerneldiskio"
 	"etw_exporter/internal/collectors/kernelmemory"
 	"etw_exporter/internal/collectors/kernelnetwork"
@@ -76,14 +77,16 @@ type SessionWatcher interface {
 // This handler routes events to specialized sub-handlers based on a data-driven map.
 type EventHandler struct {
 	// Handlers are foundational services, always instantiated.
-	processHandler   *kernelprocess.Handler
-	diskHandler      *kerneldiskio.Handler
-	threadHandler    *kernelthread.Handler
-	perfinfoHandler  *kernelperf.Handler
-	networkHandler   *kernelnetwork.Handler
-	memoryHandler    *kernelmemory.Handler
-	registryHandler  *kernelregistry.Handler
-	sysconfigHandler *kernelsysconfig.Handler
+	processHandlerMof      *kernelprocess.HandlerMof
+	//processHandlerManifest *kernelprocess.HandlerManifest // ! TESTING
+	imageHandler           *kerneimage.Handler
+	diskHandler            *kerneldiskio.HandlerMof
+	threadHandler          *kernelthread.Handler
+	perfinfoHandler        *kernelperf.Handler
+	networkHandler         *kernelnetwork.HandlerMof
+	memoryHandler          *kernelmemory.Handler
+	registryHandler        *kernelregistry.Handler
+	sysconfigHandler       *kernelsysconfig.Handler
 
 	// Shared state and caches for callbacks
 	config       *config.CollectorConfig
@@ -126,24 +129,42 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 
 	// Populate the GUID to counter map.
 	eh.guidToCounter[*guids.SystemConfigGUID] = &eh.systemConfigEventCount
+
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelDiskGUID] = &eh.diskEventCount
-	eh.guidToCounter[*guids.DiskIOKernelGUID] = &eh.diskEventCount // MOF provider uses the same counter
+	eh.guidToCounter[*etw.DiskIoKernelGuid] = &eh.diskEventCount // TODO: fix counter name
+
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
+	eh.guidToCounter[*etw.ProcessKernelGuid ] = &eh.processEventCount // TODO: fix counter name
+
+	eh.guidToCounter[*guids.MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
+	eh.guidToCounter[*etw.TcpIpKernelGuid] = &eh.networkEventCount // TODO: fix counter name
+	eh.guidToCounter[*etw.UdpIpKernelGuid] = &eh.networkEventCount // TODO: fix counter name
+
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelFileGUID] = &eh.fileEventCount
+
 	eh.guidToCounter[*guids.ThreadKernelGUID] = &eh.threadEventCount
 	eh.guidToCounter[*guids.PerfInfoKernelGUID] = &eh.perfinfoEventCount
 	eh.guidToCounter[*guids.ImageKernelGUID] = &eh.imageEventCount
 	eh.guidToCounter[*guids.PageFaultKernelGUID] = &eh.pageFaultEventCount
-	eh.guidToCounter[*guids.MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
 	eh.guidToCounter[*guids.RegistryKernelGUID] = &eh.registryEventCount
+
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelEventTracingGUID] = &eh.sessionWatcherEventCount
 
 	// --- Register Routes for All Handlers ---
 
 	// Always register the global process handler for process name mappings.
 	// Provider: Microsoft-Windows-Kernel-Process ({22fb2cd6-0e7b-422b-a0c7-2fad1fd0e716})
-	eh.processHandler = kernelprocess.NewProcessHandler(eh.stateManager)
-	eh.processHandler.RegisterRoutes(eh)
+	eh.processHandlerMof = kernelprocess.NewProcessHandlerMof(eh.stateManager)
+	eh.processHandlerMof.RegisterRoutes(eh)
+
+	// ! TESTING
+	// eh.processHandlerManifest = kernelprocess.NewProcessHandlerManifest(eh.stateManager)
+	// eh.processHandlerManifest.RegisterRoutes(eh)
+
+	// Always register the global image handler for image load/unload events.
+	// Provider: NT Kernel Logger (Image) ({2cb15d1d-5fc1-11d2-abe1-00a0c911f518})
+	eh.imageHandler = kerneimage.NewImageHandler(eh.stateManager)
+	eh.imageHandler.RegisterRoutes(eh)
 
 	// Always register the system config handler.
 	// Provider: NT Kernel Logger (EventTraceConfig) ({01853a65-418f-4f36-aefc-dc0f1d2fd235})
@@ -204,6 +225,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 		collector := kernelperf.NewPerfInfoCollector(&eh.config.PerfInfo, eh.stateManager)
 		eh.perfinfoHandler.AttachCollector(collector)
 		prometheus.MustRegister(collector)
+
 		eh.log.Debug().Msg("PerfInfo collector enabled and attached.")
 	}
 

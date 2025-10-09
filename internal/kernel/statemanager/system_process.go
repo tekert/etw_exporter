@@ -53,7 +53,7 @@ type ProcessInfo struct {
 	LastSeen        time.Time // Timestamp of the ETW event (start or rundown)
 	ParentPID       uint32
 	SessionID       uint32
-	UniqueHash      uint32
+	UniqueHash      uint64
 	mu              sync.Mutex
 }
 
@@ -176,10 +176,10 @@ func (sm *KernelStateManager) IsTrackedStartKey(startKey uint64) bool {
 
 // GetTerminatedProcessCount returns the number of processes marked for termination.
 func (pm *ProcessManager) GetTerminatedProcessCount() int {
-	var count int
-	pm.terminatedProcesses.Range(func(u uint64, t time.Time) bool {
-		count++
-		return true
-	})
-	return count
+    var count int
+    pm.terminatedProcesses.Range(func(u uint64, u2 uint64) bool {
+        count++
+        return true
+    })
+    return count
 }

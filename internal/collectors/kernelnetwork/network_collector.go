@@ -20,6 +20,12 @@ const (
 	protocolMax // Used for sizing arrays, must be the last element.
 )
 
+// AddressFamily constants for IP versions.
+const (
+	AddressFamilyIPV4 = iota
+	AddressFamilyIPV6
+)
+
 // Direction constants for efficient array indexing.
 const (
 	DirectionSent = iota
@@ -31,10 +37,10 @@ func directionIdx(protocol int, direction int) int {
 	return protocol*directionMax + direction
 }
 
-// failureKey creates a composite integer key from a protocol and failure code.
-// The protocol is stored in the high 16 bits and the code in the low 16 bits.
-func failureKey(protocol int, failureCode uint16) uint32 {
-	return (uint32(protocol) << 16) | uint32(failureCode)
+// failureKey creates a composite integer key from a protocol, address family, and failure code.
+// The protocol is stored in bits 24-31, address family in 16-23, and code in 0-15.
+func failureKey(protocol int, addressFamily int, failureCode uint16) uint32 {
+	return (uint32(protocol) << 24) | (uint32(addressFamily) << 16) | uint32(failureCode)
 }
 
 // protocolToString converts a protocol constant to its string representation for Prometheus labels.
@@ -44,6 +50,18 @@ func protocolToString(p int) string {
 		return "tcp"
 	case ProtocolUDP:
 		return "udp"
+	default:
+		return "unknown"
+	}
+}
+
+// addressFamilyToString converts an address family constant to its string representation.
+func addressFamilyToString(af int) string {
+	switch af {
+	case AddressFamilyIPV4:
+		return "ipv4"
+	case AddressFamilyIPV6:
+		return "ipv6"
 	default:
 		return "unknown"
 	}
@@ -68,14 +86,15 @@ type NetCollector struct {
 	trafficBytesTotal [protocolMax * directionMax]*atomic.Uint64
 
 	// Metric descriptors
-	bytesSentTotalDesc     *prometheus.Desc
-	bytesReceivedTotalDesc *prometheus.Desc
+	bytesSentPerProcessTotalDesc     *prometheus.Desc
+	bytesReceivedperProcessTotalDesc *prometheus.Desc
 
 	connectionsAttemptedTotalDesc *prometheus.Desc
 	connectionsAcceptedTotalDesc  *prometheus.Desc
 	connectionsFailedTotalDesc    *prometheus.Desc
 
-	trafficBytesTotalDesc *prometheus.Desc
+	trafficSentBytesTotalDesc     *prometheus.Desc
+	trafficReceivedBytesTotalDesc *prometheus.Desc
 
 	retransmissionsTotalDesc *prometheus.Desc
 }
@@ -87,13 +106,13 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 		stateManager: sm,
 		log:          logger.NewSampledLoggerCtx("network_collector"),
 
-		bytesSentTotalDesc: prometheus.NewDesc(
-			"etw_network_sent_bytes_total",
+		bytesSentPerProcessTotalDesc: prometheus.NewDesc(
+			"etw_network_process_sent_bytes_total",
 			"Total bytes sent over network by program and protocol.",
 			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		),
-		bytesReceivedTotalDesc: prometheus.NewDesc(
-			"etw_network_received_bytes_total",
+		bytesReceivedperProcessTotalDesc: prometheus.NewDesc(
+			"etw_network_process_received_bytes_total",
 			"Total bytes received over network by program and protocol.",
 			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		),
@@ -106,33 +125,38 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 
 	if config.ConnectionHealth {
 		nc.connectionsAttemptedTotalDesc = prometheus.NewDesc(
-			"etw_network_connections_attempted_total",
+			"etw_network_process_connections_attempted_total",
 			"Total number of network connections attempted by program and protocol.",
 			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		)
 		nc.connectionsAcceptedTotalDesc = prometheus.NewDesc(
-			"etw_network_connections_accepted_total",
+			"etw_network_process_connections_accepted_total",
 			"Total number of network connections accepted by program and protocol.",
 			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol"}, nil,
 		)
 		nc.connectionsFailedTotalDesc = prometheus.NewDesc(
 			"etw_network_connections_failed_total",
-			"Total number of network connection failures by program, protocol, and failure code.",
-			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol", "failure_code"}, nil,
+			"Total number of network connection failures by program, protocol, address family, and failure code.",
+			[]string{"process_name", "service_name", "pe_checksum", "session_id", "protocol", "address_family", "failure_code"}, nil,
 		)
 	}
 
 	if config.ByProtocol {
-		nc.trafficBytesTotalDesc = prometheus.NewDesc(
-			"etw_network_traffic_bytes_total",
-			"Total network traffic bytes by protocol and direction.",
-			[]string{"protocol", "direction"}, nil,
+		nc.trafficSentBytesTotalDesc = prometheus.NewDesc(
+			"etw_network_sent_bytes_total",
+			"Total network traffic bytes sent by protocol.",
+			[]string{"protocol"}, nil,
+		)
+		nc.trafficReceivedBytesTotalDesc = prometheus.NewDesc(
+			"etw_network_received_bytes_total",
+			"Total network traffic bytes received by protocol.",
+			[]string{"protocol"}, nil,
 		)
 	}
 
 	if config.RetransmissionRate {
 		nc.retransmissionsTotalDesc = prometheus.NewDesc(
-			"etw_network_retransmissions_total",
+			"etw_network_process_retransmissions_total",
 			"Total number of TCP retransmissions by program.",
 			[]string{"process_name", "service_name", "pe_checksum", "session_id"}, nil,
 		)
@@ -148,8 +172,8 @@ func NewNetworkCollector(config *config.NetworkConfig, sm *statemanager.KernelSt
 // It sends the descriptors of all the metrics the collector can possibly export
 // to the provided channel. This is called once during registration.
 func (nc *NetCollector) Describe(ch chan<- *prometheus.Desc) {
-	ch <- nc.bytesSentTotalDesc
-	ch <- nc.bytesReceivedTotalDesc
+	ch <- nc.bytesSentPerProcessTotalDesc
+	ch <- nc.bytesReceivedperProcessTotalDesc
 
 	if nc.config.ConnectionHealth {
 		ch <- nc.connectionsAttemptedTotalDesc
@@ -157,7 +181,8 @@ func (nc *NetCollector) Describe(ch chan<- *prometheus.Desc) {
 		ch <- nc.connectionsFailedTotalDesc
 	}
 	if nc.config.ByProtocol {
-		ch <- nc.trafficBytesTotalDesc
+		ch <- nc.trafficSentBytesTotalDesc
+		ch <- nc.trafficReceivedBytesTotalDesc
 	}
 	if nc.config.RetransmissionRate {
 		ch <- nc.retransmissionsTotalDesc
@@ -175,59 +200,69 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue to next program
 		}
 
-		peTimestampSrt := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
+		peTimestampSrt := "0x" + strconv.FormatUint(uint64(key.UniqueHash), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 		netData := metrics.Network
 
-		for p := 0; p < protocolMax; p++ {
-			protocolStr := protocolToString(p)
-			if netData.BytesSent[p] > 0 {
+		// Bytes Sent
+		for protocol, count := range netData.BytesSent {
+			if count > 0 {
 				ch <- prometheus.MustNewConstMetric(
-					nc.bytesSentTotalDesc,
+					nc.bytesSentPerProcessTotalDesc,
 					prometheus.CounterValue,
-					float64(netData.BytesSent[p]),
+					float64(count),
 					key.Name,
 					key.ServiceName,
 					peTimestampSrt,
 					sessionIDStr,
-					protocolStr,
+					protocolToString(protocol),
 				)
 			}
-			if netData.BytesReceived[p] > 0 {
+		}
+		// Bytes Received
+		for protocol, count := range netData.BytesReceived {
+			if count > 0 {
 				ch <- prometheus.MustNewConstMetric(
-					nc.bytesReceivedTotalDesc,
+					nc.bytesReceivedperProcessTotalDesc,
 					prometheus.CounterValue,
-					float64(netData.BytesReceived[p]),
+					float64(count),
 					key.Name,
 					key.ServiceName,
 					peTimestampSrt,
 					sessionIDStr,
-					protocolStr,
+					protocolToString(protocol),
 				)
 			}
-			if nc.config.ConnectionHealth {
-				if netData.ConnectionsAttempted[p] > 0 {
+		}
+
+		if nc.config.ConnectionHealth {
+			// Connections Attempted
+			for protocol, count := range netData.ConnectionsAttempted {
+				if count > 0 {
 					ch <- prometheus.MustNewConstMetric(
 						nc.connectionsAttemptedTotalDesc,
 						prometheus.CounterValue,
-						float64(netData.ConnectionsAttempted[p]),
+						float64(count),
 						key.Name,
 						key.ServiceName,
 						peTimestampSrt,
 						sessionIDStr,
-						protocolStr,
+						protocolToString(protocol),
 					)
 				}
-				if netData.ConnectionsAccepted[p] > 0 {
+			}
+			// Connections Accepted
+			for protocol, count := range netData.ConnectionsAccepted {
+				if count > 0 {
 					ch <- prometheus.MustNewConstMetric(
 						nc.connectionsAcceptedTotalDesc,
 						prometheus.CounterValue,
-						float64(netData.ConnectionsAccepted[p]),
+						float64(count),
 						key.Name,
 						key.ServiceName,
 						peTimestampSrt,
 						sessionIDStr,
-						protocolStr,
+						protocolToString(protocol),
 					)
 				}
 			}
@@ -247,7 +282,8 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 
 		if nc.config.ConnectionHealth {
 			for fKey, count := range netData.ConnectionsFailed {
-				protocol := int(fKey >> 16)
+				protocol := int(fKey >> 24) // TODO: create unpack
+				addressFamily := int((fKey >> 16) & 0xFF)
 				failureCode := uint16(fKey)
 				ch <- prometheus.MustNewConstMetric(
 					nc.connectionsFailedTotalDesc,
@@ -258,6 +294,7 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 					peTimestampSrt,
 					sessionIDStr,
 					protocolToString(protocol),
+					addressFamilyToString(addressFamily),
 					strconv.FormatUint(uint64(failureCode), 10),
 				)
 			}
@@ -271,22 +308,28 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 	// --- Protocol Distribution Metrics ---
 	if nc.config.ByProtocol {
 		for p := range protocolMax { // protocol
-			for d := range directionMax { // direction
-				idx := directionIdx(p, d)
-				count := nc.trafficBytesTotal[idx].Load()
-				if count > 0 {
-					var directionStr string
-					if d == DirectionSent {
-						directionStr = "sent"
-					} else {
-						directionStr = "received"
-					}
-					ch <- prometheus.MustNewConstMetric(
-						nc.trafficBytesTotalDesc,
-						prometheus.CounterValue,
-						float64(count),
-						protocolToString(p), directionStr)
-				}
+			protocolStr := protocolToString(p)
+
+			// Sent
+			sentIdx := directionIdx(p, DirectionSent)
+			sentCount := nc.trafficBytesTotal[sentIdx].Load()
+			if sentCount > 0 {
+				ch <- prometheus.MustNewConstMetric(
+					nc.trafficSentBytesTotalDesc,
+					prometheus.CounterValue,
+					float64(sentCount),
+					protocolStr)
+			}
+
+			// Received
+			receivedIdx := directionIdx(p, DirectionReceived)
+			receivedCount := nc.trafficBytesTotal[receivedIdx].Load()
+			if receivedCount > 0 {
+				ch <- prometheus.MustNewConstMetric(
+					nc.trafficReceivedBytesTotalDesc,
+					prometheus.CounterValue,
+					float64(receivedCount),
+					protocolStr)
 			}
 		}
 	}
@@ -296,11 +339,9 @@ func (nc *NetCollector) Collect(ch chan<- prometheus.Metric) {
 
 // RecordDataSent records bytes sent for a process and protocol.
 // This is on the hot path and must be highly performant.
-func (nc *NetCollector) RecordDataSent(startKey uint64, protocol int, bytes uint32) {
-	if startKey > 0 {
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordDataSent(protocol, bytes)
-		}
+func (nc *NetCollector) RecordDataSent(pData *statemanager.ProcessData, protocol int, bytes uint32) {
+	if pData != nil {
+		pData.RecordDataSent(protocol, bytes)
 	}
 
 	if nc.config.ByProtocol {
@@ -312,11 +353,9 @@ func (nc *NetCollector) RecordDataSent(startKey uint64, protocol int, bytes uint
 
 // RecordDataReceived records bytes received for a process and protocol.
 // This is on the hot path and must be highly performant.
-func (nc *NetCollector) RecordDataReceived(startKey uint64, protocol int, bytes uint32) {
-	if startKey > 0 {
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordDataReceived(protocol, bytes)
-		}
+func (nc *NetCollector) RecordDataReceived(pData *statemanager.ProcessData, protocol int, bytes uint32) {
+	if pData != nil {
+		pData.RecordDataReceived(protocol, bytes)
 	}
 
 	if nc.config.ByProtocol {
@@ -328,38 +367,33 @@ func (nc *NetCollector) RecordDataReceived(startKey uint64, protocol int, bytes 
 
 // RecordConnectionAttempted records a connection attempt.
 // This is on the hot path and must be highly performant.
-func (nc *NetCollector) RecordConnectionAttempted(startKey uint64, protocol int) {
-	if nc.config.ConnectionHealth && startKey > 0 {
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordConnectionAttempted(protocol)
-		}
+func (nc *NetCollector) RecordConnectionAttempted(pData *statemanager.ProcessData, protocol int) {
+	if nc.config.ConnectionHealth && pData != nil {
+		pData.RecordConnectionAttempted(protocol)
 	}
 }
 
 // RecordConnectionAccepted records a connection acceptance.
-func (nc *NetCollector) RecordConnectionAccepted(startKey uint64, protocol int) {
-	if nc.config.ConnectionHealth && startKey > 0 {
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordConnectionAccepted(protocol)
-		}
+func (nc *NetCollector) RecordConnectionAccepted(pData *statemanager.ProcessData, protocol int) {
+	if nc.config.ConnectionHealth && pData != nil {
+		pData.RecordConnectionAccepted(protocol)
 	}
 }
 
 // RecordConnectionFailed records a connection failure.
-func (nc *NetCollector) RecordConnectionFailed(startKey uint64, protocol int, failureCode uint16) {
-	if nc.config.ConnectionHealth {
-		// startKey 0 is used for system-level failures and is always tracked.
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordConnectionFailed(protocol, failureCode)
-		}
+func (nc *NetCollector) RecordConnectionFailed(pData *statemanager.ProcessData,
+	protocol int, addressFamily int, failureCode uint16) {
+
+	if nc.config.ConnectionHealth && pData != nil {
+		// The collector is responsible for creating the composite key.
+		key := failureKey(protocol, addressFamily, failureCode)
+		pData.RecordConnectionFailed(key)
 	}
 }
 
 // RecordRetransmission records a TCP retransmission.
-func (nc *NetCollector) RecordRetransmission(startKey uint64) {
-	if nc.config.RetransmissionRate && startKey > 0 {
-		if pData, ok := nc.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordRetransmission()
-		}
+func (nc *NetCollector) RecordRetransmission(pData *statemanager.ProcessData) {
+	if nc.config.RetransmissionRate && pData != nil {
+		pData.RecordRetransmission()
 	}
 }

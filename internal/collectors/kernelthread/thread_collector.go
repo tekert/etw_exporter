@@ -44,6 +44,9 @@ type ThreadCollector struct {
 	// contextSwitchIntervals uses atomic pointers for lock-free double-buffering.
 	contextSwitchIntervals []*atomic.Pointer[IntervalStats]
 	intervalStatsPool      sync.Pool
+	// cumulativeIntervals holds the lifetime cumulative totals for histograms.
+	// It is only accessed during the serialized Collect() call.
+	cumulativeIntervals []*IntervalStats
 
 	// Per-process context switch counting is now delegated to the KernelStateManager.
 	// The double-buffering mechanism (activeCsPerProcess, csPerProcessPool, keysForCleanup, csMapMutex)
@@ -107,6 +110,7 @@ func NewThreadCSCollector(config *config.ThreadCSConfig, sm *statemanager.Kernel
 	// Pre-allocate per-CPU slices to avoid allocations and bounds checks in the hot path
 	csPerCPU := make([]*atomic.Int64, numCPU)
 	csIntervals := make([]*atomic.Pointer[IntervalStats], numCPU)
+	cumulativeIntervals := make([]*IntervalStats, numCPU)
 	for i := range numCPU {
 		csPerCPU[i] = new(atomic.Int64)
 
@@ -117,6 +121,11 @@ func NewThreadCSCollector(config *config.ThreadCSConfig, sm *statemanager.Kernel
 		ptr := new(atomic.Pointer[IntervalStats])
 		ptr.Store(is)
 		csIntervals[i] = ptr
+
+		// Create a parallel structure to hold the cumulative totals. This is not pooled.
+		cumulativeIntervals[i] = &IntervalStats{
+			Buckets: make([]atomic.Int64, len(csIntervalBuckets)),
+		}
 	}
 
 	// Pre-build structures for allocation-free thread state tracking.
@@ -158,6 +167,7 @@ func NewThreadCSCollector(config *config.ThreadCSConfig, sm *statemanager.Kernel
 		config:                 config,
 		contextSwitchesPerCPU:  csPerCPU,
 		contextSwitchIntervals: csIntervals,
+		cumulativeIntervals:    cumulativeIntervals,
 		intervalStatsPool: sync.Pool{
 			New: func() any {
 				return &IntervalStats{
@@ -227,7 +237,9 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 
 	// --- Per-Program Context Switch Metrics (reading from pre-aggregated state) ---
-	c.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey, metrics *statemanager.AggregatedProgramMetrics) bool {
+	c.stateManager.RangeAggregatedMetrics(func(key statemanager.ProgramAggregationKey,
+		metrics *statemanager.AggregatedProgramMetrics) bool {
+
 		if metrics.Threads != nil && metrics.Threads.ContextSwitches > 0 {
 			ch <- prometheus.MustNewConstMetric(
 				c.contextSwitchesPerProcessDesc,
@@ -235,51 +247,64 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 				float64(metrics.Threads.ContextSwitches),
 				key.Name,
 				key.ServiceName,
-				"0x"+strconv.FormatUint(uint64(key.PeChecksum), 16),
+				"0x"+strconv.FormatUint(uint64(key.UniqueHash), 16),
 				strconv.FormatUint(uint64(key.SessionID), 10),
 			)
 		}
 		return true // Continue iteration
 	})
 
-	// Create context switch interval histograms
+	// --- CPU Interval Histogram Collection ---
+	// This is a two-phase process to prevent race conditions with the sync.Pool.
+	// Phase 1: Atomically swap all active stats buffers with fresh ones from the pool.
+	// We hold onto the old buffers to process them serially without risk of them being
+	// reset and reused by another iteration of this loop.
+	oldStatsList := make([]*IntervalStats, len(c.contextSwitchIntervals))
 	for cpu, statsPtr := range c.contextSwitchIntervals {
-		// Get a new, clean stats object from the pool to swap in.
 		newStats := c.intervalStatsPool.Get().(*IntervalStats)
 		newStats.Reset()
+		oldStatsList[cpu] = statsPtr.Swap(newStats)
+	}
 
-		// Atomically swap the new stats object with the old one.
-		// We now have exclusive ownership of oldStats and can read its values safely.
-		oldStats := statsPtr.Swap(newStats)
+	// Phase 2: Process the old buffers we collected and then return them to the pool.
+	for cpu, oldStats := range oldStatsList {
+		// Get the persistent cumulative stats object for this CPU.
+		cumulativeStats := c.cumulativeIntervals[cpu]
 
-		count := oldStats.Count.Load()
-		if count == 0 {
-			// If there was no activity, put both objects back in the pool.
-			c.intervalStatsPool.Put(newStats)
-			c.intervalStatsPool.Put(oldStats)
-			continue
-		}
-
-		// Convert the nanosecond sum to the millisecond sum required by the histogram.
-		sum := float64(oldStats.Sum.Load()) / 1_000_000.0
-
-		// Convert the individual bucket counts to the cumulative counts required by Prometheus.
-		buckets := make(map[float64]uint64, len(csIntervalBuckets))
-		var cumulativeCount uint64
+		// Add the delta counts from oldStats (the values since the last scrape)
+		// to our persistent cumulative totals.
+		deltaCount := oldStats.Count.Load()
+		cumulativeStats.Count.Add(deltaCount)
+		cumulativeStats.Sum.Add(oldStats.Sum.Load())
 		for i := range oldStats.Buckets {
-			cumulativeCount += uint64(oldStats.Buckets[i].Load())
-			buckets[csIntervalBuckets[i]] = cumulativeCount
+			cumulativeStats.Buckets[i].Add(oldStats.Buckets[i].Load())
 		}
 
-		ch <- prometheus.MustNewConstHistogram(
-			c.contextSwitchIntervalsDesc,
-			uint64(count),
-			sum,
-			buckets,
-			strconv.FormatUint(uint64(cpu), 10),
-		)
+		// Only create a metric if there is data to report. We check the cumulative count
+		// to ensure the metric appears on the first scrape even if only one event occurred.
+		if count := cumulativeStats.Count.Load(); count > 0 {
+			// Convert the CUMULATIVE nanosecond sum to the millisecond sum required by the histogram.
+			sum := float64(cumulativeStats.Sum.Load()) / 1_000_000.0
 
-		// After processing, return the old stats object to the pool for reuse.
+			// Convert the individual CUMULATIVE bucket counts to the cumulative counts required by Prometheus.
+			buckets := make(map[float64]uint64, len(csIntervalBuckets))
+			var cumulativeBucketCount uint64
+			for i := range cumulativeStats.Buckets {
+				cumulativeBucketCount += uint64(cumulativeStats.Buckets[i].Load())
+				buckets[csIntervalBuckets[i]] = cumulativeBucketCount
+			}
+
+			ch <- prometheus.MustNewConstHistogram(
+				c.contextSwitchIntervalsDesc,
+				uint64(count),
+				sum,
+				buckets,
+				strconv.FormatUint(uint64(cpu), 10),
+			)
+		}
+
+		// After processing, always return the old stats object to the pool for reuse.
+		// This simplified logic ensures no objects are leaked or prematurely recycled.
 		c.intervalStatsPool.Put(oldStats)
 	}
 
@@ -303,11 +328,10 @@ func (c *ThreadCollector) Collect(ch chan<- prometheus.Metric) {
 //
 // Parameters:
 //   - cpu: CPU number where the context switch occurred
-//   - startKey: The unique start key of the process
+//   - pData: The ProcessData object for the incoming thread's process. Can be nil.
 //   - interval: Time since last context switch on this CPU
-func (c *ThreadCollector) RecordContextSwitch(
+func (c *ThreadCollector) RecordCpuContextSwitch(
 	cpu uint16,
-	startKey uint64,
 	interval time.Duration) {
 
 	// Record context switch per CPU (lock-free)
@@ -315,14 +339,7 @@ func (c *ThreadCollector) RecordContextSwitch(
 		c.contextSwitchesPerCPU[cpu].Add(1)
 	}
 
-	// Record context switch per process by delegating to the state manager.
-	if startKey > 0 {
-		if pData, ok := c.stateManager.GetProcessDataBySK(startKey); ok {
-			pData.RecordContextSwitch()
-		}
-	}
-
-	// Record context switch interval (now completely lock-free)
+	// Record context switch interval
 	if interval > 0 && int(cpu) < len(c.contextSwitchIntervals) {
 		// Atomically load the current stats object for this CPU.
 		stats := c.contextSwitchIntervals[cpu].Load()
@@ -366,7 +383,7 @@ func (c *ThreadCollector) RecordContextSwitch(
 // Parameters:
 // - state: The thread state (e.g., "ready", "waiting", "running", "terminated")
 // - waitReason: The wait reason if state is "waiting", otherwise "none"
-func (c *ThreadCollector) RecordThreadStateTransition(state int, waitReason int8) {
+func (c *ThreadCollector) RecordThreadStateTransition(state int, waitReason uint8) {
 	// This hot path is now an allocation-free, lock-free, and hash-free array lookup.
 	var idx int
 	if state == StateWaiting {

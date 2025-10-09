@@ -81,7 +81,7 @@ func (c *MemCollector) Collect(ch chan<- prometheus.Metric) {
 				return true // Continue to next program
 			}
 
-			imageChecksumHex := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
+			imageChecksumHex := "0x" + strconv.FormatUint(uint64(key.UniqueHash), 16)
 			sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 			ch <- prometheus.MustNewConstMetric(
 				c.hardPageFaultsPerProcessDesc,

@@ -2,16 +2,18 @@
 package kernelperf
 
 import (
+	"runtime"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/kernel/statemanager"
 	"etw_exporter/internal/logger"
 
-	"github.com/phuslu/log"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
 // DPC Latency is measured as an aproximation in this module,
@@ -34,11 +36,68 @@ import (
 // # PromQL queries for DPC queue pressure
 // To see the rate of change and infer queue pressure, you can query:
 //
-// rate(etw_dpc_queued_cpu_total[1m]) - rate(etw_dpc_executed_cpu_total[1m])
+// rate(etw_perfinfo_dpc_queued_cpu_total[1m]) - rate(etw_perfinfo_dpc_executed_cpu_total[1m])
 //
 // A sustained positive result from this query indicates that DPCs are being
 // queued faster than they are being executed, which is a clear sign of high
 // DPC latency and potential CPU saturation at high IRQL.
+
+// metricsBuffer holds a complete set of metrics for one scrape interval.
+// This is the unit that gets swapped during double-buffering.
+type metricsBuffer struct {
+	// lastDPCPerCPU tracks the last seen DPC event for each CPU. It is the core
+	// of our DPC duration calculation logic.
+	//
+	// The duration of a DPC is the time from its start until the start of the
+	// next significant event on the same CPU core. In the Windows kernel, DPCs
+	// on a single core are serialized. Therefore, the next significant event
+	// will either be:
+	//  1. The next DPC event: Its start time marks the end of the previous one.
+	//  2. A Context Switch (CSwitch) event: This signifies that the DPC queue
+	//     for that core was empty and the scheduler is now running.
+	//
+	// This map is keyed by the CPU number from the event header.
+	// "Whatever comes first" (the next DPC or a CSwitch) on a given CPU correctly
+	// finalizes the duration of the pending DPC.
+	lastDPCPerCPU map[uint16]pendingDPCInfo
+
+	// Pending ISR tracking for latency correlation
+	pendingISRs map[uint16][]*ISREvent // CPU -> slice of pending ISRs
+
+	// Performance metrics data
+	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
+	isrToDpcLatencyCount   uint64
+	isrToDpcLatencySum     float64
+	dpcDurationHistograms  map[DPCDriverKey]*histogramData // {driver} -> histogram data
+
+	// DPC queue tracking
+	dpcQueuedCount   map[uint16]int64 // CPU -> queued count
+	dpcExecutedCount map[uint16]int64 // CPU -> executed count
+}
+
+// pendingDPCInfo holds the data for a DPC event that is waiting for the next
+// DPC on the same CPU to determine its duration.
+type pendingDPCInfo struct {
+	initialTime    time.Time
+	routineAddress uint64
+}
+
+// newMetricsBuffer creates a new, initialized metrics buffer.
+func newMetricsBuffer() *metricsBuffer {
+	numCPU := runtime.NumCPU()
+	b := &metricsBuffer{
+		lastDPCPerCPU:          make(map[uint16]pendingDPCInfo, numCPU),
+		pendingISRs:            make(map[uint16][]*ISREvent, numCPU),
+		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
+		dpcQueuedCount:         make(map[uint16]int64, numCPU),
+		dpcExecutedCount:       make(map[uint16]int64, numCPU),
+		dpcDurationHistograms:  make(map[DPCDriverKey]*histogramData, 50),
+	}
+	for _, bucket := range ISRToDPCLatencyBuckets {
+		b.isrToDpcLatencyBuckets[bucket] = 0
+	}
+	return b
+}
 
 // isrEventPool reduces allocations by recycling ISREvent objects.
 var isrEventPool = sync.Pool{
@@ -55,27 +114,23 @@ type PerfCollector struct {
 	// State manager reference for image lookups
 	sm *statemanager.KernelStateManager
 
-	// Pending ISR tracking for latency correlation
-	pendingISRs map[uint16][]*ISREvent // CPU -> slice of pending ISRs
-
-	// Performance metrics data
-	isrToDpcLatencyBuckets map[float64]int64 // Histogram buckets for system-wide latency
-	isrToDpcLatencyCount   uint64
-	isrToDpcLatencySum     float64
-	dpcDurationHistograms  map[DPCDriverKey]*histogramData // {driver} -> histogram data
-
-	// DPC queue tracking
-	dpcQueuedCount   map[uint16]int64 // CPU -> queued count
-	dpcExecutedCount map[uint16]int64 // CPU -> executed count
+	// activeBuffer holds the pointer to the metrics buffer currently being written to
+	// by the handler goroutine. It is swapped with a clean buffer during collection.
+	activeBuffer atomic.Pointer[metricsBuffer]
+	bufferPool   sync.Pool
 
 	// SMI gap detection (placeholder for future implementation) // TODO
 	smiGapsDesc *prometheus.Desc
 
-	// Synchronization
-	mu            sync.RWMutex
-	log           log.Logger
-	lastPruneTime time.Time
-	pruneInterval time.Duration
+	// Synchronization for this collector is handled by the atomic swap of buffers for
+	// the writer, and a mutex for the reader to merge data into persistent metrics.
+	mu                    sync.Mutex // Protects all persistent metrics below
+	totalDpcQueuedCount   map[uint16]uint64
+	totalDpcExecutedCount map[uint16]uint64
+	totalIsrToDpcLatency  *histogramData
+	totalDpcDurations     map[DPCDriverKey]*histogramData
+
+	log *phusluadapter.SampledLogger
 
 	// Metric descriptors
 	isrToDpcLatencyDesc *prometheus.Desc
@@ -85,16 +140,7 @@ type PerfCollector struct {
 	dpcQueuedCPUDesc    *prometheus.Desc
 	dpcExecutedCPUDesc  *prometheus.Desc
 
-	// Driver last seen tracking for stale metric cleanup
-	driverLastSeen map[string]time.Time // driver name -> last event time
-	driverTimeout  time.Duration        // duration after which inactive drivers are pruned
-	cpuStringCache map[uint16]string    // Cache for formatCPU to reduce allocations
-}
-
-// ISRKey represents a composite key for pending ISR events
-type ISRKey struct {
-	CPU    uint16
-	Vector uint16
+	cpuStringCache map[uint16]string // Cache for formatCPU to reduce allocations
 }
 
 // ISREvent holds ISR event data for latency correlation
@@ -130,32 +176,23 @@ var (
 // NewPerfInfoCollector creates a new interrupt latency collector
 func NewPerfInfoCollector(config *config.PerfInfoConfig, sm *statemanager.KernelStateManager) *PerfCollector {
 	collector := &PerfCollector{
-		config:                 config,
-		sm:                     sm,
-		pendingISRs:            make(map[uint16][]*ISREvent, 64), // Pre-size for max CPU count
-		isrToDpcLatencyBuckets: make(map[float64]int64, len(ISRToDPCLatencyBuckets)),
-		isrToDpcLatencyCount:   0,
-		isrToDpcLatencySum:     0.0,
-		dpcQueuedCount:         make(map[uint16]int64, 64), // Pre-size for max CPU count
-		dpcExecutedCount:       make(map[uint16]int64, 64),
-		driverLastSeen:         make(map[string]time.Time, 100), // Track driver activity for bounded set
-		driverTimeout:          15 * time.Minute,                // Prune drivers inactive for 15 mins
-		log:                    logger.NewLoggerWithContext("perfinfo_collector"),
-		lastPruneTime:          time.Now(),
-		pruneInterval:          5 * time.Minute,
-
-		cpuStringCache: make(map[uint16]string, 64), // Cache for formatCPU to reduce allocations
+		config: config,
+		sm:     sm,
+		log:    logger.NewSampledLoggerCtx("perfinfo_collector"),
+		bufferPool: sync.Pool{
+			New: func() any {
+				return newMetricsBuffer()
+			},
+		},
+		cpuStringCache:        make(map[uint16]string, 64), // Cache for formatCPU to reduce allocations
+		totalDpcQueuedCount:   make(map[uint16]uint64),
+		totalDpcExecutedCount: make(map[uint16]uint64),
+		totalIsrToDpcLatency:  &histogramData{buckets: make(map[float64]int64)},
+		totalDpcDurations:     make(map[DPCDriverKey]*histogramData),
 	}
 
-	// Initialize per-driver histogram buckets only if per-driver metrics are enabled
-	if config.EnablePerDriver {
-		collector.dpcDurationHistograms = make(map[DPCDriverKey]*histogramData, 50)
-	}
-
-	// Initialize histogram buckets
-	for _, bucket := range ISRToDPCLatencyBuckets {
-		collector.isrToDpcLatencyBuckets[bucket] = 0
-	}
+	// Set the initial active buffer
+	collector.activeBuffer.Store(newMetricsBuffer())
 
 	// These two metrics isrToDpcLatencyDesc and dpcExecutedDesc
 	// Measure total interrupt to process latency, an aproximation.
@@ -239,15 +276,69 @@ func (c *PerfCollector) Describe(ch chan<- *prometheus.Desc) {
 
 // Collect implements the prometheus.Collector interface
 func (c *PerfCollector) Collect(ch chan<- prometheus.Metric) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	// 1. Atomically swap the active buffer with a new, clean one.
+	newBuffer := c.bufferPool.Get().(*metricsBuffer)
+	oldBuffer := c.activeBuffer.Swap(newBuffer)
 
-	// Periodically prune stale drivers to manage metric lifetime.
-	if time.Since(c.lastPruneTime) > c.pruneInterval {
-		c.pruneStaleDrivers()
-		c.lastPruneTime = time.Now()
+	// 2. Merge the data from the old buffer into the persistent, cumulative metrics.
+	// This is the only section where a lock is held, and it's on the collector's side,
+	// not the high-frequency writer path.
+	c.mu.Lock()
+
+	// Merge DPC counters
+	for cpu, count := range oldBuffer.dpcQueuedCount {
+		c.totalDpcQueuedCount[cpu] += uint64(count)
+	}
+	for cpu, count := range oldBuffer.dpcExecutedCount {
+		c.totalDpcExecutedCount[cpu] += uint64(count)
 	}
 
+	// Merge system-wide ISR-to-DPC latency histogram
+	c.totalIsrToDpcLatency.count += oldBuffer.isrToDpcLatencyCount
+	c.totalIsrToDpcLatency.sum += oldBuffer.isrToDpcLatencySum
+	for bucket, count := range oldBuffer.isrToDpcLatencyBuckets {
+		c.totalIsrToDpcLatency.buckets[bucket] += count
+	}
+
+	// Merge per-driver DPC duration histograms
+	for key, hd := range oldBuffer.dpcDurationHistograms {
+		totalHd, exists := c.totalDpcDurations[key]
+		if !exists {
+			totalHd = &histogramData{buckets: make(map[float64]int64, len(DPCDurationBuckets))}
+			c.totalDpcDurations[key] = totalHd
+		}
+		totalHd.count += hd.count
+		totalHd.sum += hd.sum
+		for bucket, count := range hd.buckets {
+			totalHd.buckets[bucket] += count
+		}
+	}
+
+	// Prune metrics for unloaded drivers from the persistent map.
+	cleanedImages := c.sm.GetCleanedImages()
+	if len(cleanedImages) > 0 {
+		c.log.Debug().Strs("drivers", cleanedImages).Msg("Pruning driver metrics for unloaded images")
+		for _, imageName := range cleanedImages {
+			delete(c.totalDpcDurations, DPCDriverKey{ImageName: imageName})
+		}
+	}
+
+	c.mu.Unlock()
+
+	// 3. Collect and send the cumulative metrics to Prometheus.
+	c.collectMetrics(ch)
+
+	// 4. After processing, clear the old buffer and return it to the pool for reuse.
+	c.cleanupOldISRs(time.Now(), oldBuffer) // Return any remaining ISRs to their pool
+	*oldBuffer = *newMetricsBuffer()        // Zero out the buffer's contents
+	c.bufferPool.Put(oldBuffer)
+
+	c.log.Debug().Msg("Collected performance metrics")
+}
+
+// collectMetrics sends all cumulative metrics to the Prometheus channel.
+// This function assumes the caller has already handled buffer swapping and aggregation.
+func (c *PerfCollector) collectMetrics(ch chan<- prometheus.Metric) {
 	// System-wide interrupt latency histogram
 	c.collectISRToDPCLatencyHistogram(ch)
 
@@ -263,18 +354,19 @@ func (c *PerfCollector) Collect(ch chan<- prometheus.Metric) {
 	if c.config.EnableSMIDetection {
 		c.collectSMIGaps(ch)
 	}
-
-	c.log.Debug().Msg("Collected performance metrics")
 }
 
 // collectISRToDPCLatencyHistogram creates the system-wide ISR to DPC latency histogram
 func (c *PerfCollector) collectISRToDPCLatencyHistogram(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	cumulativeBuckets := make(map[float64]uint64)
 	var cumulativeCount uint64
 
 	// Iterate over the defined buckets in order to calculate cumulative counts
 	for _, bucketBound := range ISRToDPCLatencyBuckets {
-		count := uint64(c.isrToDpcLatencyBuckets[bucketBound])
+		count := uint64(c.totalIsrToDpcLatency.buckets[bucketBound])
 		cumulativeCount += count
 		cumulativeBuckets[bucketBound] = cumulativeCount
 	}
@@ -282,17 +374,20 @@ func (c *PerfCollector) collectISRToDPCLatencyHistogram(ch chan<- prometheus.Met
 	// Create histogram metric with accurate count and sum
 	histogram := prometheus.MustNewConstHistogram(
 		c.isrToDpcLatencyDesc,
-		c.isrToDpcLatencyCount,
-		c.isrToDpcLatencySum,
+		c.totalIsrToDpcLatency.count,
+		c.totalIsrToDpcLatency.sum,
 		cumulativeBuckets,
 	)
 
 	ch <- histogram
 }
 
-// collectISRDurationHistograms creates ISR duration histograms by driver
+// collectDPCDurationHistograms creates DPC duration histograms by driver
 func (c *PerfCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric) {
-	for driverKey, hd := range c.dpcDurationHistograms {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	for driverKey, hd := range c.totalDpcDurations {
 		cumulativeBuckets := make(map[float64]uint64)
 		var cumulativeCount uint64
 
@@ -316,22 +411,25 @@ func (c *PerfCollector) collectDPCDurationHistograms(ch chan<- prometheus.Metric
 	}
 }
 
-// collectDPCQueueDepth creates DPC queue depth metrics
+// collectDPCCounters creates DPC queue depth metrics
 func (c *PerfCollector) collectDPCCounters(ch chan<- prometheus.Metric) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	// Create a set of all CPUs from both maps to ensure we don't miss any.
 	allCPUs := make(map[uint16]struct{})
-	for cpu := range c.dpcQueuedCount {
+	for cpu := range c.totalDpcQueuedCount {
 		allCPUs[cpu] = struct{}{}
 	}
-	for cpu := range c.dpcExecutedCount {
+	for cpu := range c.totalDpcExecutedCount {
 		allCPUs[cpu] = struct{}{}
 	}
 
-	var totalQueued, totalExecuted int64
+	var totalQueued, totalExecuted uint64
 
 	for cpu := range allCPUs {
-		queued := c.dpcQueuedCount[cpu]
-		executed := c.dpcExecutedCount[cpu]
+		queued := c.totalDpcQueuedCount[cpu]
+		executed := c.totalDpcExecutedCount[cpu]
 		totalQueued += queued
 		totalExecuted += executed
 
@@ -381,63 +479,92 @@ func (c *PerfCollector) collectSMIGaps(ch chan<- prometheus.Metric) {
 // ProcessISREvent processes an ISR event for latency tracking
 func (c *PerfCollector) ProcessISREvent(cpu uint16, vector uint16,
 	initialTime time.Time, routineAddress uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+
+	// Load the current active buffer. This is a single atomic read.
+	buffer := c.activeBuffer.Load()
 
 	// An ISR typically queues a DPC, so increment the queued count for this CPU.
-	c.dpcQueuedCount[cpu]++
+	buffer.dpcQueuedCount[cpu]++
 
 	// Store pending ISR for later correlation with DPC (using a pooled object)
 	isr := isrEventPool.Get().(*ISREvent)
 	*isr = ISREvent{InitialTime: initialTime, RoutineAddress: routineAddress, CPU: cpu, Vector: vector}
-	c.pendingISRs[cpu] = append(c.pendingISRs[cpu], isr)
-
-	// Only track per-driver metrics if enabled
-	if c.config.EnablePerDriver {
-		// Resolve driver name and update its last seen time
-		driverName := c.resolveDriverNameUnsafe(routineAddress)
-		if driverName != "unknown" {
-			c.driverLastSeen[driverName] = initialTime
-		}
-	}
+	buffer.pendingISRs[cpu] = append(buffer.pendingISRs[cpu], isr)
 
 	// Clean up old pending ISRs periodically (reduce frequency to improve performance)
-	if len(c.pendingISRs)%100 == 0 {
-		c.cleanupOldISRs(initialTime)
+	if len(buffer.pendingISRs)%100 == 0 {
+		c.cleanupOldISRs(initialTime, buffer)
 	}
 }
 
-// ProcessDPCEvent processes a DPC event and correlates with ISR for latency calculation
-func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
-	routineAddress uint64, durationMicros float64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+// ProcessDPCEvent processes a DPC event. It finalizes the previous DPC on the same
+// CPU and stores the current one as pending.
+func (c *PerfCollector) ProcessDPCEvent(cpu uint16, eventTime, initialTime time.Time, routineAddress uint64) {
+	buffer := c.activeBuffer.Load()
 
-	// Update DPC execution count for queue tracking
-	c.dpcExecutedCount[cpu]++
+	// A new DPC event marks the end of any previously pending DPC on the same CPU.
+	// We use the current event's timestamp as the end time for the previous one.
+	// If there was no previous DPC (e.g., after a context switch), this function does nothing.
+	// A new DPC event marks the end of any previously pending DPC on the same CPU.
+	// We use the current event's timestamp as the end time for the previous one.
+	// If there was no previous DPC (e.g., after a context switch), this function does nothing.
+	c.finalizeAndClearPendingDPC(buffer, cpu, eventTime)
 
-	// Only resolve driver name if we need it for per-driver or count metrics
-	var driverName string
-	if c.config.EnablePerDriver {
-		// Resolve driver name and track activity for bounded set management
-		driverName = c.resolveDriverNameUnsafe(routineAddress)
-		if driverName != "unknown" {
-			c.driverLastSeen[driverName] = initialTime
-
-			// Record DPC duration for per-driver metrics
-			c.recordDPCDuration(driverName, durationMicros)
-		}
+	// The current DPC is now stored as the new "pending" event. It is NOT lost.
+	// Its duration will be calculated and it will be counted when the *next*
+	// DPC or a context switch occurs on this CPU.
+	buffer.lastDPCPerCPU[cpu] = pendingDPCInfo{
+		initialTime:    initialTime,
+		routineAddress: routineAddress,
 	}
+}
 
-	// Find matching ISR on same CPU for latency calculation
+// ProcessCSwitchEvent processes a context switch event to finalize a pending DPC.
+func (c *PerfCollector) ProcessCSwitchEvent(cpu uint16, eventTime time.Time) {
+	buffer := c.activeBuffer.Load()
+
+	// A context switch signifies that the DPC queue is idle, marking the end
+	// of any pending DPC on that CPU.
+	c.finalizeAndClearPendingDPC(buffer, cpu, eventTime)
+}
+
+// finalizeAndClearPendingDPC checks for a pending DPC on a given CPU, processes it,
+// and clears it. This is called by the writer goroutine and operates on the active buffer.
+func (c *PerfCollector) finalizeAndClearPendingDPC(buffer *metricsBuffer, cpu uint16, endTime time.Time) {
+	if lastDPC, exists := buffer.lastDPCPerCPU[cpu]; exists {
+		durationMicros := float64(endTime.Sub(lastDPC.initialTime).Microseconds())
+
+		// Update DPC execution count for queue tracking
+		buffer.dpcExecutedCount[cpu]++
+
+		// Only resolve driver name if we need it for per-driver metrics
+		if c.config.EnablePerDriver {
+			driverName := c.resolveDriverName(lastDPC.routineAddress)
+			if driverName != "unknown" {
+				// For per-driver metrics
+				c.recordDPCDuration(buffer, driverName, durationMicros)
+			}
+		}
+
+		// Find and correlate with a matching ISR
+		c.correlateISR(buffer, cpu, lastDPC.initialTime)
+
+		// The DPC is no longer pending and its duration has been recorded.
+		// We must remove it from the map to prevent it from being processed again.
+		delete(buffer.lastDPCPerCPU, cpu)
+	}
+}
+
+// correlateISR finds a matching ISR for a completed DPC event to calculate latency.
+func (c *PerfCollector) correlateISR(buffer *metricsBuffer, cpu uint16, dpcInitialTime time.Time) {
 	var matchedISR *ISREvent
 	var matchedIndex = -1 // To remove the element from the slice later
 
 	// Look for ISR with closest timestamp on the same CPU. This is much faster.
 	closestTime := time.Hour // Start with large value
-	if isrsOnCPU, ok := c.pendingISRs[cpu]; ok {
+	if isrsOnCPU, ok := buffer.pendingISRs[cpu]; ok {
 		for i, isr := range isrsOnCPU {
-			timeDiff := initialTime.Sub(isr.InitialTime)
+			timeDiff := dpcInitialTime.Sub(isr.InitialTime)
 			if timeDiff >= 0 && timeDiff < closestTime {
 				closestTime = timeDiff
 				matchedISR = isr
@@ -446,123 +573,56 @@ func (c *PerfCollector) ProcessDPCEvent(cpu uint16, initialTime time.Time,
 		}
 	}
 
-	// If we found a matching ISR, record the latency
 	if matchedISR != nil {
 		latencyMicros := float64(closestTime.Microseconds())
-		c.recordISRToDPCLatency(latencyMicros)
+		c.recordISRToDPCLatency(buffer, latencyMicros)
 
 		// Remove the matched ISR from the slice to prevent duplicate matches.
 		// This is an efficient way to remove an element from a slice without preserving order.
-		isrsOnCPU := c.pendingISRs[cpu]
+		isrsOnCPU := buffer.pendingISRs[cpu]
 		isrsOnCPU[matchedIndex] = isrsOnCPU[len(isrsOnCPU)-1]
-		c.pendingISRs[cpu] = isrsOnCPU[:len(isrsOnCPU)-1]
+		buffer.pendingISRs[cpu] = isrsOnCPU[:len(isrsOnCPU)-1]
 
-		// Return the ISREvent to the pool for reuse
 		isrEventPool.Put(matchedISR)
 	}
 }
 
-// ProcessImageLoadEvent is now a NO-OP. The state manager handles this directly.
-func (c *PerfCollector) ProcessImageLoadEvent(imageBase, imageSize uint64, fileName string) {
-	// This is intentionally left blank.
-	// The KernelStateManager is now the source of truth for image information.
-	// The handler will call KernelStateManager.AddImage directly.
-}
-
-// ProcessImageUnloadEvent processes image unload events to clear internal caches.
-func (c *PerfCollector) ProcessImageUnloadEvent(imageBase uint64) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	// The state manager handles the actual image removal and cache invalidation.
-	// We still need to get the image name before it's gone to clean up our metrics.
-	stateManager := c.sm
-	info, ok := stateManager.GetImageForAddress(imageBase) // Get info before it's deleted
-	if !ok {
-		return
-	}
-
-	c.log.Trace().Str("driver_name", info.ImageName).Msg("Image unloaded, removing associated metrics")
-
-	// Remove all metrics associated with this driver.
-	c.removeDriverMetrics(info.ImageName)
-}
-
-// resolveDriverNameUnsafe is an optimized version for use within locked contexts
-// Assumes caller already holds the mutex
-func (c *PerfCollector) resolveDriverNameUnsafe(routineAddress uint64) string {
+// resolveDriverName is an optimized version that does not require a lock.
+func (c *PerfCollector) resolveDriverName(routineAddress uint64) string {
 	// The state manager now has a high-performance cache. We query it directly.
 	imageInfo, ok := c.sm.GetImageForAddress(routineAddress)
 	if !ok {
-		// Returning "unknown" for this single event is correct. The ImageLoad event
-		// might be delayed, and we will try the full lookup again if this address
-		// is seen in a future event.
 		return "unknown"
 	}
-
 	return imageInfo.ImageName
 }
 
-// pruneStaleDrivers removes metrics for drivers that have been inactive for a configured timeout.
-// This is called periodically from the Collect method.
-func (c *PerfCollector) pruneStaleDrivers() {
-	now := time.Now()
-	staleDrivers := make([]string, 0)
-
-	for driverName, lastSeen := range c.driverLastSeen {
-		if now.Sub(lastSeen) > c.driverTimeout {
-			staleDrivers = append(staleDrivers, driverName)
-		}
-	}
-
-	if len(staleDrivers) > 0 {
-		c.log.Debug().Strs("drivers", staleDrivers).Msg("Pruning stale driver metrics due to inactivity")
-		for _, driverName := range staleDrivers {
-			c.removeDriverMetrics(driverName)
-		}
-	}
-}
-
-// removeDriverMetrics removes all metrics associated with a given driver name.
-// The caller must hold the mutex.
-func (c *PerfCollector) removeDriverMetrics(driverName string) {
-	// Remove from last seen tracking
-	delete(c.driverLastSeen, driverName)
-
-	// Remove from histogram data if per-driver metrics are enabled
-	if c.config.EnablePerDriver {
-		delete(c.dpcDurationHistograms, DPCDriverKey{ImageName: driverName})
-	}
-
-	// The local routine address cache has been removed, so we no longer need to clean it.
-}
-
 // recordISRToDPCLatency records a system-wide ISR to DPC latency sample
-func (c *PerfCollector) recordISRToDPCLatency(latencyMicros float64) {
-	c.isrToDpcLatencyCount++
-	c.isrToDpcLatencySum += latencyMicros
+func (c *PerfCollector) recordISRToDPCLatency(buffer *metricsBuffer, latencyMicros float64) {
+	buffer.isrToDpcLatencyCount++
+	buffer.isrToDpcLatencySum += latencyMicros
 	// Find appropriate bucket
 	for _, bucket := range ISRToDPCLatencyBuckets {
 		if latencyMicros <= bucket {
-			c.isrToDpcLatencyBuckets[bucket]++
+			buffer.isrToDpcLatencyBuckets[bucket]++
 			return
 		}
 	}
 }
 
 // recordDPCDuration records a DPC duration sample for a specific driver
-func (c *PerfCollector) recordDPCDuration(driverName string, durationMicros float64) {
+func (c *PerfCollector) recordDPCDuration(buffer *metricsBuffer, driverName string, durationMicros float64) {
 	key := DPCDriverKey{ImageName: driverName}
 
 	// Get or create histogram data for this driver
-	hd, exists := c.dpcDurationHistograms[key]
+	hd, exists := buffer.dpcDurationHistograms[key]
 	if !exists {
 		hd = &histogramData{
 			buckets: make(map[float64]int64, len(DPCDurationBuckets)),
 			count:   0,
 			sum:     0.0,
 		}
-		c.dpcDurationHistograms[key] = hd
+		buffer.dpcDurationHistograms[key] = hd
 	}
 
 	// Update histogram data
@@ -579,10 +639,10 @@ func (c *PerfCollector) recordDPCDuration(driverName string, durationMicros floa
 }
 
 // cleanupOldISRs removes ISRs older than 10ms to prevent memory leaks
-func (c *PerfCollector) cleanupOldISRs(currentTime time.Time) {
+func (c *PerfCollector) cleanupOldISRs(currentTime time.Time, buffer *metricsBuffer) {
 	const maxAge = 10 * time.Millisecond
 
-	for cpu, isrs := range c.pendingISRs {
+	for cpu, isrs := range buffer.pendingISRs {
 		survivingISRs := isrs[:0] // Re-slice to avoid allocation
 		for _, isr := range isrs {
 			if currentTime.Sub(isr.InitialTime) <= maxAge {
@@ -594,10 +654,10 @@ func (c *PerfCollector) cleanupOldISRs(currentTime time.Time) {
 		}
 
 		if len(survivingISRs) > 0 {
-			c.pendingISRs[cpu] = survivingISRs
+			buffer.pendingISRs[cpu] = survivingISRs
 		} else {
 			// If no ISRs survived on this CPU, delete the entry to keep the map clean.
-			delete(c.pendingISRs, cpu)
+			delete(buffer.pendingISRs, cpu)
 		}
 	}
 }

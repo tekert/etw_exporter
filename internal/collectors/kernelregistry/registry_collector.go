@@ -108,7 +108,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue
 		}
 
-		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
+		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.UniqueHash), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 
 		for opKey, count := range metrics.Registry.Operations {
@@ -140,7 +140,7 @@ func (c *RegistryCollector) Collect(ch chan<- prometheus.Metric) {
 }
 
 // RecordRegistryOperation records a single registry operation.
-func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, opcode uint8, status uint32) {
+func (c *RegistryCollector) RecordRegistryOperation(pData *statemanager.ProcessData, opcode uint8, status uint32) {
 	result := statemanager.ResultSuccess
 	if status != 0 {
 		result = statemanager.ResultFailure
@@ -151,10 +151,8 @@ func (c *RegistryCollector) RecordRegistryOperation(startKey uint64, opcode uint
 	c.operationsTotal[index].Add(1)
 
 	// --- Per-process metric ---
-	if c.config.EnablePerProcess && startKey > 0 {
+	if c.config.EnablePerProcess && pData != nil {
 		// Delegate to the new centralized state manager logic.
-		if pData, ok := c.sm.GetProcessDataBySK(startKey); ok {
-			pData.RecordRegistryOperation(opcode, status)
-		}
+		pData.RecordRegistryOperation(opcode, status)
 	}
 }

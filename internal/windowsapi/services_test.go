@@ -14,8 +14,7 @@ func TestQueryServiceName(t *testing.T) {
 	got = ResolveServiceName(pid, tag)
 	t.Logf("ResolveServiceName(%d, %d) = %q", pid, tag, got)
 
-	got, err = queryServiceNameByPid(pid)
+	got, err = QueryServiceNameByPid(pid)
 	t.Logf("queryServiceNameByPid(%d) = %q, err=%v", pid, got, err)
-
 
 }

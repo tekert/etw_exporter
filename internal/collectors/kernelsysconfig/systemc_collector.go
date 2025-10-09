@@ -161,7 +161,7 @@ func (sc *SysConfCollector) AddPhysicalDisk(info PhysicalDiskInfo) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.physicalDisks[info.DiskNumber] = info
-	sc.log.Debug().Interface("disk_info", info).Msg("Added physical disk info")
+	sc.log.Trace().Interface("disk_info", info).Msg("Added physical disk info")
 }
 
 // AddLogicalDisk adds or updates information about a logical disk.
@@ -169,13 +169,13 @@ func (sc *SysConfCollector) AddLogicalDisk(info LogicalDiskInfo) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 	sc.logicalDisks[info.DiskNumber] = info
-	sc.log.Debug().Interface("disk_info", info).Msg("Added logical disk info")
+	sc.log.Trace().Interface("disk_info", info).Msg("Added logical disk info")
 }
 
 // AddServiceInfo adds a service tag mapping to the central state manager.
 func (sc *SysConfCollector) AddServiceInfo(info ServiceInfo) {
 	sc.stateManager.RegisterServiceTag(info.SubProcessTag, info.ServiceName)
-	sc.log.Debug().
+	sc.log.Trace().
 		Uint32("tag", info.SubProcessTag).
 		Str("name", info.ServiceName).
 		Msg("Reported service tag mapping to state manager")

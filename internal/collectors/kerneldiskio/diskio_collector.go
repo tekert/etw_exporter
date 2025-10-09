@@ -156,7 +156,7 @@ func (c *DiskCollector) Collect(ch chan<- prometheus.Metric) {
 			return true // Continue to next program
 		}
 
-		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.PeChecksum), 16)
+		peTimestampStr := "0x" + strconv.FormatUint(uint64(key.UniqueHash), 16)
 		sessionIDStr := strconv.FormatUint(uint64(key.SessionID), 10)
 
 		for diskNum, diskData := range metrics.Disk.Disks {
@@ -232,7 +232,7 @@ func (c *DiskCollector) createDiskIoCounts(diskNumber uint32) {
 // recording to the high-performance KernelStateManager.
 func (c *DiskCollector) RecordDiskIO(
 	diskNumber uint32,
-	startKey uint64,
+	pData *statemanager.ProcessData,
 	transferSize uint32,
 	isWrite bool) {
 
@@ -264,7 +264,7 @@ func (c *DiskCollector) RecordDiskIO(
 	// --- Per-Process Metrics ---
 	// Delegate to the new centralized state manager logic.
 	//if config.DiskIOConfig.PerProcessMetrics {
-	if pData, ok := c.stateManager.GetProcessDataBySK(startKey); ok {
+	if pData != nil {
 		pData.RecordDiskIO(diskNumber, transferSize, isWrite)
 	}
 	//}

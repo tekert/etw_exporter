@@ -39,9 +39,10 @@ type SessionManager struct {
 	appConfig       *config.AppConfig // Add AppConfig to access SessionWatcher settings
 	log             plog.Logger       // Session manager logger
 
-	running            bool
-	isStopping         atomic.Bool // Flag to indicate the manager is in the process of shutting down.
-	restartingSessions sync.Map    // Tracks sessions currently being restarted to prevent race conditions.
+	running               bool
+	isStopping            atomic.Bool // Flag to indicate the manager is in the process of shutting down.
+	restartingSessions    sync.Map    // Tracks sessions currently being restarted to prevent race conditions.
+	enabledProviderGroups []*ProviderGroup
 }
 
 // NewSessionManager creates and initializes a new ETW session manager.
@@ -57,9 +58,32 @@ func NewSessionManager(eventHandler *EventHandler, appConfig *config.AppConfig) 
 		log:          logger.NewLoggerWithContext("etw_session"),
 	}
 
+	// Initialize the list of enabled providers based on the config.
+	manager.initProviders()
+
 	manager.restartingSessions = sync.Map{}
 	manager.log.Debug().Msg("SessionManager created")
 	return manager
+}
+
+// initProviders initializes the provider groups based on the configuration.
+func (s *SessionManager) initProviders() {
+	s.log.Debug().Msg("Initializing provider groups")
+	s.enabledProviderGroups = GetEnabledProviders(s.config)
+
+	var once bool
+	for _, group := range s.enabledProviderGroups {
+		// Ensure we have the necessary privileges for kernel sessions if PROFILE flag is set
+		if group.KernelFlags&etw.EVENT_TRACE_FLAG_PROFILE != 0 && !once {
+			etw.EnableProfilingPrivileges()
+			s.log.Warn().Msg("SE_SYSTEM_PROFILE_NAME Privilege enabled for profiling")
+			once = true
+		}
+
+		if err := group.init(); err != nil {
+			s.log.Error().Err(err).Str("group", group.Name).Msg("ProviderGroup Init failed")
+		}
+	}
 }
 
 // Start initializes and starts the ETW sessions
@@ -73,12 +97,7 @@ func (s *SessionManager) Start() error {
 
 	s.log.Info().Msg("Starting ETW session manager...")
 
-	// Initialize all enabled provider groups first (calling Init on each)
-	if err := InitProviders(s.config); err != nil {
-		err = fmt.Errorf("failed to initialize provider groups: %w", err)
-		s.log.Error().Err(err).Msg("Error when initializing provider groups")
-	}
-	s.log.Debug().Msg("Provider groups initialized")
+	s.log.Debug().Msg("Provider groups already initialized")
 
 	// Get SystemConfig events first if using manifest providers
 	// SystemConfig events only arrive when kernel sessions are stopped
@@ -114,15 +133,14 @@ func (s *SessionManager) Start() error {
 	}
 	s.log.Debug().Msg("ETW consumer started")
 
-	// Start periodic cleanup of stale processes in the background, but only if
-	// a manifest session is active, as it's required for rundown events.
-	if s.manifestSession != nil {
-		s.wg.Add(1)
-		go func() {
-			defer s.wg.Done()
-			//s.startStaleProcessCleanup() // ! TESTING --- IGNORE ---
-		}()
-	}
+	// Start the scrape watchdog to prevent memory leaks if scrapes stop.
+	//if s.appConfig.ScrapeFailsafe.Enabled {
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		s.startScrapeWatchdog()
+	}()
+	//}
 
 	// If the legacy kernel session is in use, start the API-based reconciler
 	// to provide a "synthetic rundown" for cleanup.
@@ -149,6 +167,7 @@ func (s *SessionManager) captureNtSystemConfigEvents() error {
 	s.log.Debug().Msg("Creating temporary kernel session for SystemConfig events")
 
 	// Create a temporary kernel session to get SystemConfig events
+	//tempKernelSession := etw.NewKernelRealTimeSession(0)
 	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
 
 	if err := tempKernelSession.Start(); err != nil {
@@ -196,6 +215,11 @@ func isSystemProviderSupported() bool {
 	// Windows 10 is Major version 10. Windows 11 reports as Major version 10 for compatibility.
 	// We must check the build number.
 	return v.MajorVersion >= 10 && v.BuildNumber >= 20348
+}
+
+// IsNtKernelSessionInUse checks if any process is currently using the NT Kernel Logger session.
+func (s *SessionManager) IsNtKernelSessionInUse() bool {
+	return s.kernelSession.IsSessionActive() // used by another process.
 }
 
 // RestartSession attempts to restart a stopped ETW session in a separate goroutine.
@@ -407,9 +431,9 @@ func (s *SessionManager) setupSessions() error {
 func (s *SessionManager) setupConsumer() error {
 	// Set up callbacks using the event handler
 	s.consumer.EventRecordCallback = s.eventHandler.EventRecordCallback
-	//s.consumer.EventRecordHelperCallback = s.eventHandler.EventRecordHelperCallback
+	s.consumer.EventRecordHelperCallback = nil //s.eventHandler.EventRecordHelperCallback
 	s.consumer.EventPreparedCallback = s.eventHandler.EventPreparedCallback
-	s.consumer.EventCallback = s.eventHandler.EventCallback
+	s.consumer.EventCallback = nil //s.eventHandler.EventCallback
 
 	return nil
 }
@@ -434,16 +458,18 @@ func (s *SessionManager) stopSessions() error {
 // Stop gracefully stops the session manager
 func (s *SessionManager) Stop() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !s.running {
+		s.mu.Unlock()
 		return nil
 	}
 	s.isStopping.Store(true) // Signal that we are shutting down BEFORE stopping sessions.
+	s.running = false
+	s.mu.Unlock() // Important: Unlock before waiting
 
 	// Stop sessions first
 	if err := s.stopSessions(); err != nil {
-		return fmt.Errorf("failed to stop sessions: %w", err)
+		s.log.Error().Err(err).Msg("Failed to stop ETW sessions cleanly")
+		// Continue shutdown even if session stop fails
 	}
 
 	// Stop consumer last
@@ -453,11 +479,11 @@ func (s *SessionManager) Stop() error {
 		}
 	}
 
-	// Wait for all goroutines to finish
+	// Signal all background goroutines to exit
 	s.cancel()
+	// Wait for them to finish
 	s.wg.Wait()
 
-	s.running = false
 	return nil
 }
 
@@ -478,10 +504,8 @@ func (s *SessionManager) IsRunning() bool {
 // GetEnabledProviderGroups returns the names of enabled provider groups
 func (s *SessionManager) GetEnabledProviderGroups() []string {
 	var enabled []string
-	for _, group := range AllProviderGroups {
-		if group.IsEnabled(s.config) {
-			enabled = append(enabled, group.Name)
-		}
+	for _, group := range s.enabledProviderGroups {
+		enabled = append(enabled, group.Name)
 	}
 	return enabled
 }
@@ -507,55 +531,6 @@ func (s *SessionManager) TriggerProcessRundown() error {
 	s.log.Debug().Msg("Process rundown triggered successfully")
 	return nil
 }
-
-// // startStaleKernelProcessCleanup runs a periodic task that uses a Windows API snapshot of
-// // running processes as the "ground truth". It reconciles this with the ETW-tracked
-// // state, cleaning up any processes that are no longer running. This is the primary
-// // self-healing mechanism for the process state when using the NT Kernel Logger, which
-// // lacks rundown events.
-// func (s *SessionManager) startStaleKernelProcessCleanup() {
-// 	const reconcileInterval = 5 * time.Minute
-
-// 	s.log.Info().
-// 		Str("interval", reconcileInterval.String()).
-// 		Msg("Starting API-based process reconciler routine for kernel session")
-
-// 	ticker := time.NewTicker(reconcileInterval)
-// 	defer ticker.Stop()
-
-// 	for {
-// 		select {
-// 		case <-ticker.C:
-// 			if !s.IsRunning() {
-// 				continue
-// 			}
-// 			s.log.Debug().Msg("Running periodic process reconciliation with API snapshot...")
-// 			s.reconcileProcessesWithApi() // // ! TESTING --- IGNORE ---
-
-// 		case <-s.ctx.Done():
-// 			s.log.Debug().Msg("Stopping API-based process reconciler routine")
-// 			return
-// 		}
-// 	}
-// }
-
-// func (s *SessionManager) reconcileProcessesWithApi() {
-// 	snapshot, err := windowsapi.GetProcessSnapshot()
-// 	if err != nil {
-// 		s.log.Error().Err(err).Msg("Failed to get process snapshot for reconciliation")
-// 		return
-// 	}
-
-// 	// The snapshot map contains PIDs of all currently running processes.
-// 	// We will use this to clean up any terminated processes in our state manager.
-// 	sm := s.eventHandler.GetStateManager()
-// 	cleanedCount := sm.CleanupTerminatedProcessesBySnapshot(snapshot)
-
-// 	s.log.Debug().
-// 		Int("cleaned_count", cleanedCount).
-// 		Int("snapshot_total", len(snapshot)).
-// 		Msg("Completed process reconciliation cycle")
-// }
 
 // startStaleKernelProcessCleanup runs a periodic task that forces the NT Kernel Logger
 // to emit rundown events for all running processes. This is achieved by briefly
@@ -600,11 +575,54 @@ func (s *SessionManager) triggerKernelProcessRundown() {
 	// This is a non-destructive way to get a full process rundown. It quickly
 	// disables and re-enables the process provider, which causes ETW to emit
 	// rundown events for all active processes, ensuring our state is synchronized.
-	err := s.kernelSession.RestartKernelProvider(etw.EVENT_TRACE_FLAG_PROCESS)
+	err := s.kernelSession.RestartNtKernelProvider(etw.EVENT_TRACE_FLAG_PROCESS)
 	if err != nil {
 		s.log.Error().Err(err).Msg("Failed to trigger kernel process rundown via provider restart")
 		return
 	}
 
 	s.log.Info().Msg("Successfully triggered kernel process rundown")
+}
+
+// startScrapeWatchdog runs a periodic task that checks if Prometheus has scraped
+// the exporter recently. If not, it manually triggers a cleanup cycle to prevent
+// unbounded memory growth from terminated entities.
+func (s *SessionManager) startScrapeWatchdog() {
+	//cfg := &s.appConfig.ScrapeFailsafe
+
+	const interval = 1 * time.Minute
+	const timeout = 6 * time.Hour
+
+	s.log.Info().
+		Str("check_interval", interval.String()).
+		Str("timeout", timeout.String()).
+		Msg("Starting scrape watchdog.")
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	sm := s.eventHandler.GetStateManager()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !s.IsRunning() {
+				continue
+			}
+
+			timeSinceLastScrape := sm.GetTimeSinceLastScrape()
+			if timeSinceLastScrape > timeout {
+				s.log.Warn().
+					Dur("duration_since_last_scrape", timeSinceLastScrape).
+					Msg("No scrapes detected in the configured timeout. Forcing cleanup to prevent memory leak.")
+
+				// Manually trigger the same cleanup function that a normal scrape would.
+				sm.PostScrapeCleanup()
+			}
+
+		case <-s.ctx.Done():
+			s.log.Debug().Msg("Stopping scrape watchdog.")
+			return
+		}
+	}
 }

@@ -7,8 +7,8 @@ import (
 // threadTerminationRecord holds the necessary context to perform a safe,
 // conditional cleanup of a terminated thread, preventing race conditions with TID reuse.
 type threadTerminationRecord struct {
-	TermTime time.Time // The wall-clock time the thread was marked for deletion.
-	StartKey uint64    // The StartKey of the parent process at the time of termination.
+	TerminatedAtGeneration uint64 // The scrape generation when the thread was marked for deletion.
+	StartKey               uint64 // The StartKey of the parent process at the time of termination.
 }
 
 // --- Thread Management ---
@@ -31,11 +31,13 @@ func (ss *SystemState) AddThread(tid, pid uint32, eventTimestamp time.Time, subP
 			// This check remains as a critical guard against PID reuse. If a thread's timestamp
 			// is older than its parent process, something is fundamentally wrong.
 			if eventTimestamp.After(createTime.Add(-time.Millisecond)) {
-				// Store the TID -> StartKey mapping directly. This is the successful hot path.
-				ss.tidToStartKey.Store(tid, startKey)
+				// Store the TID -> *ProcessData mapping directly. This is the successful hot path.
+				ss.tidToCurrentProcessData.Store(tid, pData)
 				GlobalDiagnostics.RecordThreadAdded()
 
 				// --- Service Name Attribution ---
+				// TODO: some thread dont have subprocess tag, maybe they dont exist
+				// so we can't resolve service name until the thread becomes active.
 				ss.resolveAndApplyServiceName(pData, subProcessTag)
 
 				ss.log.Trace().Uint32("tid", tid).
@@ -66,20 +68,22 @@ func (ss *SystemState) AddThread(tid, pid uint32, eventTimestamp time.Time, subP
 
 	// As a fallback, associate the thread with the "unknown_process" singleton
 	// to ensure its metrics are not lost entirely.
-	ss.tidToStartKey.Store(tid, UnknownProcessStartKey)
+	if unknownPData, ok := ss.processManager.GetProcessDataBySK(UnknownProcessStartKey); ok {
+		ss.tidToCurrentProcessData.Store(tid, unknownPData)
+	}
 }
 
 // MarkThreadForDeletion marks a thread to be cleaned up after the next scrape.
 // This is used for individual thread termination events.
-func (ss *SystemState) MarkThreadForDeletion(tid uint32) {
+func (ss *SystemState) MarkThreadForDeletion(tid uint32, terminatedAtGeneration uint64) {
 	// To handle TID reuse correctly, we must capture the StartKey that this
 	// thread instance was associated with at the moment of termination.
-	if startKey, ok := ss.tidToStartKey.Load(tid); ok {
+	if pData, ok := ss.tidToCurrentProcessData.Load(tid); ok {
 		ss.terminatedThreads.Store(tid, &threadTerminationRecord{
-			TermTime: time.Now(),
-			StartKey: startKey,
+			TerminatedAtGeneration: terminatedAtGeneration,
+			StartKey:               pData.Info.StartKey,
 		})
-		ss.log.Trace().Uint32("tid", tid).Uint64("start_key", startKey).Msg("Thread marked for deletion")
+		ss.log.Trace().Uint32("tid", tid).Uint64("start_key", pData.Info.StartKey).Msg("Thread marked for deletion")
 	} else {
 		// This can happen if a thread terminates that we were not tracking (e.g. from rundown).
 		ss.log.Trace().Uint32("tid", tid).Msg("Ignoring termination for untracked thread")
@@ -91,14 +95,23 @@ func (ss *SystemState) MarkThreadForDeletion(tid uint32) {
 // memory faults) to attribute events to a specific process instance.
 // It is a single, fast, lock-free map lookup.
 func (ss *SystemState) GetStartKeyForThread(tid uint32) (uint64, bool) {
-	return ss.tidToStartKey.Load(tid)
+	if pData, ok := ss.tidToCurrentProcessData.Load(tid); ok {
+		return pData.Info.StartKey, true
+	}
+	return 0, false
+}
+
+// GetCurrentProcessDataByThread resolves a TID to its parent's *ProcessData object.
+// This is the new, optimized hot-path function that avoids a second map lookup.
+func (ss *SystemState) GetCurrentProcessDataByThread(tid uint32) (*ProcessData, bool) {
+	return ss.tidToCurrentProcessData.Load(tid)
 }
 
 // GetThreadCount returns the current number of tracked threads.
 // This is a helper for the debug endpoint and implements the debug.StateProvider interface.
 func (ss *SystemState) GetThreadCount() int {
 	var count int
-	ss.tidToStartKey.Range(func(u uint32, u2 uint64) bool {
+	ss.tidToCurrentProcessData.Range(func(u uint32, u2 *ProcessData) bool {
 		count++
 		return true
 	})
@@ -107,8 +120,8 @@ func (ss *SystemState) GetThreadCount() int {
 
 // RangeThreads iterates over threads for the debug http handler.
 func (ss *SystemState) RangeThreads(f func(tid uint32, startKey uint64)) {
-	ss.tidToStartKey.Range(func(tid uint32, startKey uint64) bool {
-		f(tid, startKey)
+	ss.tidToCurrentProcessData.Range(func(tid uint32, pData *ProcessData) bool {
+		f(tid, pData.Info.StartKey)
 		return true
 	})
 }

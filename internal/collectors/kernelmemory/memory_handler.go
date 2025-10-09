@@ -40,11 +40,11 @@ func (c *Handler) AttachCollector(collector *MemCollector) {
 func (h *Handler) RegisterRoutes(router handlers.Router) {
 	// Provider: NT Kernel Logger (PageFault) ({3d6fa8d3-fe05-11d0-9dda-00c04fd7ba7c})
 	// Provider: System Interrupt Provider (Win11+) ({9e814aad-3204-11d2-9a82-006008a86939})
-	memoryRoutes := map[uint8]handlers.EventHandlerFunc{
-		32: h.HandleMofHardPageFaultEvent, // HardFault
+	memoryRoutes := map[uint8]handlers.RawEventHandlerFunc{
+		32: h.HandleMofHardPageFaultRawEvent, // HardFault
 	}
-	handlers.RegisterRoutesForGUID(router, guids.PageFaultKernelGUID, memoryRoutes)
-	handlers.RegisterRoutesForGUID(router, etw.SystemMemoryProviderGuid, memoryRoutes)
+	handlers.RegisterRawRoutesForGUID(router, guids.PageFaultKernelGUID, memoryRoutes)
+	handlers.RegisterRawRoutesForGUID(router, etw.SystemMemoryProviderGuid, memoryRoutes)
 
 	h.log.Debug().Msg("Memory collector enabled and routes registered")
 }
@@ -65,16 +65,16 @@ func (h *Handler) GetCustomCollector() prometheus.Collector {
 //   - Schema: MOF
 //
 // Schema (from gen_mof_kerneldef.go):
-//   - InitialTime (object): Timestamp of the page fault.
-//   - ReadOffset (uint64): Read offset in the file.
-//   - VirtualAddress (pointer): Virtual address that caused the fault.
-//   - FileObject (pointer): Pointer to the file object.
-//   - TThreadId (uint32): Thread ID that encountered the fault.
-//   - ByteCount (uint32): Amount of data read.
+//   - InitialTime (object): Timestamp of the page fault. offset 0
+//   - ReadOffset (uint64): Read offset in the file. offset 8
+//   - VirtualAddress (pointer): Virtual address that caused the fault. offset 16
+//   - FileObject (pointer): Pointer to the file object. offset 24
+//   - TThreadId (uint32): Thread ID that encountered the fault. offset 32
+//   - ByteCount (uint32): Amount of data read. offset 36
 //
 // This handler increments a counter for each hard page fault. It resolves the
 // Thread ID to a process StartKey to attribute the fault correctly.
-func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) error {
+func (h *Handler) HandleMofHardPageFaultRawEvent(er *etw.EventRecord) error {
 	// Increment the global system-wide counter first.
 	h.collector.IncrementTotalHardPageFaults()
 
@@ -82,7 +82,7 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 	// to the centralized state manager function. This check avoids work if the
 	// feature is disabled.
 	if h.collector.IsPerProcessEnabled() {
-		threadID, err := helper.GetPropertyUint("TThreadId")
+		threadID, err := er.GetUint32At(32) // TThreadId offset in MOF schema
 		if err != nil {
 			h.log.SampledWarn("pagefault_tid_error").
 			Err(err).
@@ -90,7 +90,7 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 			// We still counted the global metric, so we don't return an error that would stop the session.
 			return nil
 		}
-		headerPID := helper.EventRec.EventHeader.ProcessId
+		headerPID := er.EventHeader.ProcessId
 		h.stateManager.RecordHardPageFaultForThread(uint32(threadID), headerPID)
 	}
 
@@ -154,7 +154,7 @@ func (h *Handler) HandleMofHardPageFaultEvent(helper *etw.EventRecordHelper) err
 //
 // Schema (Hypothetical):
 //
-//	// TODO
+//	Win 11 only.
 func (h *Handler) HandleManifestHardPageFaultEvent(helper *etw.EventRecordHelper) error {
 	// Manifest events often provide the PID directly, simplifying the logic.
 	// pid, err := helper.GetPropertyUint("ProcessID")
