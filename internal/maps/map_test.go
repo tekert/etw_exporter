@@ -148,6 +148,32 @@ func runUpdateBenchmark(b *testing.B, bm ConcurrentMap[uint32, map[uint64]struct
 	})
 }
 
+// runWriteOnceReadHeavyBenchmark simulates a workload where data is written once
+// upon first access and then read frequently by multiple goroutines. This models
+// looking up relatively static data like process metadata, where the data is created
+// once and then repeatedly accessed by various event handlers.
+func runWriteOnceReadHeavyBenchmark(b *testing.B, bm ConcurrentMap[uint32, *int64], readers int) {
+	// The factory function to create a new value. It's only called when a key
+	// is not present in the map.
+	factory := func() *int64 {
+		var v int64 = 1
+		return &v
+	}
+
+	b.ResetTimer()
+	b.SetParallelism(readers)
+	b.RunParallel(func(pb *testing.PB) {
+		r := rand.New(rand.NewSource(rand.Int63()))
+		for pb.Next() {
+			key := r.Uint32() % keySpace
+			// This operation will write only if the key is new,
+			// otherwise it's just a read. This perfectly simulates the
+			// "get-or-create" pattern for process/thread metadata.
+			_, _ = bm.LoadOrStore(key, factory)
+		}
+	})
+}
+
 // --- Main Benchmark Function ---
 
 func BenchmarkMaps(b *testing.B) {
@@ -234,6 +260,28 @@ func BenchmarkMaps(b *testing.B) {
 						})
 					}
 				})
+			})
+		}
+	})
+
+	b.Run("Pattern_WriteOnce_ReadHeavy", func(b *testing.B) {
+		mapsToTest := []struct {
+			name string
+			m    ConcurrentMap[uint32, *int64]
+		}{
+			{"SyncMap", NewStdSyncMap[uint32, *int64]()},
+			{"RWMutexMap", NewRWMutexMap[uint32, *int64]()},
+			{"ShardedMap", NewShardedMap[uint32, *int64]()},
+			{"CornelkHashMap", NewCornelkMap[uint32, *int64]()},
+			{"XSyncMapV4", NewXSyncMap[uint32, *int64]()},
+		}
+		for _, wl := range workloads {
+			b.Run(wl.name, func(b *testing.B) {
+				for _, mt := range mapsToTest {
+					b.Run(mt.name, func(b *testing.B) {
+						runWriteOnceReadHeavyBenchmark(b, mt.m, wl.threads)
+					})
+				}
 			})
 		}
 	})
