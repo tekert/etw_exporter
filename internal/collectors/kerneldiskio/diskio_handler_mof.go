@@ -145,34 +145,49 @@ func (d *HandlerMof) HandleDiskReadMofRaw(er *etw.EventRecord) error {
 		return err
 	}
 
-	var pData *statemanager.ProcessData = nil
+    var pData *statemanager.ProcessData
 
-	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
-	if issuingTID != 0 {
-		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
-			pData = p
-		}
-	}
+    // --- Attribution Logic ---
+    // 1. IssuingThreadId: The most accurate source, linking I/O to the originating thread.
+    // 2. Event Header PID: A reliable fallback for non-deferred I/O.
+    // 3. System Process: The final fallback for deferred I/O or unattributable events.
 
-	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
-	if pData == nil {
-		headerPID := er.EventHeader.ProcessId
-		d.log.SampledWarn("disk_read_pdata").
-			Uint32("issuing_tid", issuingTID).
-			Msg("DiskRead IssuingThreadId returned no process data, falling back to header PID")
-		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
-			pData = p
-		} else {
-			d.log.SampledWarn("disk_read_pdata2").
-				Uint32("issuing_tid", issuingTID).
-				Uint32("header_pid", headerPID).
-				Msg("DiskRead header PID also returned no process data, attributing to system-wide only")
-		}
-	}
+    // Attempt attribution via the Issuing Thread ID.
+    if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
+        if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
+            pData = p
+        }
+    }
 
-	// A pData == nil means we couldn't attribute the I/O to a known process.
-	// The collector will still record the system-wide metric, but will skip the
-	// per-process metric if pData is nil.
+    // If TID attribution failed, fall back to the Process ID in the event header.
+    if pData == nil {
+        headerPID := er.EventHeader.ProcessId
+        if headerPID != 0 && headerPID != 0xFFFFFFFF {
+            if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
+                pData = p
+            }
+        }
+    }
+
+    // If both primary and secondary attribution failed, this is an unattributable event.
+    // We log a warning for unexpected cases and then perform a final fallback to the System process.
+    if pData == nil {
+        headerPID := er.EventHeader.ProcessId
+        // Only log a warning if the failure was unexpected.
+        if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
+            d.log.SampledWarn("disk_read_unattributed").
+                Uint32("issuing_tid", issuingTID).
+                Uint32("header_pid", headerPID).
+                Msg("DiskRead could not be attributed via TID or PID; falling back to System.")
+        }
+
+        // Final fallback: Attribute to the System process (PID 4).
+        if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
+            pData = p
+        }
+    }
+
+	// At this point, pData is guaranteed to be non-nil, as we always fall back to System.
 	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, false)
 
 	return nil
@@ -233,33 +248,43 @@ func (d *HandlerMof) HandleDiskWriteMofRaw(er *etw.EventRecord) error {
 
 	var pData *statemanager.ProcessData = nil
 
-	// Step 1: Attempt to get the startKey using the IssuingThreadId (most accurate).
-	if issuingTID != 0 {
-		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
-			pData = p
-		}
-	}
+    // Attempt attribution via the Issuing Thread ID.
+    if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
+        if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
+            pData = p
+        }
+    }
 
-	// Step 2: If TID attribution failed to produce a startKey, fall back to the ProcessId in the event header.
-	if pData == nil {
-		d.log.SampledWarn("disk_write_pdata").
-			Uint32("issuing_tid", issuingTID).
-			Msg("DiskWrite IssuingThreadId returned no process data, falling back to header PID")
-		headerPID := er.EventHeader.ProcessId
-		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
-			pData = p
-		} else {
-			d.log.SampledWarn("disk_write_pdata2").
-				Uint32("issuing_tid", issuingTID).
-				Uint32("header_pid", headerPID).
-				Msg("DiskWrite header PID also returned no process data, attributing to system-wide only")
-		}
-	}
+    // If TID attribution failed, fall back to the Process ID in the event header.
+    if pData == nil {
+        headerPID := er.EventHeader.ProcessId
+        if headerPID != 0 && headerPID != 0xFFFFFFFF {
+            if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
+                pData = p
+            }
+        }
+    }
 
-	// A startKey of 0 means we couldn't attribute the I/O to a known process.
-	// The collector will still record the system-wide metric, but will skip the
-	// per-process metric if pData is nil.
-	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, true)
+    // If both primary and secondary attribution failed, this is an unattributable event.
+    // We log a warning for unexpected cases and then perform a final fallback to the System process.
+    if pData == nil {
+        headerPID := er.EventHeader.ProcessId
+        // Only log a warning if the failure was unexpected.
+        if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
+            d.log.SampledWarn("disk_read_unattributed").
+                Uint32("issuing_tid", issuingTID).
+                Uint32("header_pid", headerPID).
+                Msg("DiskRead could not be attributed via TID or PID; falling back to System.")
+        }
+
+        // Final fallback: Attribute to the System process (PID 4).
+        if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
+            pData = p
+        }
+    }
+
+	// At this point, pData is guaranteed to be non-nil, as we always fall back to System.
+	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, false)
 
 	return nil
 }

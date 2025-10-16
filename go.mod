@@ -9,7 +9,7 @@ require (
 	github.com/phuslu/log v1.0.120
 	github.com/prometheus/client_golang v1.23.0
 	github.com/puzpuzpuz/xsync/v4 v4.1.0
-	github.com/tekert/goetw v0.8.9
+	github.com/tekert/goetw v0.9.0-beta
 	golang.org/x/sys v0.33.0
 )
 
