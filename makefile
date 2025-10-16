@@ -7,7 +7,7 @@ BINARY_NAME=etw_exporter.exe
 # -s: Omit the symbol table
 # -w: Omit the DWARF symbol table
 # -gcflags="all=-B": Disable bounds checking (2-6% performance improvement)
-LDFLAGS = -s -w
+#LDFLAGS = -s -w
 GCFLAGS = all=-B
 
 # The default command to run when you just type "make"
