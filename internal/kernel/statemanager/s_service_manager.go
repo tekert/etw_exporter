@@ -35,6 +35,22 @@ func (sm *ServiceManager) resolveAndApplyServiceName(pData *ProcessData, subProc
 		return
 	}
 
+	// Certain system pseudo-processes like 'System' (PID 4) and 'MemCompression'
+	// represent kernel activity. ETW events for threads under these processes may
+	// carry SubProcessTags from the user-mode process that *caused* the kernel
+	// activity. Applying a service name here would be incorrect attribution.
+	// We prevent this by explicitly checking the process name.
+	pData.Info.mu.RLock()
+	name := pData.Info.Name
+	pData.Info.mu.RUnlock()
+	if name == "System" || name == "MemCompression" {
+		sm.log.SampledDebug("service_tag_system").
+			Str("process_name", name).
+			Uint32("subprocess_tag", subProcessTag).
+			Msg("Ignoring service tag for a system pseudo-process to prevent misattribution.")
+		return
+	}
+
 	pData.Info.mu.Lock()
 	// If the service name is already set, our work is done.
 	if pData.Info.ServiceName != "" {
@@ -69,6 +85,22 @@ func (sm *ServiceManager) resolveAndApplyServiceName(pData *ProcessData, subProc
 		pData.Info.ServiceName = serviceName
 	}
 	pData.Info.mu.Unlock()
+}
+
+// GetTagForService finds a service tag by its name from the internal cache.
+// This is used by the one-time proactive enrichment process.
+func (sm *ServiceManager) GetTagForService(name string) (uint32, bool) {
+	var foundTag uint32
+	var found bool
+	sm.serviceTags.Range(func(tag uint32, serviceName string) bool {
+		if serviceName == name {
+			foundTag = tag
+			found = true
+			return false // Stop iteration
+		}
+		return true
+	})
+	return foundTag, found
 }
 
 // --- Debug Provider Methods ---

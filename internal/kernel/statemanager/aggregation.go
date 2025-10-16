@@ -70,6 +70,13 @@ func newAggregatedProgramMetrics() *AggregatedProgramMetrics {
 // into program-level metrics. This is called once per scrape on the warm path,
 // ensuring collectors read from a fresh, consistent snapshot.
 func (sm *KernelStateManager) AggregateMetrics() {
+	// On the first scrape, perform a one-time proactive enrichment of service data.
+	// This solves the "dormant service" problem by using the Windows API to bridge
+	// the gap left by tag-less rundown events.
+	sm.serviceListOnce.Do(func() {
+		sm.ApplyServices()
+	})
+
 	// Get a fresh map from the pool for the new aggregation results.
 	newAggregatedData := sm.aggregationDataPool.Get().(map[ProgramAggregationKey]*AggregatedProgramMetrics)
 

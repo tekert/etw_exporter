@@ -6,7 +6,6 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/windows"
-	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/mgr"
 )
 
@@ -106,73 +105,76 @@ func QueryServiceNameByTag(pid, tag uint32) (string, error) {
 	return serviceName, nil
 }
 
-// QueryServiceNameByPid finds the name of a service running with a specific process ID.
-// This function uses documented SCM APIs and is a reliable way to find a service name
-// when a tag is not available. It is slower than QueryServiceNameByTag because it
-// must enumerate all system services.
-func QueryServiceNameByPid(pid uint32) (string, error) {
-	if pid == 0 {
-		return "", fmt.Errorf("invalid pid: 0")
-	}
-
+// GetRunningServicesSnapshot enumerates all services currently in the "Running" state and returns
+// a map of their Process ID to their service name. This is useful for performing a one-time,
+// proactive enrichment of process data at application startup, ensuring that service names
+// are available even for dormant services whose threads have not yet emitted ETW events.
+func GetRunningServicesSnapshot() (map[uint32]string, error) {
 	m, err := mgr.Connect()
 	if err != nil {
-		return "", fmt.Errorf("failed to connect to SCM: %w", err)
+		return nil, fmt.Errorf("failed to connect to SCM: %w", err)
 	}
 	defer m.Disconnect()
 
-	services, err := m.ListServices()
-	if err != nil {
-		return "", fmt.Errorf("failed to list services: %w", err)
-	}
+	// Initial buffer size, will be resized if needed.
+	var bytesNeeded, servicesReturned uint32
+	bufSize := uint32(16384) // Start with 16KB
+	buf := make([]byte, bufSize)
 
-	for _, serviceName := range services {
-		s, err := m.OpenService(serviceName)
-		if err != nil {
-			continue // Can't open, might be permissions or service is being deleted
+	// We are interested in all running services.
+	const serviceType = windows.SERVICE_WIN32
+	const serviceState = windows.SERVICE_ACTIVE // Corresponds to "Running"
+
+	for {
+		err = windows.EnumServicesStatusEx(
+			m.Handle,
+			windows.SC_ENUM_PROCESS_INFO,
+			serviceType,
+			serviceState,
+			&buf[0],
+			bufSize,
+			&bytesNeeded,
+			&servicesReturned,
+			nil,
+			nil,
+		)
+		if err == nil {
+			break // Success
 		}
 
-		status, err := s.Query()
-		s.Close() // Close handle immediately after use
-		if err != nil {
+		if err == syscall.ERROR_MORE_DATA {
+			// If the buffer was too small, resize it and try again.
+			bufSize = bytesNeeded
+			buf = make([]byte, bufSize)
 			continue
 		}
 
-		if status.State == svc.Running && status.ProcessId == uint32(pid) {
-			// Found a running service with the matching PID.
-			return serviceName, nil
+		if err != nil {
+			return nil, fmt.Errorf("EnumServicesStatusEx failed with unexpected error: %w", err)
 		}
 	}
 
-	return "", fmt.Errorf("no running service found for pid %d", pid)
-}
-
-// ResolveServiceName attempts to find a service name using the most efficient methods first.
-// It is the recommended function for resolving service names from ETW events that provide
-// both a Process ID and a SubProcessTag. (But if we don't lose events then this is not needed.)
-//
-// It first tries the fast, tag-based lookup. If that fails (e.g., the tag is 0),
-// it falls back to enumerating all system services to find a PID match.
-// It returns an empty string if no service can be found.
-func ResolveServiceName(pid, tag uint32) string {
-	if pid == 0 {
-		return ""
+	if servicesReturned == 0 {
+		return make(map[uint32]string), nil // No running services found.
 	}
 
-	// Strategy 1: Fast path using the process-specific tag. This works for both
-	// shared-host (svchost.exe) and own-process services.
-	if tag != 0 {
-		name, err := QueryServiceNameByTag(pid, tag)
-		if err == nil {
-			return name
+	// The buffer contains an array of ENUM_SERVICE_STATUS_PROCESSW structs.
+	// We need to interpret this byte slice as a slice of those structs.
+	services := unsafe.Slice((*windows.ENUM_SERVICE_STATUS_PROCESS)(
+		unsafe.Pointer(&buf[0])), servicesReturned)
+
+	serviceMap := make(map[uint32]string)
+	for i := 0; i < int(servicesReturned); i++ {
+		service := &services[i]
+		pid := service.ServiceStatusProcess.ProcessId
+		if pid != 0 {
+			serviceName := windows.UTF16PtrToString(service.ServiceName)
+			// A single process (like svchost.exe) can host multiple services.
+			// This will overwrite previous entries for the same PID if found,
+			// which is acceptable as we just need one valid service name for enrichment.
+			serviceMap[pid] = serviceName
 		}
 	}
 
-	// Strategy 2: Fallback for when tag lookup fails or tag is unavailable.
-	// This is slower but reliable.
-	name, err := QueryServiceNameByPid(pid)
-	if err != nil {
-		return "" // Return empty string on failure
-	}
-	return name
+	return serviceMap, nil
 }
