@@ -41,7 +41,7 @@ func (h *HandlerMof) RegisterRoutes(router handlers.Router) {
 	}
 	handlers.RegisterRoutesForGUID(router, guids.ProcessKernelGUID, processRoutes)
 
-	h.log.Debug().Msg("Registered global process handler routes (manifest)")
+	h.log.Debug().Msg("Registered global process handler routes (mof)")
 }
 
 // HandleProcessStartRaw processes kernel Process Start and Rundown events.

@@ -80,13 +80,8 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 	// Get the Process ID from the event that triggered the session stop.
 	eventPID := helper.EventRec.EventHeader.ProcessId
 
-	w.log.Debug().
-		Uint32("event_pid", eventPID).
-		Uint32("own_pid", w.ownPID).
-		Msg("Processing session stop event.")
-
 	// If the event was triggered by our own process, it's part of a controlled
-	// restart or shutdown. We should ignore it to prevent a restart loop.
+	// restart or shutdown. We must ignore it to prevent a restart loop.
 	if eventPID == w.ownPID {
 		w.log.Debug().
 			Uint32("event_pid", eventPID).
@@ -94,30 +89,10 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 		return nil
 	}
 
-	// sessionGUIDStr, err := helper.GetPropertyString("SessionGuid")
-	// if err != nil {
-	// 	w.log.SampledError("event-prov-handler").Err(err).Msg("Failed to get SessionGuid from session stop event")
-	// 	return err
-	// }
-
-	// sessionGUID, err := etw.ParseGUID(sessionGUIDStr)
-	// if err != nil {
-	// 	w.log.SampledError("event-prov-handler").Err(err).Str("guid_string", sessionGUIDStr).
-	// 		Msg("Failed to parse SessionGuid from session stop event")
-	// 	return err
-	// }
-
-	sessionName, err := helper.GetPropertyString("SessionName")
-	if err != nil {
-		w.log.SampledError("event-prov-handler").Err(err).
-			Msg("Failed to get SessionName from session stop event")
-	}
-
-	LoggerId, err := helper.GetPropertyUint("LoggerId")
-	if err != nil {
-		w.log.SampledError("event-prov-handler").Err(err).
-			Msg("Failed to get LoggerId from session stop event")
-	}
+	w.log.Debug().
+		Uint32("event_pid", eventPID).
+		Uint32("own_pid", w.ownPID).
+		Msg("Processing external session stop event.")
 
 	sessionGUID, err := helper.GetPropertyPGUID("SessionGuid")
 	if err != nil {
@@ -126,21 +101,16 @@ func (w *Handler) HandleSessionStop(helper *etw.EventRecordHelper) error {
 		return err
 	}
 
-	// Check if the stopped session is one we manage and if restart is enabled.
-	if *sessionGUID == *etw.SystemTraceControlGuid {
-		if w.config.RestartKernelSession == "forced" {
-			w.sessionManager.RestartSession(*sessionGUID)
-		} else if w.config.RestartKernelSession == "enabled" && !w.sessionManager.IsNtKernelSessionInUse() {
-			w.sessionManager.RestartSession(*sessionGUID)
-		}
-	}
+	// Defer the restart decision to the centralized handler in the session manager,
+	// which contains all the configuration-aware logic.
+	w.sessionManager.HandleSessionStop(*sessionGUID)
 
-	if *sessionGUID == *etwmain.EtwExporterGuid && w.config.RestartExporterSession {
-		w.sessionManager.RestartSession(*sessionGUID)
-	}
+	// --- Logging/Debugging Info ---
+	sessionName, _ := helper.GetPropertyString("SessionName")
+	loggerId, _ := helper.GetPropertyUint("LoggerId")
 
 	w.log.Debug().
-		Uint64("LoggerId", LoggerId).
+		Uint64("LoggerId", loggerId).
 		Str("SessionName", sessionName).
 		Str("SessionGUID", sessionGUID.String()).
 		Msg("Session stop event processing complete.")

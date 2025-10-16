@@ -70,6 +70,18 @@ func (e *ETWExporter) setupETW() {
 	e.etwSessionManager = etwmain.NewSessionManager(e.eventHandler, e.config)
 	e.log.Debug().Msg("- ETW session manager created")
 
+	// SystemConfig events only arrive when kernel sessions are stopped
+	// On Windows 10 SDK build 20348+ (Win11) this is not needed, we can use System Config Provider
+	// and SYSTEM_CONFIG_KW_STORAGE, but it's not available on older systems
+	// So we use this workaround to capture SystemConfig events
+	if !etwmain.IsSystemProviderSupported() {
+		e.log.Debug().Msg("Capturing SystemConfig events...")
+		if err := e.etwSessionManager.CaptureNtSystemConfigEvents(); err != nil {
+			e.log.Fatal().Err(err).Msg("failed to capture SystemConfig events")
+		}
+		e.log.Debug().Msg("SystemConfig events captured")
+	}
+
 	// If the session watcher is enabled, create it and register its routes with the event handler.
 	if e.config.SessionWatcher.Enabled {
 		sessionWatcher := watcher.New(e.etwSessionManager, e.config)

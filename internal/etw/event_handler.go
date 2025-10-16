@@ -77,16 +77,16 @@ type SessionWatcher interface {
 // This handler routes events to specialized sub-handlers based on a data-driven map.
 type EventHandler struct {
 	// Handlers are foundational services, always instantiated.
-	processHandlerMof      *kernelprocess.HandlerMof
+	processHandlerMof *kernelprocess.HandlerMof
 	//processHandlerManifest *kernelprocess.HandlerManifest // ! TESTING
-	imageHandler           *kerneimage.Handler
-	diskHandler            *kerneldiskio.HandlerMof
-	threadHandler          *kernelthread.Handler
-	perfinfoHandler        *kernelperf.Handler
-	networkHandler         *kernelnetwork.HandlerMof
-	memoryHandler          *kernelmemory.Handler
-	registryHandler        *kernelregistry.Handler
-	sysconfigHandler       *kernelsysconfig.Handler
+	imageHandler     *kerneimage.Handler
+	diskHandler      *kerneldiskio.HandlerMof
+	threadHandler    *kernelthread.Handler
+	perfinfoHandler  *kernelperf.Handler
+	networkHandler   *kernelnetwork.HandlerMof
+	memoryHandler    *kernelmemory.Handler
+	registryHandler  *kernelregistry.Handler
+	sysconfigHandler *kernelsysconfig.Handler
 
 	// Shared state and caches for callbacks
 	config       *config.CollectorConfig
@@ -134,7 +134,7 @@ func NewEventHandler(appConfig *config.AppConfig) *EventHandler {
 	eh.guidToCounter[*etw.DiskIoKernelGuid] = &eh.diskEventCount // TODO: fix counter name
 
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelProcessGUID] = &eh.processEventCount
-	eh.guidToCounter[*etw.ProcessKernelGuid ] = &eh.processEventCount // TODO: fix counter name
+	eh.guidToCounter[*etw.ProcessKernelGuid] = &eh.processEventCount // TODO: fix counter name
 
 	eh.guidToCounter[*guids.MicrosoftWindowsKernelNetworkGUID] = &eh.networkEventCount
 	eh.guidToCounter[*etw.TcpIpKernelGuid] = &eh.networkEventCount // TODO: fix counter name
@@ -378,13 +378,14 @@ func (h *EventHandler) EventRecordCallback(record *etw.EventRecord) bool {
 	return true // Continue to the next callback stage for all other events.
 }
 
-// // EventRecordHelperCallback is a second-stage callback, invoked after a helper
-// // object has been created for an event record. It is currently a placeholder.
-// func (h *EventHandler) EventRecordHelperCallback(helper *etw.EventRecordHelper) error {
-// 	// Perform any helper-level processing here if needed
-// 	return nil
-// }
+// EventRecordHelperCallback is a second-stage callback, invoked after a helper
+// object has been created for an event record. It is currently a placeholder.
+func (h *EventHandler) EventRecordHelperCallback(helper *etw.EventRecordHelper) error {
+	// Perform any helper-level processing here if needed
+	return nil
+}
 
+// TODO: delete
 // EventPreparedCallback is the main entry point to the event routing logic for non-raw events.
 func (h *EventHandler) EventPreparedCallback(helper *etw.EventRecordHelper) error {
 	defer helper.Skip() // Stop further processing in goetw
@@ -415,8 +416,9 @@ func (h *EventHandler) RouteEvent(helper *etw.EventRecordHelper) error {
 	return nil
 }
 
+// TODO: delete
 // EventCallback is called for higher-level event processing
-func (h *EventHandler) EventCallback(event *etw.Event) error {
+func (h *EventHandler) EventCallback(event *etw.EventRecordHelper) error {
 	// Perform any event-level processing here if needed
 	return nil
 }
