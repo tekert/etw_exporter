@@ -14,6 +14,8 @@ type ProcessInfo struct {
 	FullDevicePath string
 }
 
+// TODO: replace with NtQuerySystemInformation
+
 // GetProcessSnapshot iterates through all running processes using the CreateToolhelp32Snapshot API
 // and returns a map of PID to ProcessInfo. This provides a "synthetic rundown" of active processes.
 func GetProcessSnapshot() (map[uint32]ProcessInfo, error) {

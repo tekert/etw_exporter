@@ -53,7 +53,7 @@ type ProcessInfo struct {
 	ParentPID       uint32
 	SessionID       uint32
 	UniqueHash      uint64
-	mu              sync.Mutex
+	mu              sync.RWMutex
 }
 
 // reset clears the ProcessInfo struct for reuse.

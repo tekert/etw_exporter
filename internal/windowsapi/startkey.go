@@ -7,7 +7,7 @@ import (
 )
 
 // bootId2 = uint64(*(*uint32)(unsafe.Pointer(uintptr(0x7ffe02C4))))
-var bootIdShift = bootId << 48
+var bootIdStartkeyShift = bootId << 48
 
 // The full start key is a combination of the boot session ID and a process-specific
 // sequence number.
@@ -25,7 +25,7 @@ func GetProcessStartKey(handle windows.Handle) (startkey uint64, err error) {
 		return 0, err
 	}
 	// Combine with the system boot ID to form the full key.
-	startkey = bootIdShift | sequenceNumber
+	startkey = bootIdStartkeyShift | sequenceNumber
 
 	return startkey, nil
 }
@@ -34,5 +34,5 @@ func GetProcessStartKey(handle windows.Handle) (startkey uint64, err error) {
 // sequence number
 func GetStartKeyFromSequence(sequenceNumber uint64) (startkey uint64) {
 	// Combine with the system boot ID to form the full key.
-	return  bootIdShift | sequenceNumber
+	return  bootIdStartkeyShift | sequenceNumber
 }

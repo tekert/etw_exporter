@@ -71,7 +71,6 @@ func (tm *ThreadManager) AddThread(tid, pid uint32, eventTimestamp time.Time, su
 			GlobalDiagnostics.RecordThreadAdded()
 
 			// --- Service Name Attribution ---
-			// TODO: some thread dont have subprocess tag, maybe they dont exist
 			// so we can't resolve service name until the thread becomes active.
 			tm.serviceManager.resolveAndApplyServiceName(pData, subProcessTag)
 
@@ -129,17 +128,17 @@ func (tm *ThreadManager) GetCurrentProcessDataByThread(tid uint32) (*ProcessData
 }
 
 // cleanupTerminated handles the cleanup for threads that were terminated independently of a process.
-func (tm *ThreadManager) cleanupTerminated(currentGeneration uint64) (cleanedThreads int) {
-	threadsToClean := make(map[uint32]uint64) // map[TID]StartKey
-	tm.terminatedThreads.Range(func(tid uint32, record *threadTerminationRecord) bool {
-		if record.TerminatedAtGeneration < currentGeneration {
-			threadsToClean[tid] = record.StartKey
-			tm.terminatedThreads.Delete(tid)
-		}
-		return true
-	})
+func (tm *ThreadManager) cleanupTerminated(cleanupThreshold uint64) (cleanedThreads int) {
+    threadsToClean := make(map[uint32]uint64) // map[TID]StartKey
+    tm.terminatedThreads.Range(func(tid uint32, record *threadTerminationRecord) bool {
+        if record.TerminatedAtGeneration < cleanupThreshold {
+            threadsToClean[tid] = record.StartKey
+            tm.terminatedThreads.Delete(tid)
+        }
+        return true
+    })
 
-	for tid, startKeyToClean := range threadsToClean {
+    for tid, startKeyToClean := range threadsToClean {
 		// Atomically remove the tid -> pData mapping, but ONLY if it still
 		// points to a process with the key we are cleaning up. If the TID has been reused,
 		// this condition will be false, and we will not touch the new mapping.

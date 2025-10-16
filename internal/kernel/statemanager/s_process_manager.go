@@ -246,16 +246,28 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 				if exists && currentSK == startKey {
 					return 0, false // Value matches, so delete the entry.
 				}
-				return currentSK, true // Value does not match (PID reused), so keep the new entry.
+				// In all other cases (doesn't exist, or PID was reused and points to a new StartKey),
+				// we want to do nothing.
+				return currentSK, true
 			})
 
 			// Atomically remove the direct pid -> pData mapping, using the same
 			// PID reuse-aware logic.
 			pm.pidToCurrentProcessData.Update(pid, func(currentPData *ProcessData, exists bool) (*ProcessData, bool) {
-				if exists && currentPData.Info.StartKey == startKey {
-					return nil, false // StartKey matches, so delete the entry.
+				// If the key doesn't exist, we must perform a no-op. Returning (nil, false)
+				// instructs the map to delete a non-existent key, which is safe.
+				if !exists {
+					return nil, false
 				}
-				return currentPData, true // StartKey does not match (PID reused), so keep the new entry.
+
+				// If the key exists, check for a nil value (defensive) and then check if
+				// the StartKey matches the process we are cleaning up.
+				if currentPData != nil && currentPData.Info.StartKey == startKey {
+					return nil, false // It's the correct process instance. Delete it.
+				}
+
+				// The entry exists but belongs to a new process (PID reuse). Keep it.
+				return currentPData, true
 			})
 
 			// --- Recycle the entire ProcessData object ---
