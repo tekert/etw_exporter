@@ -6,6 +6,9 @@ import (
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
 
+// TODO: delete no longer used service tags on longer running sessions.
+// we ahve to find a way to detect service deletion or take another snapshot every x minutes?
+
 // ServiceManager is responsible for mapping SubProcessTags to service names.
 type ServiceManager struct {
 	serviceTags maps.ConcurrentMap[uint32, string] // Key: SubProcessTag, Value: ServiceName

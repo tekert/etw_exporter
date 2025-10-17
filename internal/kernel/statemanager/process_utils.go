@@ -12,12 +12,12 @@ const (
 // 	bootStartTime = time.Now().UnixNano() // Nanosecond timestamp when this process started
 // )
 
-// GenerateStartKey creates a unique StartKey from ETW event data.
+// GeneratePseudoStartKey creates a unique StartKey from ETW event data.
 // This works even when the process is already terminated and cannot be opened.
 // The key is unique within a boot session and handles PID reuse correctly by
 // incorporating the unique EPROCESS kernel pointer.
 // This implementation is a non-allocating version of FNV-1a.
-func (*KernelStateManager) GenerateStartKey(pid uint32, parentPid uint32, eprocessPtr uint64) uint64 {
+func (*KernelStateManager) GeneratePseudoStartKey(pid uint32, parentPid uint32, eprocessPtr uint64) uint64 {
 	if eprocessPtr == 0 {
 		return 0 // Invalid
 	}

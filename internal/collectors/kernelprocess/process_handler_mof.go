@@ -77,7 +77,7 @@ func (ph *HandlerMof) HandleProcessStart(helper *etw.EventRecordHelper) error {
 
 	// Generate a synthetic StartKey from the event data alone
 	// This works even if the process is already gone
-	startKey := ph.stateManager.GenerateStartKey(uint32(processID), uint32(parentProcessID), uniqueProcessKey)
+	startKey := ph.stateManager.GeneratePseudoStartKey(uint32(processID), uint32(parentProcessID), uniqueProcessKey)
 	if startKey == 0 {
 		ph.log.Error().Uint32("pid", uint32(processID)).Msg("Failed to generate StartKey")
 		return nil
@@ -116,7 +116,7 @@ func (ph *HandlerMof) HandleProcessEnd(helper *etw.EventRecordHelper) error {
 	uniqueProcessKey, _ := helper.GetPropertyUint("UniqueProcessKey")
 	timestamp := helper.Timestamp()
 
-	startKey := ph.stateManager.GenerateStartKey(pid, parentPID, uniqueProcessKey)
+	startKey := ph.stateManager.GeneratePseudoStartKey(pid, parentPID, uniqueProcessKey)
 	if startKey == 0 {
 		ph.log.Error().Uint32("pid", pid).Msg("Failed to generate StartKey")
 		return nil

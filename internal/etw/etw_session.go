@@ -95,6 +95,9 @@ func (s *SessionManager) Start() error {
 		return fmt.Errorf("session manager already running")
 	}
 
+	// NOTE: don't setup the temporal session here,
+	// do it before http service start or there can be mem corruption.
+
 	s.log.Info().Msg("Starting ETW session manager...")
 
 	// Create sessions based on enabled provider groups
@@ -125,13 +128,12 @@ func (s *SessionManager) Start() error {
 		s.startTraceMonitor()
 	}()
 
-	// If the legacy kernel session is in use, start the API-based reconciler
-	// to provide a "synthetic rundown" for cleanup.
+	// Priodic rundown for processes to handle any process close lost event.
 	if s.kernelSession != nil {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
-			s.startStaleKernelProcessCleanup()
+			s.startPeriodicProcessRundown()
 		}()
 	}
 
@@ -150,8 +152,8 @@ func (s *SessionManager) CaptureNtSystemConfigEvents() error {
 	s.log.Debug().Msg("Creating temporary kernel session for SystemConfig events")
 
 	// Create a temporary kernel session to get SystemConfig events
-	tempKernelSession := etw.NewKernelRealTimeSession(0)
-	//tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
+	//tempKernelSession := etw.NewKernelRealTimeSession(0)
+	tempKernelSession := etw.NewKernelRealTimeSession(etw.EVENT_TRACE_FLAG_PROCESS)
 
 	if err := tempKernelSession.Start(); err != nil {
 		return fmt.Errorf("failed to start temporary kernel session for SystemConfig: %w", err)
@@ -562,76 +564,103 @@ func (s *SessionManager) GetEnabledProviderGroups() []string {
 	return enabled
 }
 
+// startPeriodicProcessRundown runs a background task that periodically triggers a process
+// rundown.
+func (s *SessionManager) startPeriodicProcessRundown() {
+    // The interval should be reasonably long to avoid unnecessary overhead.
+    const rundownInterval = 5 * time.Minute
+
+    s.log.Info().
+        Str("interval", rundownInterval.String()).
+        Msg("Starting periodic process rundown routine for state reconciliation")
+
+    ticker := time.NewTicker(rundownInterval)
+    defer ticker.Stop()
+    for {
+        select {
+        case <-ticker.C:
+            if !s.IsRunning() {
+                continue
+            }
+            s.log.Debug().Msg("Triggering periodic process rundown for state reconciliation...")
+            if err := s.TriggerProcessRundown(); err != nil {
+                s.log.Error().Err(err).Msg("Periodic process rundown failed")
+            }
+
+        case <-s.ctx.Done():
+            s.log.Debug().Msg("Stopping periodic process rundown routine")
+            return
+        }
+    }
+}
+
 // TriggerProcessRundown requests the ETW system to emit events for all currently
-// running processes. This is used to refresh the state of the process collector.
+// running processes.
 func (s *SessionManager) TriggerProcessRundown() error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	if s.manifestSession == nil {
-		return fmt.Errorf("no manifest session available for process rundown")
-	}
 	if !s.running {
 		return fmt.Errorf("cannot trigger process rundown: session is not running")
 	}
 
-	s.log.Debug().Msg("Triggering process rundown...")
-	if err := s.manifestSession.GetRundownEvents(guids.MicrosoftWindowsKernelProcessGUID); err != nil {
-		s.log.Error().Err(err).Msg("Failed to trigger process rundown")
-		return err
-	}
-	s.log.Debug().Msg("Process rundown triggered successfully")
-	return nil
-}
+	var rundownTriggered bool
+	var lastErr error
 
-// startStaleKernelProcessCleanup runs a periodic task that forces the NT Kernel Logger
-// to emit rundown events for all running processes. This is achieved by briefly
-// restarting the process provider within the session. This serves as the primary
-// self-healing and state reconciliation mechanism when using the legacy kernel session.
-func (s *SessionManager) startStaleKernelProcessCleanup() {
-	// The interval should be reasonably long to avoid unnecessary event storms.
-	const rundownInterval = 5 * time.Minute
-
-	s.log.Info().
-		Str("interval", rundownInterval.String()).
-		Msg("Starting periodic ETW-based process rundown routine for kernel session")
-
-	ticker := time.NewTicker(rundownInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			if !s.IsRunning() {
-				continue
+	// 1. Check for NT Kernel Logger (MOF) process provider.
+	if s.kernelSession != nil {
+		// Check the configured flags to see if process events are enabled.
+		if (s.kernelSession.TraceProperties().EnableFlags & etw.EVENT_TRACE_FLAG_PROCESS) != 0 {
+			s.log.Debug().Msg("Triggering process rundown via NT Kernel Logger restart...")
+			err := s.kernelSession.RestartNtKernelProvider(etw.EVENT_TRACE_FLAG_PROCESS)
+			if err != nil {
+				s.log.Error().Err(err).Msg("Failed to trigger NT Kernel Logger process rundown")
+				lastErr = err
+			} else {
+				s.log.Debug().Msg("NT Kernel Logger process rundown triggered successfully.")
+				rundownTriggered = true
 			}
-			s.log.Debug().Msg("Triggering periodic kernel process rundown...")
-			s.triggerKernelProcessRundown()
-
-		case <-s.ctx.Done():
-			s.log.Debug().Msg("Stopping periodic kernel process rundown routine")
-			return
 		}
 	}
-}
 
-func (s *SessionManager) triggerKernelProcessRundown() {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	// 2. Check for Manifest-based and System process providers.
+	if s.manifestSession != nil {
+		for _, provider := range s.manifestSession.Providers() {
+			// Check for Microsoft-Windows-Kernel-Process (Win10 Manifest)
+			if provider.GUID == *guids.MicrosoftWindowsKernelProcessGUID {
+				s.log.Debug().Msg("Triggering process rundown via Microsoft-Windows-Kernel-Process provider...")
+				// NOTE: this does not trigger thread or image rundowns. Only process. (not useful)
+				if err := s.manifestSession.GetRundownEvents(&provider.GUID); err != nil {
+					s.log.Error().Err(err).Msg("Failed to trigger Microsoft-Windows-Kernel-Process rundown")
+					lastErr = err
+				} else {
+					s.log.Debug().Msg("Microsoft-Windows-Kernel-Process rundown triggered successfully.")
+					rundownTriggered = true
+				}
+			}
 
-	if s.kernelSession == nil {
-		s.log.Warn().Msg("Cannot trigger kernel rundown: kernel session is not active.")
-		return
+			// Check for SystemProcessProvider (Win11+)
+			if provider.GUID == *etw.SystemProcessProviderGuid {
+				s.log.Debug().Msg("Triggering process rundown via SystemProcessProvider...")
+				// TODO: test this on Win11+
+				if err := s.manifestSession.GetRundownEvents(&provider.GUID); err != nil {
+					s.log.Error().Err(err).Msg("Failed to trigger SystemProcessProvider rundown")
+					lastErr = err
+				} else {
+					s.log.Debug().Msg("SystemProcessProvider rundown triggered successfully.")
+					rundownTriggered = true
+				}
+			}
+		}
 	}
 
-	// This is a non-destructive way to get a full process rundown. It quickly
-	// disables and re-enables the process provider, which causes ETW to emit
-	// rundown events for all active processes, ensuring our state is synchronized.
-	err := s.kernelSession.RestartNtKernelProvider(etw.EVENT_TRACE_FLAG_PROCESS)
-	if err != nil {
-		s.log.Error().Err(err).Msg("Failed to trigger kernel process rundown via provider restart")
-		return
+	if !rundownTriggered {
+		if lastErr != nil {
+			return fmt.Errorf("failed to trigger any process rundown: %w", lastErr)
+		}
+		return fmt.Errorf("no active process provider found to trigger a rundown")
 	}
 
-	s.log.Info().Msg("Successfully triggered kernel process rundown")
+	s.log.Info().Msg("Process rundown successfully triggered for active providers.")
+	return nil
 }

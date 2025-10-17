@@ -241,7 +241,7 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 
 			// Atomically remove the pid -> current mapping, but ONLY if it still
 			// points to the key we are cleaning up. If the PID has been reused,
-			// this condition will be false, and we will not touch the new mapping.
+			// this condition will be false.
 			pm.pidToCurrentStartKey.Update(pid, func(currentSK uint64, exists bool) (uint64, bool) {
 				if exists && currentSK == startKey {
 					return 0, false // Value matches, so delete the entry.
@@ -254,20 +254,14 @@ func (pm *ProcessManager) cleanupProcesses(procsToClean map[uint64]struct{}) int
 			// Atomically remove the direct pid -> pData mapping, using the same
 			// PID reuse-aware logic.
 			pm.pidToCurrentProcessData.Update(pid, func(currentPData *ProcessData, exists bool) (*ProcessData, bool) {
-				// If the key doesn't exist, we must perform a no-op. Returning (nil, false)
-				// instructs the map to delete a non-existent key, which is safe.
-				if !exists {
-					return nil, false
-				}
-
-				// If the key exists, check for a nil value (defensive) and then check if
-				// the StartKey matches the process we are cleaning up.
-				if currentPData != nil && currentPData.Info.StartKey == startKey {
-					return nil, false // It's the correct process instance. Delete it.
-				}
-
-				// The entry exists but belongs to a new process (PID reuse). Keep it.
-				return currentPData, true
+                // The only case where we KEEP an entry is if it currently exists, is not nil,
+                // and belongs to a DIFFERENT process instance (PID reuse).
+                if exists && currentPData != nil && currentPData.Info.StartKey != startKey {
+                    return currentPData, true // Keep: PID was reused by a new process.
+                }
+                // In ALL other cases (key doesn't exist, value is nil, or value matches
+                // the one we're cleaning), we want to delete the entry.
+                return nil, false
 			})
 
 			// --- Recycle the entire ProcessData object ---

@@ -10,7 +10,7 @@ require (
 	github.com/prometheus/client_golang v1.23.0
 	github.com/puzpuzpuz/xsync/v4 v4.1.0
 	github.com/tekert/goetw v0.9.0-beta
-	golang.org/x/sys v0.33.0
+	golang.org/x/sys v0.37.0
 )
 
 require (
