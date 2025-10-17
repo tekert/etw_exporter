@@ -5,6 +5,7 @@ package statemanager
 
 import (
 	"fmt"
+	"math"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	"etw_exporter/internal/config"
 	"etw_exporter/internal/logger"
+	"etw_exporter/internal/windowsapi"
 
 	"github.com/tekert/goetw/logsampler/adapters/phusluadapter"
 )
@@ -24,14 +26,19 @@ const (
 
 	// SystemProcessID is the well-known process ID for the Windows System process.
 	SystemProcessID uint32 = 4
+
+	// The number of recent scrape intervals to average for calculating the dynamic grace period.
+	scrapeDurationSamples = 4
+	// The minimum grace period an entity should exist after termination before being cleaned up.
+	// This handles delayed ETW events for terminated entities.
+	minTerminationGracePeriod = 30 * time.Second
 )
 
-// KernelStateManager is the single source of truth for kernel entity state.
+// KernelStateManager is the single source for kernel entity state.
 // It manages the lifecycle of processes and threads, ensuring data consistency
 // and handling cleanup logic in a centralized, thread-safe manner. It is designed
 // as a singleton to be accessible by all collectors and handlers that require
-// kernel state information. It holds and orchestrates the specialized managers
-// for processes, threads, images, and services.
+// kernel state information.
 type KernelStateManager struct {
 	Processes *ProcessManager
 	Threads   *ThreadManager
@@ -45,10 +52,16 @@ type KernelStateManager struct {
 	aggregationDataPool sync.Pool
 	scrapeCounter       atomic.Uint64
 
+	// State for calculating adaptive grace period and watchdog
 	lastScrapeTime      time.Time
-	lastScrapeTimeMutex sync.Mutex
+	lastScrapeTimeMu    sync.RWMutex
+	scrapeDurations     [scrapeDurationSamples]time.Duration
+	lastScrapeIndex     int
+	scrapeDurationsFull bool // Flag to indicate if the buffer is full for averaging.
 
-	log *phusluadapter.SampledLogger
+	cleanupMu       sync.Mutex // Ensures PostScrapeCleanup is not run concurrently.
+	serviceListOnce sync.Once  // Ensures proactive service enrichment runs only once.
+	log             *phusluadapter.SampledLogger
 }
 
 // GetProcessCount returns the current number of tracked processes.
@@ -105,6 +118,9 @@ func GetGlobalStateManager() *KernelStateManager {
 
 		GlobalDiagnostics.Init()
 		globalStateManager = ksm
+
+		// Start the failsafe watchdog to prevent memory leaks if scrapes stop.
+		go globalStateManager.startScrapeWatchdog()
 	})
 	return globalStateManager
 }
@@ -125,22 +141,20 @@ func (sm *KernelStateManager) EnableProcessManager(enable bool) {
 // PostScrapeCleanup performs the actual deletion of entities that were marked for termination.
 // This is called by the metrics HTTP handler AFTER a Prometheus scrape is complete.
 func (sm *KernelStateManager) PostScrapeCleanup() {
-	// "Pet" the watchdog by updating the last scrape time.
-	sm.updateLastScrapeTime()
+	// Prevent concurrent cleanup runs from a real scrape and the watchdog.
+	sm.cleanupMu.Lock()
+	defer sm.cleanupMu.Unlock()
 
-	// Report diagnostic statistics for the completed scrape interval.
+	// Calculate the adaptive cleanup threshold based on recent scrape durations.
+	currentScrape := sm.scrapeCounter.Add(1)
+	cleanupThreshold := sm.calculateAdaptiveCleanupThreshold(currentScrape)
+
 	GlobalDiagnostics.ReportTrackedProcToConsole(sm.GetProcessCount())
 
-	// Increment the scrape counter to mark the start of a new generation.
-	// Any entity terminated during the previous scrape cycle will have a value less than this.
-	currentScrape := sm.scrapeCounter.Add(1)
-
-	sm.log.Debug().Uint64("generation", currentScrape).Msg("Starting post-scrape cleanup of terminated entities")
-
-	// An entity is only cleaned up if it was terminated in a *previous* scrape generation.
+	// Identify terminated processes that have passed the grace period.
 	procsToClean := make(map[uint64]struct{}) // Use a simple set of StartKeys.
 	sm.Processes.terminatedProcesses.Range(func(startKey uint64, terminatedAtGeneration uint64) bool {
-		if terminatedAtGeneration < currentScrape {
+		if terminatedAtGeneration < cleanupThreshold {
 			procsToClean[startKey] = struct{}{}
 			// It's safe to delete while ranging over this specific concurrent map implementation.
 			sm.Processes.terminatedProcesses.Delete(startKey)
@@ -163,7 +177,7 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 					Str("name", pData.Info.Name).
 					Msg("Process selected for cleanup")
 
-				// Append to the list for the summary diagnostic.
+				// Append to the list for the summary diagnostic. // TODO dont do this if diagnostic not activated.
 				cleanedProcsDiag = append(cleanedProcsDiag,
 					fmt.Sprintf("%d-%d-%s", pData.Info.StartKey, pData.Info.PID, filepath.Base(pData.Info.Name)))
 			}
@@ -184,8 +198,8 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 	}
 
 	// Cleanup for individually terminated threads and images.
-	cleanedThreads := sm.Threads.cleanupTerminated(currentScrape)
-	cleanedImages := sm.Images.cleanupTerminated(currentScrape)
+	cleanedThreads := sm.Threads.cleanupTerminated(cleanupThreshold)
+	cleanedImages := sm.Images.cleanupTerminated(cleanupThreshold)
 
 	if cleanedProcs > 0 || cleanedThreads > 0 || cleanedImages > 0 {
 		sm.log.Debug().Int("processes", cleanedProcs).
@@ -195,27 +209,137 @@ func (sm *KernelStateManager) PostScrapeCleanup() {
 	}
 }
 
-// updateLastScrapeTime records the current time as the last successful scrape.
-// This is called by PostScrapeCleanup.
-func (sm *KernelStateManager) updateLastScrapeTime() {
-	sm.lastScrapeTimeMutex.Lock()
-	defer sm.lastScrapeTimeMutex.Unlock()
-	sm.lastScrapeTime = time.Now()
+// TODO: redo this simplier?
+// calculateAdaptiveCleanupThreshold is a private helper that encapsulates the logic
+// for determining the cleanup generation based on a running average of scrape times.
+func (sm *KernelStateManager) calculateAdaptiveCleanupThreshold(currentScrape uint64) (cleanupThreshold uint64) {
+	// 1. Update timing metrics.
+	now := time.Now()
+	sm.lastScrapeTimeMu.Lock()
+	duration := now.Sub(sm.lastScrapeTime)
+	sm.lastScrapeTime = now
+	sm.lastScrapeTimeMu.Unlock()
+
+	sm.scrapeDurations[sm.lastScrapeIndex] = duration
+	sm.lastScrapeIndex++
+	if sm.lastScrapeIndex >= scrapeDurationSamples {
+		sm.lastScrapeIndex = 0
+		sm.scrapeDurationsFull = true
+	}
+
+	// 2. Calculate average scrape duration.
+	var avgScrapeDuration time.Duration
+	var totalDuration time.Duration
+	sampleCount := scrapeDurationSamples
+	if !sm.scrapeDurationsFull {
+		sampleCount = sm.lastScrapeIndex
+	}
+	if sampleCount > 0 {
+		for i := 0; i < sampleCount; i++ {
+			totalDuration += sm.scrapeDurations[i]
+		}
+		avgScrapeDuration = totalDuration / time.Duration(sampleCount)
+	}
+
+	// 3. Calculate grace period in generations.
+	var gracePeriodInGenerations uint64 = 1 // Default to 1 scrape if no average is available yet.
+	if avgScrapeDuration > 0 {
+		requiredGenerations := math.Ceil(minTerminationGracePeriod.Seconds() / avgScrapeDuration.Seconds())
+		gracePeriodInGenerations = uint64(requiredGenerations)
+		if gracePeriodInGenerations < 1 {
+			gracePeriodInGenerations = 1 // Always wait at least one full scrape.
+		}
+	}
+
+	// 4. Determine the cleanup threshold, prioritizing wall-clock time for watchdog scenarios.
+	// If the time since the last cleanup is already much longer than our grace period,
+	// it's a watchdog/stalled-scrape scenario. In this case, we override the generation
+	// logic and clean up everything terminated before the current cycle.
+	if duration > (minTerminationGracePeriod * 2) {
+		cleanupThreshold = currentScrape
+	} else if currentScrape > gracePeriodInGenerations {
+		cleanupThreshold = currentScrape - gracePeriodInGenerations
+	}
+	// If neither condition is met (e.g., on initial startup scrapes), threshold remains 0, which is correct.
+
+	sm.log.Debug().
+		Uint64("generation", currentScrape).
+		Uint64("cleanup_threshold", cleanupThreshold).
+		Float64("avg_scrape_duration_s", avgScrapeDuration.Seconds()).
+		Uint64("grace_period_in_generations", gracePeriodInGenerations).
+		Msg("Starting post-scrape cleanup of terminated entities")
+
+	return
 }
 
-// GetTimeSinceLastScrape returns the duration since the last scrape completed.
-// This is used by the watchdog to detect a stale state.
-func (sm *KernelStateManager) GetTimeSinceLastScrape() time.Duration {
-	sm.lastScrapeTimeMutex.Lock()
-	defer sm.lastScrapeTimeMutex.Unlock()
-	return time.Since(sm.lastScrapeTime)
+// startScrapeWatchdog runs a periodic task that checks if Prometheus has scraped
+// the exporter recently. If not, it manually triggers a cleanup cycle to prevent
+// unbounded memory growth from terminated entities. This is a failsafe mechanism.
+func (sm *KernelStateManager) startScrapeWatchdog() {
+	const interval = 1 * time.Minute
+	const timeout = 3 * time.Hour
+
+	sm.log.Info().
+		Str("check_interval", interval.String()).
+		Str("timeout", timeout.String()).
+		Msg("Starting scrape watchdog.")
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		// This goroutine runs for the lifetime of the application.
+		// A context could be added here for graceful shutdown if needed in the future.
+		<-ticker.C
+
+		sm.lastScrapeTimeMu.RLock()
+		last := sm.lastScrapeTime
+		sm.lastScrapeTimeMu.RUnlock()
+
+		timeSinceLastScrape := time.Since(last)
+
+		if timeSinceLastScrape > timeout {
+			sm.log.Warn().
+				Dur("duration_since_last_scrape", timeSinceLastScrape).
+				Msg("No scrapes detected in the configured timeout. Forcing cleanup to prevent memory leak.")
+
+			// Manually trigger the same cleanup function that a normal scrape would.
+			sm.PostScrapeCleanup()
+		}
+	}
+}
+
+// ApplyServices performs a one-time API call to get all running services
+// and enriches the corresponding process data with the correct service tag. This
+// solves the "dormant service" problem where initial rundown events lack tags.
+func (sm *KernelStateManager) ApplyServices() {
+	sm.log.Info().Msg("Performing one-time proactive service enrichment...")
+	serviceMap, err := windowsapi.GetRunningServicesSnapshot()
+	if err != nil {
+		sm.log.Error().Err(err).Msg("Failed to get running services for proactive enrichment.")
+		return
+	}
+
+	enrichedCount := 0
+	for pid, serviceName := range serviceMap {
+		// Find the tag for this service from the SystemConfig cache.
+		if tag, ok := sm.Services.GetTagForService(serviceName); ok {
+			// Find the process instance for this PID.
+			if pData, pOk := sm.Processes.GetCurrentProcessDataByPID(pid); pOk {
+				// Use the existing, centralized function to apply the tag.
+				// This correctly handles locking and all subsequent logic.
+				sm.Services.resolveAndApplyServiceName(pData, tag)
+				enrichedCount++
+			}
+		}
+	}
+	sm.log.Info().Int("count", enrichedCount).Msg("Completed proactive service enrichment.")
 }
 
 // --- Public API (All direct calls should go to sub-managers) ---
-// The facade methods have been removed. Use GetGlobalStateManager().Processes.*,
-// GetGlobalStateManager().Threads.*, etc. to access state management functions.
 
 // --- Event Attribution Methods ---
+
 // This method remains here as it coordinates between managers.
 func (sm *KernelStateManager) RecordHardPageFaultForThread(tid, pid uint32) {
 	// This logic is now self-contained within the ProcessData object and its modules.
