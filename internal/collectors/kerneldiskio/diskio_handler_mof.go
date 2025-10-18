@@ -145,47 +145,47 @@ func (d *HandlerMof) HandleDiskReadMofRaw(er *etw.EventRecord) error {
 		return err
 	}
 
-    var pData *statemanager.ProcessData
+	var pData *statemanager.ProcessData
 
-    // --- Attribution Logic ---
-    // 1. IssuingThreadId: The most accurate source, linking I/O to the originating thread.
-    // 2. Event Header PID: A reliable fallback for non-deferred I/O.
-    // 3. System Process: The final fallback for deferred I/O or unattributable events.
+	// --- Attribution Logic ---
+	// 1. IssuingThreadId: The most accurate source, linking I/O to the originating thread.
+	// 2. Event Header PID: A reliable fallback for non-deferred I/O.
+	// 3. System Process: The final fallback for deferred I/O or unattributable events.
 
-    // Attempt attribution via the Issuing Thread ID.
-    if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
-        if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
-            pData = p
-        }
-    }
+	// Attempt attribution via the Issuing Thread ID.
+	if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
+		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
+			pData = p
+		}
+	}
 
-    // If TID attribution failed, fall back to the Process ID in the event header.
-    if pData == nil {
-        headerPID := er.EventHeader.ProcessId
-        if headerPID != 0 && headerPID != 0xFFFFFFFF {
-            if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
-                pData = p
-            }
-        }
-    }
+	// If TID attribution failed, fall back to the Process ID in the event header.
+	if pData == nil {
+		headerPID := er.EventHeader.ProcessId
+		if headerPID != 0 && headerPID != 0xFFFFFFFF {
+			if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
+				pData = p
+			}
+		}
+	}
 
-    // If both primary and secondary attribution failed, this is an unattributable event.
-    // We log a warning for unexpected cases and then perform a final fallback to the System process.
-    if pData == nil {
-        headerPID := er.EventHeader.ProcessId
-        // Only log a warning if the failure was unexpected.
-        if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
-            d.log.SampledWarn("disk_read_unattributed").
-                Uint32("issuing_tid", issuingTID).
-                Uint32("header_pid", headerPID).
-                Msg("DiskRead could not be attributed via TID or PID; falling back to System.")
-        }
+	// If both primary and secondary attribution failed, this is an unattributable event.
+	// We log a warning for unexpected cases and then perform a final fallback to the System process.
+	if pData == nil {
+		headerPID := er.EventHeader.ProcessId
+		// Only log a warning if the failure was unexpected.
+		if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
+			d.log.SampledWarn("disk_read_unattributed").
+				Uint32("issuing_tid", issuingTID).
+				Uint32("header_pid", headerPID).
+				Msg("DiskRead could not be attributed via TID or PID; falling back to System.")
+		}
 
-        // Final fallback: Attribute to the System process (PID 4).
-        if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
-            pData = p
-        }
-    }
+		// Final fallback: Attribute to the System process (PID 4).
+		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
+			pData = p
+		}
+	}
 
 	// At this point, pData is guaranteed to be non-nil, as we always fall back to System.
 	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, false)
@@ -248,43 +248,43 @@ func (d *HandlerMof) HandleDiskWriteMofRaw(er *etw.EventRecord) error {
 
 	var pData *statemanager.ProcessData = nil
 
-    // Attempt attribution via the Issuing Thread ID.
-    if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
-        if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
-            pData = p
-        }
-    }
+	// Attempt attribution via the Issuing Thread ID.
+	if issuingTID != 0 && issuingTID != 0xFFFFFFFF {
+		if p, ok := d.stateManager.Threads.GetCurrentProcessDataByThread(issuingTID); ok {
+			pData = p
+		}
+	}
 
-    // If TID attribution failed, fall back to the Process ID in the event header.
-    if pData == nil {
-        headerPID := er.EventHeader.ProcessId
-        if headerPID != 0 && headerPID != 0xFFFFFFFF {
-            if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
-                pData = p
-            }
-        }
-    }
+	// If TID attribution failed, fall back to the Process ID in the event header.
+	if pData == nil {
+		headerPID := er.EventHeader.ProcessId
+		if headerPID != 0 && headerPID != 0xFFFFFFFF {
+			if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(headerPID); ok {
+				pData = p
+			}
+		}
+	}
 
-    // If both primary and secondary attribution failed, this is an unattributable event.
-    // We log a warning for unexpected cases and then perform a final fallback to the System process.
-    if pData == nil {
-        headerPID := er.EventHeader.ProcessId
-        // Only log a warning if the failure was unexpected.
-        if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
-            d.log.SampledWarn("disk_read_unattributed").
-                Uint32("issuing_tid", issuingTID).
-                Uint32("header_pid", headerPID).
-                Msg("DiskRead could not be attributed via TID or PID; falling back to System.")
-        }
+	// If both primary and secondary attribution failed, this is an unattributable event.
+	// We log a warning for unexpected cases and then perform a final fallback to the System process.
+	if pData == nil {
+		headerPID := er.EventHeader.ProcessId
+		// Only log a warning if the failure was unexpected.
+		if issuingTID != 0xFFFFFFFF && headerPID != 0xFFFFFFFF {
+			d.log.SampledWarn("disk_write_unattributed").
+				Uint32("issuing_tid", issuingTID).
+				Uint32("header_pid", headerPID).
+				Msg("DiskWrite could not be attributed via TID or PID; falling back to System.")
+		}
 
-        // Final fallback: Attribute to the System process (PID 4).
-        if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
-            pData = p
-        }
-    }
+		// Final fallback: Attribute to the System process (PID 4).
+		if p, ok := d.stateManager.Processes.GetCurrentProcessDataByPID(statemanager.SystemProcessID); ok {
+			pData = p
+		}
+	}
 
 	// At this point, pData is guaranteed to be non-nil, as we always fall back to System.
-	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, false)
+	d.customCollector.RecordDiskIO(diskNumber, pData, transferSize, true)
 
 	return nil
 }
