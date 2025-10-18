@@ -97,7 +97,7 @@ enabled = true
 ## Build
 
 ```powershell
-go build -v .
+make build
 ```
 
 The binary (`etw_exporter.exe`) can be deployed without external dependencies.
